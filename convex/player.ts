@@ -286,17 +286,18 @@ export const readyCreatives = query({
 /**
  * What the display shows, from the latest live moment on this screen: announce,
  * live auction (with its bid ladder), negotiation, the paid ad playing, or
- * "your ad here". Public: the room sees the company names. The client passes
- * `now` (floored to a few seconds) so the query itself never reads the clock;
- * it falls back to the server clock when omitted.
+ * "your ad here". Public: the room sees the company names. The query never
+ * reads the clock: it returns `spotEndAt` and the client decides when a paid
+ * spot has expired, so the subscription never changes.
  */
 export const screenState = query({
-  args: { billboardId: v.id("billboards"), now: v.optional(v.number()) },
+  args: { billboardId: v.id("billboards") },
   returns: v.object({
     mode: v.union(
       v.literal("announce"),
       v.literal("auction"),
       v.literal("negotiation"),
+      v.literal("settling"),
       v.literal("playing"),
       v.literal("your_ad_here"),
     ),
@@ -308,6 +309,8 @@ export const screenState = query({
     minimumMinor: v.union(v.number(), v.null()),
     why: v.union(v.string(), v.null()),
     closesAt: v.union(v.number(), v.null()),
+    /** End of the latest moment's spot; the client expires "playing" with its own clock. */
+    spotEndAt: v.union(v.number(), v.null()),
     ladder: v.array(
       v.object({ company: v.string(), amountMinor: v.number(), at: v.number(), leading: v.boolean() }),
     ),
@@ -322,7 +325,6 @@ export const screenState = query({
     ),
   }),
   handler: async (ctx, args) => {
-    const now = args.now ?? Date.now();
     const billboard = await ctx.db.get(args.billboardId);
     if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
     const moment = await ctx.db
@@ -340,6 +342,7 @@ export const screenState = query({
       minimumMinor: null,
       why: null,
       closesAt: null,
+      spotEndAt: null,
       ladder: [],
       nowPlaying: null,
     };
@@ -355,6 +358,7 @@ export const screenState = query({
       minimumMinor: moment.floorMinor,
       why: moment.priceWhy ?? null,
       closesAt: null as number | null,
+      spotEndAt: moment.spotEndAt as number | null,
       ladder: [] as { company: string; amountMinor: number; at: number; leading: boolean }[],
       nowPlaying: null as null | { company: string; wonAtMinor: number; txShort: string | null; txUrl: string | null },
     };
@@ -396,14 +400,15 @@ export const screenState = query({
       };
     }
 
-    if ((moment.status === "paid" || moment.status === "playing") && now < moment.spotEndAt) {
+    if (moment.status === "awarded" || moment.status === "paid" || moment.status === "playing") {
       const winner = moment.winnerOfferId ? await ctx.db.get(moment.winnerOfferId) : null;
       const advertiser = winner ? await ctx.db.get(winner.advertiserId) : null;
-      const tx = moment.paymentTx ?? null;
+      const settled = moment.status !== "awarded";
+      // Only a settlement transaction hash counts as proof of payment.
+      const tx = settled ? (moment.paymentTx ?? null) : null;
       return {
-        mode: "playing" as const,
+        mode: settled ? ("playing" as const) : ("settling" as const),
         ...base,
-        minutesLeft: Math.max(0, Math.ceil((moment.spotEndAt - now) / 60_000)),
         nowPlaying: {
           company: advertiser?.displayName ?? "A company",
           wonAtMinor: moment.paidMinor ?? moment.currentMinor ?? moment.priceMinor,

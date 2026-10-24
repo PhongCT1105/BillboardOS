@@ -11,12 +11,21 @@ const MINUTE = 60_000;
 const SEND_EVERY_MS = 10_000;
 const TICK_MS = 5_000;
 
+/** The latest defined value: a re-subscribing query never blanks the screen. */
+function useLast<T>(value: T | undefined): T | undefined {
+  const last = useRef<T | undefined>(undefined);
+  if (value !== undefined) last.current = value;
+  return last.current;
+}
+
 /** Fullscreen billboard. Plays the scheduled creative for the current slot, otherwise a house ad. */
 export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"billboards">; camera?: boolean }) {
   const now = useNow(TICK_MS);
   const atMinute = Math.floor(now / MINUTE) * MINUTE;
-  const screen = useQuery(api.player.screenState, { billboardId, now: Math.floor(now / TICK_MS) * TICK_MS });
-  const state = useQuery(api.player.nowPlaying, { billboardId, atMinute });
+  const screenNow = useQuery(api.player.screenState, { billboardId });
+  const stateNow = useQuery(api.player.nowPlaying, { billboardId, atMinute });
+  const screenLive = useLast(screenNow);
+  const state = useLast(stateNow);
   // Creatives approved for this host: preloaded so a paid flash spot starts instantly (ADR 0006).
   const ready = useQuery(api.player.readyCreatives, { billboardId });
   const recordPlayback = useMutation(api.player.recordPlayback);
@@ -42,11 +51,18 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
     });
   }
 
-  if (state === undefined || screen === undefined) {
+  // First load only: nothing to show yet.
+  if (state === undefined || screenLive === undefined) {
     return <div className="min-h-[100dvh] bg-ink" />;
   }
 
-  const liveMode = screen.mode === "announce" || screen.mode === "auction" || screen.mode === "negotiation";
+  // A paid spot expires on this device's clock; the query never reads time.
+  const screen: Screen =
+    screenLive.mode === "playing" && screenLive.spotEndAt !== null && now >= screenLive.spotEndAt
+      ? ({ ...screenLive, mode: "your_ad_here", nowPlaying: null } as Screen)
+      : screenLive;
+  const liveMode =
+    screen.mode === "announce" || screen.mode === "auction" || screen.mode === "negotiation" || screen.mode === "settling";
 
   return (
     <div className="relative grid min-h-[100dvh] place-items-center overflow-hidden bg-ink">
@@ -115,19 +131,21 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
 type Screen = FunctionReturnType<typeof api.player.screenState>;
 
 function ProofStrip({ playing }: { playing: NonNullable<Screen["nowPlaying"]> }) {
-  const paid = playing.txShort ? `paid on Base · ${playing.txShort}` : "paid on Base";
+  // "Paid" is claimed only with a settlement transaction hash.
+  const paid = playing.txShort ? `paid on Base · ${playing.txShort}` : null;
   return (
     <div className="absolute inset-x-0 bottom-0 flex justify-between gap-4 bg-black/60 px-5 py-2 text-[clamp(0.75rem,1.2vw,1.1rem)] text-fg">
       <span>
         Sponsored · {playing.company} · won at <span className="tabular font-mono">{money(playing.wonAtMinor)}</span>
       </span>
-      {playing.txUrl ? (
-        <a href={playing.txUrl} target="_blank" rel="noreferrer" className="tabular font-mono">
-          {paid}
-        </a>
-      ) : (
-        <span className="tabular font-mono">{paid}</span>
-      )}
+      {paid &&
+        (playing.txUrl ? (
+          <a href={playing.txUrl} target="_blank" rel="noreferrer" className="tabular font-mono">
+            {paid}
+          </a>
+        ) : (
+          <span className="tabular font-mono">{paid}</span>
+        ))}
     </div>
   );
 }
@@ -149,7 +167,25 @@ function LiveScreen({ screen }: { screen: Screen }) {
       const id = setTimeout(() => setBumped(false), 1200);
       return () => clearTimeout(id);
     }
+    setBumped(false);
   }, [screen.closesAt]);
+
+  if (screen.mode === "settling" && screen.nowPlaying) {
+    return (
+      <div className="fade-in flex h-full min-h-[100dvh] w-full flex-col justify-between p-[clamp(1.25rem,3vw,3rem)]">
+        <span className="w-fit rounded-full bg-red-500 px-3 py-1 text-[clamp(0.75rem,1.2vw,1.2rem)] font-bold text-white">SOLD</span>
+        <div>
+          <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">
+            {screen.nowPlaying.company}
+            <br />
+            won at <span className="tabular font-mono">{money(screen.nowPlaying.wonAtMinor)}</span>
+          </p>
+          <p className="mt-5 text-[clamp(1rem,1.8vw,1.8rem)] text-muted">settling payment on Base…</p>
+        </div>
+        <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">{screen.screenName}</span>
+      </div>
+    );
+  }
 
   if (!auction) {
     return (
@@ -228,11 +264,14 @@ function LiveScreen({ screen }: { screen: Screen }) {
 function CameraCounter({ billboardId }: { billboardId: Id<"billboards"> }) {
   const video = useRef<HTMLVideoElement>(null);
   const { isAuthenticated } = useConvexAuth();
-  const { takeWindow } = useArrivalCounter(video, true);
+  const me = useQuery(api.accounts.me, isAuthenticated ? {} : "skip");
+  const isHost = isAuthenticated && me?.accountType === "host";
+  // The camera is requested only when counts can be sent (a signed-in host).
+  const { takeWindow } = useArrivalCounter(video, isHost);
   const addArrivals = useMutation(api.audience.addArrivals);
 
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isHost) return;
     const id = setInterval(async () => {
       const w = takeWindow();
       if (w.arrivals === 0 && w.peakInView === 0) return;
@@ -243,12 +282,12 @@ function CameraCounter({ billboardId }: { billboardId: Id<"billboards"> }) {
       }
     }, SEND_EVERY_MS);
     return () => clearInterval(id);
-  }, [isAuthenticated, billboardId, addArrivals, takeWindow]);
+  }, [isHost, billboardId, addArrivals, takeWindow]);
 
   return (
     <>
       <video ref={video} muted playsInline aria-hidden className="pointer-events-none absolute h-px w-px opacity-0" />
-      {!isAuthenticated && <div className="absolute top-3 right-4 text-xs text-faint">sign in to count</div>}
+      {!isHost && <div className="absolute top-3 right-4 text-xs text-faint">sign in to count</div>}
     </>
   );
 }

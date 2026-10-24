@@ -1054,12 +1054,12 @@ describe("display", () => {
   test("screenState follows the moment: announce → auction (ladder) → playing", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const w = await liveWorld();
-    const idle = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    const idle = await w.t.query(api.player.screenState, { billboardId: w.led });
     expect(idle.mode).toBe("your_ad_here");
     expect(idle.ladder).toHaveLength(0);
 
     const { m, lk, rv } = await w.announce();
-    const announced = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    const announced = await w.t.query(api.player.screenState, { billboardId: w.led });
     expect(announced.mode).toBe("announce");
     expect(announced.ladder).toHaveLength(0);
     expect(announced.openingMinor).toBe(m.priceMinor);
@@ -1077,16 +1077,27 @@ describe("display", () => {
     await w.bid(w.launchKit, lk, O);
     await w.bid(w.rivet, rv, b2);
     await w.flush();
-    const auction = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    const auction = await w.t.query(api.player.screenState, { billboardId: w.led });
     expect(auction.mode).toBe("auction");
     expect(auction.ladder).toHaveLength(2);
     expect(auction.ladder[0]).toMatchObject({ company: "Rivet", amountMinor: b2, leading: true });
     expect(auction.ladder[1]).toMatchObject({ company: "LaunchKit", amountMinor: O, leading: false });
     expect(auction.closesAt).toBe((await w.momentDoc(m._id)).biddingClosesAt);
 
-    await w.advance(open.biddingClosesAt! + 10_000 - Date.now());
+    // A late bid extends the auction: closesAt moves in screenState.
+    const before = auction.closesAt!;
+    vi.setSystemTime(before - 1_000);
+    expect((await w.bid(w.launchKit, lk, minNextLiveBid({ leaderMinor: b2, openingMinor: O }))).status).toBe(200);
+    await w.flush();
+    const extended = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(extended.closesAt).toBe(before + EXTENSION_MS);
+
+    await w.advance(extended.closesAt! + 10_000 - Date.now());
     const awarded = await w.momentDoc(m._id);
     expect(awarded.status).toBe("awarded");
+    const settling = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(settling.mode).toBe("settling");
+    expect(settling.nowPlaying).toMatchObject({ company: "LaunchKit", txShort: null, txUrl: null });
     await w.t.run(async (ctx) => {
       const hold = (await ctx.db.get(awarded.holdId!))!;
       await ctx.db.patch(hold._id, { status: "converted" });
@@ -1099,15 +1110,30 @@ describe("display", () => {
         traceId: hold.traceId,
         holdId: hold._id,
         quoteId: hold.quoteId,
-        campaignId: w.rivet.campaignId,
+        campaignId: w.launchKit.campaignId,
         status: "confirmed",
       });
       await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: `0x${"ab".repeat(32)}`, network: "eip155:84532", amountMinor: hold.amountMinor });
     });
-    const playing = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    const playing = await w.t.query(api.player.screenState, { billboardId: w.led });
     expect(playing.mode).toBe("playing");
-    expect(playing.nowPlaying).toMatchObject({ company: "Rivet", wonAtMinor: b2, txShort: "0xabab…abab" });
+    expect(playing.spotEndAt).toBe(awarded.spotEndAt);
+    expect(playing.nowPlaying).toMatchObject({ company: "LaunchKit", wonAtMinor: awarded.currentMinor, txShort: "0xabab…abab" });
     expect(playing.nowPlaying?.txUrl).toBe(`https://sepolia.basescan.org/tx/0x${"ab".repeat(32)}`);
+  });
+});
+
+describe("display without a transaction", () => {
+  test("a paid moment with no settlement tx shows no proof of payment", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk } = await w.announce();
+    await w.reply(w.launchKit, lk, "accept");
+    await w.advance(2_000);
+    await w.t.run(async (ctx) => ctx.db.patch(m._id, { status: "paid", paidMinor: 40 }));
+    const s = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(s.mode).toBe("playing");
+    expect(s.nowPlaying).toMatchObject({ company: "LaunchKit", wonAtMinor: 40, txShort: null, txUrl: null });
   });
 });
 
