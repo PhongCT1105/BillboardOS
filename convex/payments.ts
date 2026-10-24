@@ -291,12 +291,12 @@ export async function applyVerifiedPayment(
 
   // Market evidence for future quotes (market-history stage).
   const booked = await ctx.db.get(bookingId);
-  const liveMoment = await ctx.db.query("moments").withIndex("by_hold", (q) => q.eq("holdId", hold._id)).first();
   if (booked) {
+    const liveMoment = await ctx.db.query("moments").withIndex("by_hold", (q) => q.eq("holdId", hold._id)).first();
     await recordSaleHistory(
       ctx,
       booked,
-      liveMoment || hold.auctionId ? "auction" : "posted",
+      (liveMoment || hold.auctionId) ? "auction" : "posted",
       now,
       liveMoment ? liveMoment.spotEndAt - liveMoment.spotStartAt : undefined,
     );
