@@ -34,13 +34,13 @@ function Shell({ route }: { route: string }) {
   return (
     <div className="min-h-[100dvh]">
       <header className="border-b border-line">
-        <div className="mx-auto flex h-14 max-w-[1400px] items-center gap-6 px-4 md:px-6">
+        <div className="mx-auto flex h-14 max-w-[1400px] items-center gap-3 px-4 sm:gap-6 md:px-6">
           <a href="#/" className="text-[15px] font-semibold tracking-tight">
             BillboardOS
           </a>
           {signedIn?.accountType === "host" && signedIn.workspaces.length > 0 && <HostNav route={route} />}
           {signedIn?.accountType === "customer" && signedIn.companies.length > 0 && (
-            <nav className="flex items-center gap-1 text-sm">
+            <nav className="flex min-w-0 items-center gap-1 overflow-x-auto text-sm">
               <NavLink href="#/customer" active={route.startsWith("/customer") && route !== "/customer/alerts"}>
                 Dashboard
               </NavLink>
@@ -111,7 +111,7 @@ function HostNav({ route }: { route: string }) {
   const screens = useQuery(api.billboards.mine, {});
   const first = screens?.[0];
   return (
-    <nav className="flex items-center gap-1 text-sm">
+    <nav className="flex min-w-0 items-center gap-1 overflow-x-auto text-sm">
       <NavLink href="#/console" active={route === "/console" || route === "/"}>
         Console
       </NavLink>
@@ -179,7 +179,7 @@ function AccountMenu({ me }: { me: Me }) {
       <button
         type="button"
         onClick={() => void signOut()}
-        className="rounded-md border border-line px-3 py-1.5 text-muted transition-colors hover:text-fg"
+        className="shrink-0 rounded-md border border-line px-3 py-1.5 whitespace-nowrap text-muted transition-colors hover:text-fg"
       >
         Sign out
       </button>
@@ -191,7 +191,7 @@ function NavLink(props: { href: string; active: boolean; children: React.ReactNo
   return (
     <a
       href={props.href}
-      className={`rounded-md px-3 py-1.5 transition-colors ${props.active ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
+      className={`rounded-md px-3 py-1.5 whitespace-nowrap transition-colors ${props.active ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
     >
       {props.children}
     </a>
