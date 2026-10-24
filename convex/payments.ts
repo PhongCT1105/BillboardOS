@@ -34,7 +34,11 @@ export const recordVerifiedResult = v.union(
 );
 export type RecordVerifiedResult = Infer<typeof recordVerifiedResult>;
 
-type ExceptionKind = Infer<typeof financeExceptionKind>;
+/** Exception kinds this module can open (AR kinds live in lib/finance.ts). */
+type ExceptionKind = Extract<
+  Infer<typeof financeExceptionKind>,
+  "payment_after_hold_expired" | "amount_mismatch" | "asset_mismatch" | "duplicate_payment"
+>;
 
 const NEXT_ACTION: Record<ExceptionKind, string> = {
   payment_after_hold_expired:

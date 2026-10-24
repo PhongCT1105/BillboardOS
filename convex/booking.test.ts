@@ -425,7 +425,9 @@ describe("http /internal/payments/verified", () => {
       headers: { Authorization: `Bearer ${SECRET}` },
     });
     expect(holdInfo.status).toBe(200);
-    expect((await holdInfo.json()).status).toBe("converted");
+    const holdJson = await holdInfo.json();
+    expect(holdJson.status).toBe("converted");
+    expect(holdJson.traceId).toBe(hold.traceId);
   });
 
   test("fails closed when the secret is not configured", async () => {

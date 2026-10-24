@@ -3,6 +3,12 @@ import { internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
 import { ensureUpcomingSlots } from "./lib/inventory";
+import { ingestBankLines } from "./bank";
+import {
+  FIXTURE_ADVERTISERS,
+  FIXTURE_BANK_LINES,
+  FIXTURE_INVOICES,
+} from "./fixtures/financeFixture";
 
 const BILLBOARD_NAME = "Moscone West Screen";
 
@@ -98,6 +104,95 @@ export const demo = internalMutation({
       advertiserIds,
       campaignId: campaign._id,
       slotsCreated,
+    };
+  },
+});
+
+/**
+ * Idempotent finance fixture (`npx convex run seed:finance`): three net15
+ * advertisers with Aug-Oct 2026 invoice history and a bank feed with planted
+ * errors. Everything is labeled source "fixture" (simulated). Reconciliation
+ * is NOT run here; press "Run reconciliation" (finance.runReconciliation).
+ * Expected outcomes: convex/fixtures/financeAnswerKey.ts.
+ */
+export const finance = internalMutation({
+  args: {},
+  returns: v.object({
+    advertisersCreated: v.number(),
+    invoicesCreated: v.number(),
+    bankLinesInserted: v.number(),
+    bankLinesDuplicate: v.array(v.string()),
+  }),
+  handler: async (ctx) => {
+    let advertisersCreated = 0;
+    const ids = new Map<string, Id<"advertisers">>();
+    for (const spec of FIXTURE_ADVERTISERS) {
+      const existing = await ctx.db
+        .query("advertisers")
+        .withIndex("by_displayName", (q) => q.eq("displayName", spec.displayName))
+        .first();
+      if (existing) {
+        ids.set(spec.key, existing._id);
+        if (!existing.payerAliases) {
+          await ctx.db.patch(existing._id, { payerAliases: spec.payerAliases });
+        }
+        continue;
+      }
+      ids.set(
+        spec.key,
+        await ctx.db.insert("advertisers", {
+          displayName: spec.displayName,
+          paymentTerms: spec.paymentTerms,
+          payerAliases: spec.payerAliases,
+        }),
+      );
+      advertisersCreated++;
+    }
+
+    let invoicesCreated = 0;
+    for (const inv of FIXTURE_INVOICES) {
+      const existing = await ctx.db
+        .query("invoices")
+        .withIndex("by_number", (q) => q.eq("number", inv.number))
+        .first();
+      if (existing) continue;
+      const paid = inv.paidAt !== undefined;
+      await ctx.db.insert("invoices", {
+        number: inv.number,
+        advertiserId: ids.get(inv.advertiser)!,
+        description: inv.description,
+        amountMinor: inv.amountMinor,
+        currency: "USD",
+        issuedAt: inv.issuedAt,
+        dueAt: inv.dueAt,
+        status: paid ? "paid" : "open",
+        paidMinor: paid ? inv.amountMinor : 0,
+        adjustmentMinor: 0,
+        writtenOffMinor: 0,
+        paidAt: inv.paidAt,
+        source: "fixture",
+      });
+      invoicesCreated++;
+    }
+
+    const bank = await ingestBankLines(ctx, FIXTURE_BANK_LINES, "system:fixture");
+
+    if (advertisersCreated + invoicesCreated + bank.inserted.length > 0) {
+      await recordAudit(ctx, {
+        traceId: "seed:finance",
+        actor: "system",
+        type: "seed.completed",
+        subjectId: "finance-fixture",
+        reason: `Seeded SIMULATED finance fixture: ${advertisersCreated} advertisers, ${invoicesCreated} invoices, ${bank.inserted.length} bank lines`,
+        data: { duplicates: bank.duplicates },
+      });
+    }
+
+    return {
+      advertisersCreated,
+      invoicesCreated,
+      bankLinesInserted: bank.inserted.length,
+      bankLinesDuplicate: bank.duplicates,
     };
   },
 });

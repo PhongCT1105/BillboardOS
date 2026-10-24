@@ -6,6 +6,9 @@ const KIND_LABEL: Record<Doc<"financeExceptions">["kind"], string> = {
   amount_mismatch: "Payment amount does not match the quote",
   asset_mismatch: "Payment asset does not match the quote currency",
   duplicate_payment: "Second payment for an already booked hold",
+  short_payment: "Bank payment is short of the invoice",
+  overpayment: "Bank payment is more than the invoice",
+  unidentified_payment: "Bank payment from an unknown payer",
 };
 
 export function ExceptionList({ exceptions }: { exceptions: Doc<"financeExceptions">[] | undefined }) {

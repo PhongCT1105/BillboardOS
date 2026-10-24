@@ -284,6 +284,8 @@ export const getForPayment = internalQuery({
       expiresAt: v.number(),
       status: holdStatus,
       payable: v.boolean(),
+      /** Correlates server logs with the audit trail (quote -> hold -> payment -> booking). */
+      traceId: v.string(),
     }),
   ),
   handler: async (ctx, args) => {
@@ -299,6 +301,7 @@ export const getForPayment = internalQuery({
       expiresAt: hold.expiresAt,
       status: hold.status,
       payable: hold.status === "active" && Date.now() < hold.expiresAt,
+      traceId: hold.traceId,
     };
   },
 });

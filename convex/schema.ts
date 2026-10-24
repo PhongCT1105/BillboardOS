@@ -88,6 +88,8 @@ export const paymentStatus = v.union(
   v.literal("verified"),
   v.literal("exception"),
   v.literal("reconciled"),
+  /** Refund approved by the controller and recorded (money movement is out of scope). */
+  v.literal("refunded"),
 );
 
 export const financeExceptionKind = v.union(
@@ -95,10 +97,77 @@ export const financeExceptionKind = v.union(
   v.literal("amount_mismatch"),
   v.literal("asset_mismatch"),
   v.literal("duplicate_payment"),
+  // Accounts receivable (bank feed reconciliation)
+  v.literal("short_payment"),
+  v.literal("overpayment"),
+  v.literal("unidentified_payment"),
 );
 
 export const financeExceptionStatus = v.union(
   v.literal("open"),
+  v.literal("resolved"),
+);
+
+export const invoiceStatus = v.union(
+  v.literal("open"),
+  v.literal("partially_paid"),
+  v.literal("paid"),
+  v.literal("disputed"),
+  v.literal("written_off"),
+);
+
+/** "fixture" = simulated/seeded data; the UI must label it as such. */
+export const dataSource = v.union(v.literal("booking"), v.literal("fixture"));
+
+export const bankSource = v.union(v.literal("nessie"), v.literal("fixture"));
+
+export const bankTransactionStatus = v.union(
+  v.literal("unmatched"),
+  v.literal("matched"),
+  v.literal("partially_applied"),
+  v.literal("needs_review"),
+);
+
+export const reconcileRule = v.union(
+  v.literal("invoice_number"),
+  v.literal("bundled_invoices"),
+  v.literal("payer_exact_amount"),
+  v.literal("payer_bundle_exact"),
+  v.literal("payer_open_balance"),
+  v.literal("duplicate_line"),
+  v.literal("unidentified"),
+  v.literal("no_open_invoices"),
+  v.literal("manual_match"),
+);
+
+export const approvalAction = v.union(
+  v.literal("write_off"),
+  v.literal("refund"),
+  v.literal("apply_manual_match"),
+  v.literal("escalate_collection"),
+);
+
+export const approvalSubjectKind = v.union(
+  v.literal("invoice"),
+  v.literal("payment"),
+  v.literal("bank_transaction"),
+);
+
+export const approvalStatus = v.union(
+  v.literal("pending"),
+  v.literal("approved"),
+  v.literal("rejected"),
+);
+
+export const collectionTone = v.union(
+  v.literal("friendly"),
+  v.literal("firm"),
+  v.literal("escalate_to_controller"),
+);
+
+export const collectionTaskStatus = v.union(
+  v.literal("planned"),
+  v.literal("sent"),
   v.literal("resolved"),
 );
 
@@ -125,6 +194,22 @@ export const auditEventType = v.union(
   v.literal("booking.confirmed"),
   v.literal("booking.scheduled"),
   v.literal("finance.exception_opened"),
+  v.literal("finance.exception_resolved"),
+  // accounts receivable / controls
+  v.literal("invoice.issued"),
+  v.literal("invoice.paid"),
+  v.literal("invoice.written_off"),
+  v.literal("bank.ingested"),
+  v.literal("bank.duplicate_ignored"),
+  v.literal("reconciliation.applied"),
+  v.literal("reconciliation.needs_review"),
+  v.literal("approval.requested"),
+  v.literal("approval.approved"),
+  v.literal("approval.rejected"),
+  v.literal("approval.executed"),
+  v.literal("refund.recorded"),
+  v.literal("collection.planned"),
+  v.literal("collection.resolved"),
   // agent / operator events (used by later steps)
   v.literal("brief.parsed"),
   v.literal("inventory.queried"),
@@ -175,6 +260,8 @@ export const slotFields = {
 export const advertiserFields = {
   displayName: v.string(),
   paymentTerms,
+  /** Names this advertiser appears under on bank statements (matching evidence). */
+  payerAliases: v.optional(v.array(v.string())),
 };
 
 export const campaignFields = {
@@ -233,7 +320,10 @@ export const bookingFields = {
   slotIds: v.array(v.id("slots")),
   amountMinor: v.number(),
   currency,
-  paymentId: v.id("payments"),
+  /** Set when paid up front (x402 / manual). */
+  paymentId: v.optional(v.id("payments")),
+  /** Set when booked on terms (net15) against an invoice. */
+  invoiceId: v.optional(v.id("invoices")),
   status: bookingStatus,
   traceId: v.string(),
 };
@@ -256,13 +346,22 @@ export const paymentFields = {
 export const financeExceptionFields = {
   kind: financeExceptionKind,
   status: financeExceptionStatus,
-  holdId: v.id("holds"),
-  billboardId: v.id("billboards"),
+  /** Booking-side exceptions (x402/manual) have a hold + billboard. */
+  holdId: v.optional(v.id("holds")),
+  billboardId: v.optional(v.id("billboards")),
   paymentId: v.optional(v.id("payments")),
+  /** AR-side exceptions (bank feed) point at the bank line / invoice / payer. */
+  bankTransactionId: v.optional(v.id("bankTransactions")),
+  invoiceId: v.optional(v.id("invoices")),
+  advertiserId: v.optional(v.id("advertisers")),
   expectedMinor: v.number(),
   observedMinor: v.number(),
   evidence: v.string(),
   nextAction: v.string(),
+  /** Set only by executing a controller-approved approval. */
+  resolution: v.optional(v.string()),
+  resolvedBy: v.optional(v.string()),
+  resolvedAt: v.optional(v.number()),
 };
 
 export const audienceAggregateFields = {
@@ -284,6 +383,91 @@ export const playbackEventFields = {
   contentType: v.optional(v.string()),
   observedAt: v.number(),
   status: playbackStatus,
+};
+
+export const invoiceFields = {
+  /** Human-readable, unique: "INV-1042". */
+  number: v.string(),
+  advertiserId: v.id("advertisers"),
+  campaignId: v.optional(v.id("campaigns")),
+  bookingId: v.optional(v.id("bookings")),
+  description: v.string(),
+  amountMinor: v.number(),
+  currency,
+  issuedAt: v.number(),
+  dueAt: v.number(),
+  status: invoiceStatus,
+  /** Cash applied from bank lines / payments. */
+  paidMinor: v.number(),
+  /** Sub-materiality differences accepted by policy (never above the threshold). */
+  adjustmentMinor: v.number(),
+  /** Controller-approved write-offs. */
+  writtenOffMinor: v.number(),
+  /** When the balance reached zero by payment (drives late-payment history). */
+  paidAt: v.optional(v.number()),
+  source: dataSource,
+};
+
+export const bankTransactionFields = {
+  source: bankSource,
+  /** Unique per source; re-delivered lines are dropped at ingest. */
+  externalId: v.string(),
+  amountMinor: v.number(),
+  postedAt: v.number(),
+  payerName: v.string(),
+  memo: v.string(),
+  status: bankTransactionStatus,
+  appliedMinor: v.number(),
+  /** Overpayment amount refunded after controller approval. */
+  refundedMinor: v.optional(v.number()),
+  advertiserId: v.optional(v.id("advertisers")),
+  rule: v.optional(reconcileRule),
+  note: v.optional(v.string()),
+  duplicateOf: v.optional(v.id("bankTransactions")),
+};
+
+export const paymentApplicationFields = {
+  invoiceId: v.id("invoices"),
+  bankTransactionId: v.id("bankTransactions"),
+  amountMinor: v.number(),
+  /** "agent:ar" for automatic matches; "<requester> (approved by <approver>)" for manual. */
+  appliedBy: v.string(),
+  rule: reconcileRule,
+  evidence: v.string(),
+};
+
+export const approvalFields = {
+  action: approvalAction,
+  subjectKind: approvalSubjectKind,
+  subjectId: v.string(),
+  /** Target invoice for apply_manual_match. */
+  invoiceId: v.optional(v.id("invoices")),
+  financeExceptionId: v.optional(v.id("financeExceptions")),
+  collectionTaskId: v.optional(v.id("collectionTasks")),
+  amountMinor: v.number(),
+  requestedBy: v.string(),
+  reason: v.string(),
+  status: approvalStatus,
+  decidedBy: v.optional(v.string()),
+  decidedAt: v.optional(v.number()),
+  decisionNote: v.optional(v.string()),
+  executionResult: v.optional(v.string()),
+};
+
+export const collectionTaskFields = {
+  invoiceId: v.id("invoices"),
+  advertiserId: v.id("advertisers"),
+  tone: collectionTone,
+  /** Cites the payer's history (the "Time" dimension). */
+  reason: v.string(),
+  status: collectionTaskStatus,
+  daysOverdue: v.number(),
+  balanceMinor: v.number(),
+  plannedAt: v.number(),
+  approvalId: v.optional(v.id("approvals")),
+  /** Hook for later outreach (CREAO / LLM draft). Nothing is sent in this step. */
+  draft: v.optional(v.string()),
+  resolution: v.optional(v.string()),
 };
 
 export const auditEventFields = {
@@ -333,12 +517,40 @@ export default defineSchema({
 
   financeExceptions: defineTable(financeExceptionFields)
     .index("by_status", ["status"])
-    .index("by_billboard_and_status", ["billboardId", "status"]),
+    .index("by_billboard_and_status", ["billboardId", "status"])
+    .index("by_bankTransaction", ["bankTransactionId"]),
 
   audienceAggregates: defineTable(audienceAggregateFields).index(
     "by_billboard_and_bucketStart",
     ["billboardId", "bucketStart"],
   ),
+
+  invoices: defineTable(invoiceFields)
+    .index("by_number", ["number"])
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_advertiser_and_status", ["advertiserId", "status"])
+    .index("by_status_and_dueAt", ["status", "dueAt"]),
+
+  bankTransactions: defineTable(bankTransactionFields)
+    .index("by_source_and_externalId", ["source", "externalId"])
+    .index("by_status_and_postedAt", ["status", "postedAt"])
+    .index("by_postedAt", ["postedAt"]),
+
+  paymentApplications: defineTable(paymentApplicationFields)
+    .index("by_invoice", ["invoiceId"])
+    .index("by_bankTransaction", ["bankTransactionId"]),
+
+  approvals: defineTable(approvalFields)
+    .index("by_status", ["status"])
+    .index("by_financeException", ["financeExceptionId"])
+    .index("by_subject", ["subjectId"]),
+
+  collectionTasks: defineTable(collectionTaskFields)
+    .index("by_invoice", ["invoiceId"])
+    .index("by_status", ["status"]),
+
+  /** Monotonic counters (invoice numbers). */
+  counters: defineTable({ name: v.string(), value: v.number() }).index("by_name", ["name"]),
 
   playbackEvents: defineTable(playbackEventFields)
     .index("by_slot_and_status", ["slotId", "status"])
