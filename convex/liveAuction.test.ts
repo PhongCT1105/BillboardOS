@@ -6,7 +6,8 @@ import schema from "./schema";
 import * as momentsModule from "./moments";
 import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { ensureUpcomingSlots } from "./lib/inventory";
-import { REOFFER_DELAY_MS } from "./lib/liveAuction";
+import { NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS } from "./lib/liveAuction";
+import { onMomentPaid } from "./lib/momentHooks";
 import { rankReplies, standingCovers } from "./lib/moment";
 import { decryptSecret, encryptSecret } from "./lib/demoCrypto";
 
@@ -151,7 +152,18 @@ async function liveWorld() {
     );
   }
 
-  return { t, host, workspaceId, led, launchKit, rivet, addScreen, addCampaign, camera, flush, momentsOf, offersOf };
+  async function pendingDetects() {
+    const scheduled = await t.run(async (ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    return scheduled.filter((s) => s.name.includes("detectFor") && s.state.kind === "pending");
+  }
+
+  /** Nobody can buy: both companies' keys are revoked. */
+  async function revokeAll() {
+    await launchKit.customer.mutation(api.agentKeys.revoke, { agentKeyId: launchKit.agentKeyId });
+    await rivet.customer.mutation(api.agentKeys.revoke, { agentKeyId: rivet.agentKeyId });
+  }
+
+  return { t, host, workspaceId, led, launchKit, rivet, addScreen, addCampaign, camera, flush, momentsOf, offersOf, pendingDetects, revokeAll };
 }
 
 describe("live auction settings", () => {
@@ -256,7 +268,7 @@ describe("announce", () => {
       }),
     );
     const simulated = await w.t.mutation(internal.moments.detectFor, { billboardId: w.led, trigger: "arrivals" });
-    expect(simulated.momentId).toBeNull();
+    expect(simulated).toEqual({ momentId: null, reason: "no camera reading in the last 15 minutes" });
     expect(await w.momentsOf(w.led)).toHaveLength(0);
 
     // Review Focus 2: a camera reading older than 15 minutes never announces.
@@ -291,11 +303,76 @@ describe("announce", () => {
     expect((await w.t.run(async (ctx) => ctx.db.get(phone)))!.saleQueuedAt).toBe(phoneDoc.saleQueuedAt);
   });
 
+  test("the screen running the moment never queues itself, and a screen leaves the queue when it announces", async () => {
+    const w = await liveWorld();
+    await w.t.run(async (ctx) => ctx.db.patch(w.led, { saleQueuedAt: START - 60_000 }));
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [m] = await w.momentsOf(w.led);
+    expect(m.status).toBe("offering");
+    expect((await w.t.run(async (ctx) => ctx.db.get(w.led)))!.saleQueuedAt).toBeUndefined();
+    // Its own camera keeps reporting during its auction: no queueing, no new moment.
+    vi.advanceTimersByTime(1_000);
+    await w.camera(w.led, 12);
+    await w.flush();
+    expect((await w.t.run(async (ctx) => ctx.db.get(w.led)))!.saleQueuedAt).toBeUndefined();
+    expect(await w.t.mutation(internal.moments.detectFor, { billboardId: w.led, trigger: "arrivals" })).toEqual({
+      momentId: null,
+      reason: "a moment is already in progress on this screen",
+    });
+    expect(await w.momentsOf(w.led)).toHaveLength(1);
+  });
+
+  test("a paid spot: the screen waits while it plays, and the next spot goes on sale 60 s before it ends", async () => {
+    const w = await liveWorld();
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [m] = await w.momentsOf(w.led);
+    // The winner paid: hold converted, booking confirmed, then the payment hook runs.
+    const { holdId, bookingId } = await w.t.run(async (ctx) => {
+      const base = { workspaceId: w.workspaceId, billboardId: w.led, slotIds: [m.slotId], amountMinor: m.priceMinor, currency: "USD" as const, traceId: `moment:${m._id}` };
+      const quoteId = await ctx.db.insert("quotes", {
+        ...base,
+        campaignId: w.launchKit.campaignId,
+        expiresAt: Date.now() + 10 * MINUTE,
+        pricingBasis: ["live spot"],
+        confidence: "medium",
+        policyVersion: "test",
+        status: "accepted",
+      });
+      const holdId = await ctx.db.insert("holds", {
+        ...base,
+        quoteId,
+        expiresAt: Date.now() + 3 * MINUTE,
+        status: "converted",
+        idempotencyKey: `test:${m._id}`,
+        actor: "agent:LaunchKit",
+        agentKeyId: w.launchKit.agentKeyId,
+      });
+      const bookingId = await ctx.db.insert("bookings", { ...base, holdId, quoteId, campaignId: w.launchKit.campaignId, status: "confirmed" });
+      await ctx.db.patch(m._id, { status: "awarded", holdId });
+      await ctx.db.patch(m.slotId, { state: "booked", holdId, bookingId });
+      return { holdId, bookingId };
+    });
+    await w.t.run(async (ctx) => onMomentPaid(ctx, holdId, bookingId, { provider: "x402", externalRef: "0xabc", network: "base-sepolia", amountMinor: m.priceMinor }));
+    const paid = (await w.t.run(async (ctx) => ctx.db.get(m._id)))!;
+    expect(paid.status).toBe("paid");
+    const next = await w.pendingDetects();
+    expect(next).toHaveLength(1);
+    expect(next[0].args[0]).toEqual({ billboardId: w.led, trigger: "next_spot" });
+    expect(next[0].scheduledTime).toBe(m.spotEndAt - NEXT_SPOT_LEAD_MS);
+
+    // While the paid spot has more than 60 s left, the screen doesn't sell.
+    vi.setSystemTime(m.spotStartAt + MINUTE);
+    await w.camera(w.led, 10);
+    expect(await w.t.mutation(internal.moments.detectFor, { billboardId: w.led, trigger: "arrivals" })).toEqual({ momentId: null, reason: "playing" });
+    expect(await w.momentsOf(w.led)).toHaveLength(1);
+  });
+
   test("no takers: re-offer about 15% lower after 20 s, then hold at the minimum", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5); // no jitter
     const w = await liveWorld();
-    await w.launchKit.customer.mutation(api.agentKeys.revoke, { agentKeyId: w.launchKit.agentKeyId });
-    await w.rivet.customer.mutation(api.agentKeys.revoke, { agentKeyId: w.rivet.agentKeyId });
+    await w.revokeAll();
     await w.camera(w.led, 10);
     await w.flush();
     const [first] = await w.momentsOf(w.led);
@@ -321,8 +398,50 @@ describe("announce", () => {
       latest = next;
     }
     expect(latest.priceMinor).toBe(25);
-    const scheduled = await w.t.run(async (ctx) => ctx.db.system.query("_scheduled_functions").collect());
-    expect(scheduled.filter((s) => s.name.includes("detectFor") && s.state.kind === "pending")).toEqual([]);
+    expect(await w.pendingDetects()).toEqual([]);
+  });
+
+  test("arrivals during the re-offer pause: same crowd holds, a real crowd change re-prices at the same round", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5); // no jitter
+    const w = await liveWorld();
+    await w.revokeAll();
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [first] = await w.momentsOf(w.led);
+    expect(first).toMatchObject({ status: "no_takers", reofferRound: 0, peopleInView: 10 });
+    expect(await w.pendingDetects()).toHaveLength(1);
+
+    // More arrivals, same people in view (and a change under max(2, 20%)): nothing new.
+    vi.advanceTimersByTime(3_000);
+    await w.camera(w.led, 10);
+    await w.flush();
+    expect(await w.momentsOf(w.led)).toHaveLength(1);
+    await w.t.run(async (ctx) => {
+      const row = (await ctx.db.query("audienceAggregates").withIndex("by_billboard_and_bucketStart", (q) => q.eq("billboardId", w.led)).first())!;
+      await ctx.db.patch(row._id, { peakInView: 11 });
+    });
+    expect(await w.t.mutation(internal.moments.detectFor, { billboardId: w.led, trigger: "arrivals" })).toEqual({ momentId: null, reason: "holding" });
+    expect(await w.momentsOf(w.led)).toHaveLength(1);
+    expect(await w.pendingDetects()).toHaveLength(1);
+
+    // The crowd jumps 10 -> 20: re-priced at the same round, no second re-offer chain.
+    vi.advanceTimersByTime(2_000);
+    await w.camera(w.led, 20);
+    await w.flush();
+    const repriced = (await w.momentsOf(w.led))[1];
+    expect(repriced).toMatchObject({ status: "no_takers", trigger: "arrivals", reofferRound: 0, peopleInView: 20, slotId: first.slotId });
+    expect(repriced.priceMinor).toBeGreaterThan(first.priceMinor);
+    expect(await w.pendingDetects()).toHaveLength(1);
+
+    // Only the scheduled re-offer steps the round down.
+    vi.advanceTimersByTime(REOFFER_DELAY_MS);
+    await w.t.finishInProgressScheduledFunctions();
+    const all = await w.momentsOf(w.led);
+    expect(all).toHaveLength(3);
+    expect(all[2]).toMatchObject({ trigger: "reoffer", reofferRound: 1, peopleInView: 20 });
+    expect(all[2].priceMinor).toBeLessThan(repriced.priceMinor);
+    expect(await w.pendingDetects()).toHaveLength(1);
+    expect((await w.t.mutation(internal.moments.detectFor, { billboardId: w.led, trigger: "arrivals" })).reason).toBe("holding");
   });
 
   test("simulateCrowd is gone", async () => {

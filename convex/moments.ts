@@ -98,14 +98,21 @@ const RECENT_MOMENTS = 20;
 /** A live auction or negotiation is running, or its winner is paying. */
 const BUSY_STATUSES: ReadonlySet<Doc<"moments">["status"]> = new Set(["offering", "bidding", "negotiating", "awarded"]);
 
-/** One live auction (or negotiation) per host at a time: is one running on any of its screens? */
-export async function workspaceBusy(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<boolean> {
+/** People in view must move by at least this much (or 20%) to re-price a waiting re-offer. */
+const REPRICE_MIN_PEOPLE = 2;
+const REPRICE_MIN_SHARE = 0.2;
+
+/**
+ * One live auction (or negotiation) per host at a time: the screen running
+ * one (auction, negotiation, or a winner paying), or null when the host is free.
+ */
+export async function workspaceBusy(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<Id<"billboards"> | null> {
   const recent = await ctx.db
     .query("moments")
     .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
     .order("desc")
     .take(RECENT_MOMENTS);
-  return recent.some((m) => BUSY_STATUSES.has(m.status));
+  return recent.find((m) => BUSY_STATUSES.has(m.status))?.billboardId ?? null;
 }
 
 /**
@@ -252,8 +259,10 @@ export async function detectCore(
   const settings = momentSettingsOf(workspace);
   if (!settings.enabled) return { momentId: null, reason: "moment detector is off for this host" };
 
-  // One live auction or negotiation per host: this screen waits its turn (first come, first served).
-  if (await workspaceBusy(ctx, workspaceId)) {
+  // One live auction or negotiation per host: other screens wait their turn (first come, first served).
+  const busyScreen = await workspaceBusy(ctx, workspaceId);
+  if (busyScreen === billboard._id) return { momentId: null, reason: "a moment is already in progress on this screen" };
+  if (busyScreen !== null) {
     if (billboard.saleQueuedAt === undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: now });
     return { momentId: null, reason: "queued" };
   }
@@ -275,7 +284,19 @@ export async function detectCore(
   if (!slot) return { momentId: null, reason: `${peopleInView} people in view, but no spot is free in the next 2 hours` };
   const spotStartAt = Math.max(now, slot.startAt);
   const spotMs = slot.endAt - spotStartAt;
-  const reofferRound = last?.status === "no_takers" && last.slotId === slot._id ? (last.reofferRound ?? 0) + 1 : 0;
+  // A spot nobody took is waiting to be re-offered. Only the scheduled re-offer steps the price down;
+  // other triggers re-price it at the same round, and only when the crowd really changed.
+  const waiting = last?.status === "no_takers" && last.slotId === slot._id ? last : null;
+  const stepDown = waiting !== null && trigger === "reoffer";
+  if (waiting && !stepDown) {
+    const before = waiting.peopleInView ?? waiting.crowd;
+    if (Math.abs(peopleInView - before) < Math.max(REPRICE_MIN_PEOPLE, REPRICE_MIN_SHARE * before)) {
+      return { momentId: null, reason: "holding" };
+    }
+  }
+  const reofferRound = waiting ? (waiting.reofferRound ?? 0) + (stepDown ? 1 : 0) : 0;
+  // A re-price leaves the waiting moment's scheduled re-offer in charge of the next step down.
+  const reofferAlreadyScheduled = waiting !== null && !stepDown && waiting.priceMinor > waiting.floorMinor;
   const minimumMinor =
     Number.isSafeInteger(billboard.reserveFloorMinor) && billboard.reserveFloorMinor > 0 ? billboard.reserveFloorMinor : DEFAULT_LIVE_MINIMUM_MINOR;
 
@@ -372,20 +393,27 @@ export async function detectCore(
       reofferRound,
     },
   });
+  // This screen's turn has come: it leaves the queue.
+  if (billboard.saleQueuedAt !== undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: undefined });
   const moment = (await ctx.db.get(momentId))!;
 
   if (!offering) {
     const reoffer = price.openingMinor > price.minimumMinor;
+    const scheduleReoffer = reoffer && !reofferAlreadyScheduled;
     await addMomentStep(
       ctx,
       moment,
       "no_takers",
       "No eligible companies",
       `${skipped.join("; ") || "No ready creatives for this host."} ${
-        reoffer ? `Re-offering in ${REOFFER_DELAY_MS / 1000} s, about 15% lower.` : `Holding at the ${usd(price.minimumMinor)} minimum.`
+        !reoffer
+          ? `Holding at the ${usd(price.minimumMinor)} minimum.`
+          : reofferAlreadyScheduled
+            ? "Re-priced for the new crowd; the re-offer already scheduled steps it down about 15%."
+            : `Re-offering in ${REOFFER_DELAY_MS / 1000} s, about 15% lower.`
       }`,
     );
-    if (reoffer) await ctx.scheduler.runAfter(REOFFER_DELAY_MS, internal.moments.detectFor, { billboardId: billboard._id, trigger: "reoffer" });
+    if (scheduleReoffer) await ctx.scheduler.runAfter(REOFFER_DELAY_MS, internal.moments.detectFor, { billboardId: billboard._id, trigger: "reoffer" });
     await releaseWorkspace(ctx, workspaceId);
     return { momentId, reason: "no eligible customers" };
   }
