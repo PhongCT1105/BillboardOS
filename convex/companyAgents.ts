@@ -11,7 +11,7 @@ import { keyStatus } from "./lib/agentKeys";
 import { MAX_BIDS_PER_COMPANY } from "./lib/liveAuction";
 import { validateTags } from "./lib/match";
 import { validateStanding, type Standing } from "./lib/moment";
-import { requireCampaignAccess, requireCustomer } from "./lib/tenancy";
+import { requireCampaignAccess, requireCustomer, resolveWorkspace } from "./lib/tenancy";
 import { signWebhook } from "./lib/webhook";
 import { explorerTxUrl } from "./lib/x402/money";
 
@@ -299,6 +299,15 @@ export const feed = query({
   },
 });
 
+/** Count one top-up against the company's daily limit and schedule the transfer. */
+async function startTopUp(ctx: MutationCtx, agent: Doc<"companyAgents">): Promise<void> {
+  const day = new Date(Date.now()).toISOString().slice(0, 10);
+  const count = agent.topUpDay === day ? (agent.topUpCount ?? 0) : 0;
+  if (count >= TOP_UPS_PER_DAY) fail("RATE_LIMITED", `At most ${TOP_UPS_PER_DAY} top-ups per day; try again tomorrow (UTC)`);
+  await ctx.db.patch(agent._id, { topUpDay: day, topUpCount: count + 1 });
+  await ctx.scheduler.runAfter(0, internal.companyAgentsNode.topUp, { advertiserId: agent.advertiserId, amountMinor: TOP_UP_MINOR });
+}
+
 /** Ask for test USDC for the agent's wallet: a transfer from the operator wallet, else the faucet. 5 a day. */
 export const requestTopUp = mutation({
   args: {},
@@ -307,11 +316,66 @@ export const requestTopUp = mutation({
     const customer = await requireCustomer(ctx);
     const agent = await agentOf(ctx, customer.advertiserId);
     if (!agent) fail("NOT_FOUND", "Set up your company agent first");
-    const day = new Date(Date.now()).toISOString().slice(0, 10);
-    const count = agent.topUpDay === day ? (agent.topUpCount ?? 0) : 0;
-    if (count >= TOP_UPS_PER_DAY) fail("RATE_LIMITED", `At most ${TOP_UPS_PER_DAY} top-ups per day; try again tomorrow (UTC)`);
-    await ctx.db.patch(agent._id, { topUpDay: day, topUpCount: count + 1 });
-    await ctx.scheduler.runAfter(0, internal.companyAgentsNode.topUp, { advertiserId: agent.advertiserId, amountMinor: TOP_UP_MINOR });
+    await startTopUp(ctx, agent);
+    return null;
+  },
+});
+
+/** Companies with a company agent whose creative this host has approved (the host's demo companies). */
+async function hostCompanies(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<Doc<"companyAgents">[]> {
+  const approvals = await ctx.db
+    .query("creativeApprovals")
+    .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId))
+    .take(100);
+  const seen = new Set<Id<"advertisers">>();
+  const out: Doc<"companyAgents">[] = [];
+  for (const a of approvals) {
+    const campaign = await ctx.db.get(a.campaignId);
+    if (!campaign || seen.has(campaign.advertiserId)) continue;
+    seen.add(campaign.advertiserId);
+    const agent = await agentOf(ctx, campaign.advertiserId);
+    if (agent) out.push(agent);
+  }
+  return out;
+}
+
+/** Host: the companies with agents (creative approved here) and their wallet balances, for the presenter's top-up control. */
+export const hostList = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      advertiserId: v.id("advertisers"),
+      company: v.string(),
+      balanceMinor: v.union(v.number(), v.null()),
+      walletAddress: v.union(v.string(), v.null()),
+      enabled: v.boolean(),
+    }),
+  ),
+  handler: async (ctx) => {
+    const me = await resolveWorkspace(ctx);
+    const out = [];
+    for (const agent of await hostCompanies(ctx, me.workspaceId)) {
+      out.push({
+        advertiserId: agent.advertiserId,
+        company: (await ctx.db.get(agent.advertiserId))?.displayName ?? "Company",
+        balanceMinor: agent.balanceMinor ?? null,
+        walletAddress: agent.walletAddress ?? null,
+        enabled: agent.enabled,
+      });
+    }
+    return out;
+  },
+});
+
+/** Host: top up a company agent's wallet on its behalf (workspace members only; the company's same daily limit). */
+export const hostTopUp = mutation({
+  args: { advertiserId: v.id("advertisers") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx);
+    const agent = (await hostCompanies(ctx, me.workspaceId)).find((a) => a.advertiserId === args.advertiserId);
+    if (!agent) fail("NOT_FOUND", "That company has no agent at this host");
+    await startTopUp(ctx, agent);
     return null;
   },
 });

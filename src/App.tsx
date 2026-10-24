@@ -96,7 +96,7 @@ function CustomerArea({ me, route }: { me: Me; route: string }) {
   if (route === "/book") return <BookPage />;
   const tabMatch = route.match(/^\/customer(?:\/([a-z]+))?$/);
   if (tabMatch || route === "/" || route === "/console") {
-    const tab = (CUSTOMER_TABS.find((t) => t.key === tabMatch?.[1])?.key ?? "alerts") as CustomerTab;
+    const tab = (CUSTOMER_TABS.find((t) => t.key === tabMatch?.[1])?.key ?? "agent") as CustomerTab;
     return <CustomerPage tab={tab} companyName={me.companies[0]?.displayName ?? "Your company"} />;
   }
   return (

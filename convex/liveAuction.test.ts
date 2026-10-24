@@ -1674,3 +1674,51 @@ describe("company agents", () => {
     await w.rivet.customer.mutation(api.companyAgents.requestTopUp, {});
   });
 });
+
+describe("presenter", () => {
+  test("presenter view lists devices, queue and bids", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const phone = await w.addScreen("Phone");
+    const { m, lk, rv } = await w.auction();
+    await w.camera(phone, 7);
+    await w.flush();
+    const O = m.priceMinor;
+    expect((await w.bid(w.launchKit, lk, O)).status).toBe(200);
+    expect((await w.bid(w.rivet, rv, minNextLiveBid({ leaderMinor: O, openingMinor: O }))).status).toBe(200);
+    await w.flush();
+
+    const view = await w.host.query(api.moments.live, { billboardId: w.led, atMinute: Date.now() });
+    expect(view.devices).toHaveLength(2);
+    const led = view.devices.find((d) => d.billboardId === w.led)!;
+    expect(led).toMatchObject({ name: "LED", online: true, peopleInView: 10, mode: "auction" });
+    const ph = view.devices.find((d) => d.billboardId === phone)!;
+    expect(ph).toMatchObject({ name: "Phone", online: true, peopleInView: 7, mode: "your_ad_here" });
+    expect(view.queue).toHaveLength(1);
+    expect(view.queue[0]).toMatchObject({ billboardId: phone, name: "Phone" });
+    const latest = view.latest!;
+    expect(latest.bids.length).toBeGreaterThanOrEqual(2);
+    expect(latest.bids.map((b) => b.company)).toEqual(expect.arrayContaining(["LaunchKit", "Rivet"]));
+    expect(latest.valueMinor).toBeGreaterThan(0);
+    expect(latest.priceWhy).toContain("per 1,000 views");
+    expect(latest.biddingClosesAt).not.toBeNull();
+    expect(latest.extensions).toBe(0);
+    await expect(w.launchKit.customer.query(api.moments.live, { billboardId: w.led, atMinute: Date.now() })).rejects.toThrow(/NOT_WORKSPACE_MEMBER/);
+  });
+
+  test("the host tops up a company's agent wallet, five a day, workspace members only", async () => {
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 150);
+    const list = await w.host.query(api.companyAgents.hostList, {});
+    expect(list.map((c) => c.company).sort()).toEqual(["LaunchKit", "Rivet"]);
+    expect(list.find((c) => c.company === "LaunchKit")).toMatchObject({ advertiserId: w.launchKit.advertiserId, balanceMinor: 150 });
+
+    for (let i = 0; i < 5; i++) await w.host.mutation(api.companyAgents.hostTopUp, { advertiserId: w.launchKit.advertiserId });
+    await expect(w.host.mutation(api.companyAgents.hostTopUp, { advertiserId: w.launchKit.advertiserId })).rejects.toThrow(/RATE_LIMITED/);
+    // The company's own daily limit is the same counter.
+    await expect(w.launchKit.customer.mutation(api.companyAgents.requestTopUp, {})).rejects.toThrow(/RATE_LIMITED/);
+    await w.host.mutation(api.companyAgents.hostTopUp, { advertiserId: w.rivet.advertiserId });
+    await expect(w.launchKit.customer.mutation(api.companyAgents.hostTopUp, { advertiserId: w.launchKit.advertiserId })).rejects.toThrow(/NO_WORKSPACE/);
+    await expect(w.launchKit.customer.query(api.companyAgents.hostList, {})).rejects.toThrow(/NO_WORKSPACE/);
+  });
+});

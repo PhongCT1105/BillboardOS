@@ -18,6 +18,7 @@ import {
   standingCovers,
   validateMomentSettings,
   validateStanding,
+  screenModeOf,
   type Standing,
 } from "./lib/moment";
 import { addMomentStep, creativeReady, releaseWorkspace } from "./lib/momentHooks";
@@ -737,11 +738,19 @@ export const updateSettings = mutation({
 
 // ---------------------------------------------------------------- views
 
+const screenMode = v.union(
+  v.literal("announce"),
+  v.literal("auction"),
+  v.literal("negotiation"),
+  v.literal("settling"),
+  v.literal("playing"),
+  v.literal("your_ad_here"),
+);
+
 const offerView = v.object({
   offerId: v.id("flashOffers"),
   company: v.string(),
   campaignBrief: v.string(),
-  simulatedAgent: v.boolean(),
   priceMinor: v.number(),
   relevantViewers: v.number(),
   matchScore: v.number(),
@@ -751,6 +760,18 @@ const offerView = v.object({
   repliedAt: v.union(v.number(), v.null()),
   deliveryStatus: v.string(),
 });
+
+const bidView = v.object({
+  offerId: v.id("flashOffers"),
+  company: v.string(),
+  kind: v.union(v.literal("bid"), v.literal("buyer_offer"), v.literal("seller_counter")),
+  amountMinor: v.number(),
+  at: v.number(),
+  reasoning: v.union(v.string(), v.null()),
+});
+
+/** Bids shown on the presenter timeline. */
+const MAX_BIDS_SHOWN = 100;
 
 export const momentView = v.object({
   momentId: v.id("moments"),
@@ -772,7 +793,7 @@ export const momentView = v.object({
   priceMinor: v.number(),
   floorMinor: v.number(),
   offerClosesAt: v.number(),
-  winner: v.union(v.object({ company: v.string(), amountMinor: v.number(), simulatedAgent: v.boolean() }), v.null()),
+  winner: v.union(v.object({ company: v.string(), amountMinor: v.number() }), v.null()),
   paidMinor: v.union(v.number(), v.null()),
   paymentMode: v.union(paymentMode, v.null()),
   paymentTx: v.union(v.string(), v.null()),
@@ -782,6 +803,13 @@ export const momentView = v.object({
   durationMs: v.union(v.number(), v.null()),
   steps: v.array(momentStep),
   offers: v.array(offerView),
+  /** What the pricing agent thought the spot is worth, and why (null on moments before live pricing). */
+  valueMinor: v.union(v.number(), v.null()),
+  priceWhy: v.union(v.string(), v.null()),
+  biddingClosesAt: v.union(v.number(), v.null()),
+  extensions: v.number(),
+  /** Every bid, counter and buyer offer, oldest first. */
+  bids: v.array(bidView),
 });
 
 async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof momentView>> {
@@ -792,14 +820,15 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
     .take(MAX_OFFERS + 1);
   const views = [];
   let winner: Infer<typeof momentView>["winner"] = null;
+  const names = new Map<Id<"advertisers">, string>();
   for (const o of offers) {
     const company = (await ctx.db.get(o.advertiserId))?.displayName ?? "Company";
+    names.set(o.advertiserId, company);
     const brief = (await ctx.db.get(o.campaignId))?.brief ?? "";
     views.push({
       offerId: o._id,
       company,
       campaignBrief: brief,
-      simulatedAgent: o.simulatedAgent ?? false,
       priceMinor: o.priceMinor,
       relevantViewers: o.relevantViewers,
       matchScore: o.matchScore,
@@ -809,7 +838,23 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
       repliedAt: o.repliedAt ?? null,
       deliveryStatus: o.delivery.status,
     });
-    if (m.winnerOfferId === o._id) winner = { company, amountMinor: o.replyAmountMinor ?? o.priceMinor, simulatedAgent: o.simulatedAgent ?? false };
+    if (m.winnerOfferId === o._id) winner = { company, amountMinor: o.replyAmountMinor ?? o.priceMinor };
+  }
+  const bidRows = await ctx.db
+    .query("momentBids")
+    .withIndex("by_moment", (q) => q.eq("momentId", m._id))
+    .take(MAX_BIDS_SHOWN);
+  const bids = [];
+  for (const b of bidRows) {
+    if (!names.has(b.advertiserId)) names.set(b.advertiserId, (await ctx.db.get(b.advertiserId))?.displayName ?? "Company");
+    bids.push({
+      offerId: b.offerId,
+      company: names.get(b.advertiserId)!,
+      kind: b.kind,
+      amountMinor: b.amountMinor,
+      at: b.at,
+      reasoning: b.reasoning ?? null,
+    });
   }
   return {
     momentId: m._id,
@@ -841,8 +886,15 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
     durationMs: m.durationMs ?? null,
     steps: m.steps,
     offers: views,
+    valueMinor: m.valueMinor ?? null,
+    priceWhy: m.priceWhy ?? null,
+    biddingClosesAt: m.biddingClosesAt ?? null,
+    extensions: m.extensions ?? 0,
+    bids,
   };
 }
+
+const MAX_DEVICES = 50;
 
 /** Host "Live moment" view: the screen, its live crowd and event, the latest moment, recent history. */
 export const live = query({
@@ -857,6 +909,18 @@ export const live = query({
       liveCrowdSource: v.union(v.string(), v.null()),
       event: v.union(v.object({ name: v.string(), uplift: v.number(), source: v.string() }), v.null()),
     }),
+    devices: v.array(
+      v.object({
+        billboardId: v.id("billboards"),
+        name: v.string(),
+        online: v.boolean(),
+        peopleInView: v.union(v.number(), v.null()),
+        mode: screenMode,
+        /** End of the screen's latest spot; the client expires "playing" with its own clock. */
+        spotEndAt: v.union(v.number(), v.null()),
+      }),
+    ),
+    queue: v.array(v.object({ billboardId: v.id("billboards"), name: v.string(), queuedAt: v.number() })),
     latest: v.union(momentView, v.null()),
     history: v.array(
       v.object({
@@ -897,7 +961,34 @@ export const live = query({
         durationMs: m.durationMs ?? null,
       });
     }
+    const workspaceId = billboard.workspaceId!;
+    const screens = await ctx.db
+      .query("billboards")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+      .take(MAX_DEVICES);
+    const devices = [];
+    for (const s of screens) {
+      const last = await ctx.db
+        .query("moments")
+        .withIndex("by_billboard", (q) => q.eq("billboardId", s._id))
+        .order("desc")
+        .first();
+      devices.push({
+        billboardId: s._id,
+        name: s.name,
+        online: s.deviceStatus === "online",
+        peopleInView: (await latestCameraReading(ctx, s._id, args.atMinute))?.peopleInView ?? null,
+        mode: screenModeOf(last?.status ?? null),
+        spotEndAt: last?.spotEndAt ?? null,
+      });
+    }
+    const queue = screens
+      .filter((s) => s.saleQueuedAt !== undefined)
+      .sort((a, b) => a.saleQueuedAt! - b.saleQueuedAt!)
+      .map((s) => ({ billboardId: s._id, name: s.name, queuedAt: s.saleQueuedAt! }));
     return {
+      devices,
+      queue,
       screen: {
         name: billboard.name,
         locationLabel: billboard.locationLabel,

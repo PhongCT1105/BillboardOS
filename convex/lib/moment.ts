@@ -153,3 +153,24 @@ export function rankReplies(replies: ReplyForRanking[], floorMinor: number): Rep
     .filter((r) => (r.status === "accepted" || r.status === "countered") && r.amountMinor !== null && r.amountMinor >= floorMinor)
     .sort((a, b) => b.amountMinor! - a.amountMinor! || (a.repliedAt ?? 0) - (b.repliedAt ?? 0));
 }
+
+/** What a screen shows for its latest moment's status (the display's mode). */
+export type ScreenMode = "announce" | "auction" | "negotiation" | "settling" | "playing" | "your_ad_here";
+
+export function screenModeOf(status: string | null): ScreenMode {
+  switch (status) {
+    case "offering":
+      return "announce";
+    case "bidding":
+      return "auction";
+    case "negotiating":
+      return "negotiation";
+    case "awarded":
+      return "settling";
+    case "paid":
+    case "playing":
+      return "playing";
+    default:
+      return "your_ad_here";
+  }
+}

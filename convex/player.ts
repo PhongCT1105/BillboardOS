@@ -6,6 +6,7 @@ import { recordAudit } from "./lib/audit";
 import { computeScreenPrice } from "./lib/screenPrice";
 import { creativeReady, onMomentFirstFrame } from "./lib/momentHooks";
 import { explorerTxUrl } from "./lib/x402/money";
+import { screenModeOf } from "./lib/moment";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
@@ -363,7 +364,7 @@ export const screenState = query({
       nowPlaying: null as null | { company: string; wonAtMinor: number; txShort: string | null; txUrl: string | null },
     };
 
-    if (moment.status === "offering") return { mode: "announce" as const, ...base };
+    if (moment.status === "offering") return { mode: screenModeOf("offering"), ...base };
 
     if (moment.status === "bidding" || moment.status === "negotiating") {
       const bids = await ctx.db
@@ -393,7 +394,7 @@ export const screenState = query({
         if (row.leading) seenLead = true;
       }
       return {
-        mode: moment.status === "bidding" ? ("auction" as const) : ("negotiation" as const),
+        mode: screenModeOf(moment.status),
         ...base,
         closesAt: moment.status === "bidding" ? (moment.biddingClosesAt ?? null) : moment.offerClosesAt,
         ladder,
@@ -407,7 +408,7 @@ export const screenState = query({
       // Only a settlement transaction hash counts as proof of payment.
       const tx = settled ? (moment.paymentTx ?? null) : null;
       return {
-        mode: settled ? ("playing" as const) : ("settling" as const),
+        mode: screenModeOf(moment.status),
         ...base,
         nowPlaying: {
           company: advertiser?.displayName ?? "A company",
