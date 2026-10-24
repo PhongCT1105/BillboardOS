@@ -9,6 +9,7 @@ import { ExceptionList } from "./ExceptionList";
 import { CreativeQueue } from "./CreativeQueue";
 import { ActivityFeed } from "./ActivityFeed";
 import { LiveAuctions } from "../auctions/LiveAuctions";
+import { OperatorAccess } from "./OperatorAccess";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
@@ -81,6 +82,7 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
           <SlotBoard slots={slots} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />
+          <OperatorAccess />
         </div>
         <ActivityFeed events={activity} />
       </div>

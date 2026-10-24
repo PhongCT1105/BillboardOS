@@ -48,6 +48,13 @@ export function shortDate(ms: number): string {
   return day.format(ms);
 }
 
+const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "short", day: "numeric" });
+
+/** "Sunday, Oct 25" */
+export function dayLabel(ms: number): string {
+  return weekday.format(ms);
+}
+
 /** "partially_applied" -> "partially applied" */
 export function words(value: string): string {
   return value.replaceAll("_", " ");

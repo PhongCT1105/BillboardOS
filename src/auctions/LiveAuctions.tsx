@@ -1,11 +1,13 @@
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { useNow } from "../lib/hooks";
 import { AuctionCard } from "./AuctionCard";
 
 /** Console panel: live auctions and those that ended in the last 15 minutes. */
 export function LiveAuctions({ billboardId }: { billboardId?: Id<"billboards"> }) {
-  const auctions = useQuery(api.auctions.live, { billboardId });
+  const now = useNow(60_000);
+  const auctions = useQuery(api.auctions.live, { billboardId, now });
   return (
     <section aria-labelledby="auctions-heading">
       <h2 id="auctions-heading" className="text-lg font-semibold">

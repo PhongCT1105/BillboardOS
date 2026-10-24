@@ -120,7 +120,7 @@ describe("auctions", () => {
     r = await anon.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
     expect(r).toMatchObject({ leading: true, leaderLabel: "Bidder B", currentMinor: 7350 });
 
-    const view = (await anon.query(api.auctions.live, {}))[0];
+    const view = (await anon.query(api.auctions.live, { now: Date.now() }))[0];
     expect(view.ladder.map((l) => [l.bidderLabel, l.amountMinor, l.isAuto])).toEqual([
       ["Bidder B", 7350, true],
       ["Bidder A", 7000, true],
@@ -129,7 +129,7 @@ describe("auctions", () => {
       ["Bidder A", 5200, false],
     ]);
     // Private maxima never leave the server through public views.
-    expect(JSON.stringify(await anon.query(api.auctions.live, {}))).not.toContain("9500");
+    expect(JSON.stringify(await anon.query(api.auctions.live, { now: Date.now() }))).not.toContain("9500");
     const mine = await anon.query(api.auctions.myStatus, B);
     expect(mine).toMatchObject({ outcome: "leading", myMaxMinor: 9500 });
     const theirs = await anon.query(api.auctions.myStatus, A);

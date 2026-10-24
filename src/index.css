@@ -11,10 +11,13 @@
   --color-line: #2a2d32;
   --color-fg: #ecebe8;
   --color-muted: #a3a5a8;
-  --color-faint: #6f7276;
+  /* Lightest grey that still passes 4.5:1 on panel for small text. */
+  --color-faint: #8b8e92;
   --color-accent: #ff6b35;
   --color-accent-ink: #1a0d06;
   --color-danger: #f26464;
+  --color-ok: #4cc38a;
+  --color-info: #7fb2ff;
 }
 
 :root {
