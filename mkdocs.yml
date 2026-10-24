@@ -24,6 +24,7 @@ nav:
   - Competition:
       - Guide & rules: competition/index.md
       - Sponsor track catalog: competition/sponsor-tracks.md
+      - Original guide extracted text: competition/official-guide-text.md
       - Track strategy: competition/track-strategy.md
       - Source register: competition/sources.md
   - Product:
