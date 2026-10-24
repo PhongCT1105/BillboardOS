@@ -44,6 +44,29 @@ export function isRehearsalRef(externalRef: string) {
   return externalRef.startsWith("rehearsal:");
 }
 
+/** Screens looked at when picking the next queued one. */
+const MAX_SCREENS_SCANNED = 200;
+
+/**
+ * The host is free again (its live moment ended): the online screen that
+ * queued first leaves the queue and sells now (detect with trigger "queue").
+ * Every path that ends a live moment calls this, so the queue never stalls.
+ */
+export async function releaseWorkspace(ctx: MutationCtx, workspaceId: Id<"workspaces">): Promise<void> {
+  const screens = await ctx.db
+    .query("billboards")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .take(MAX_SCREENS_SCANNED);
+  let next: Doc<"billboards"> | null = null;
+  for (const b of screens) {
+    if (b.deviceStatus !== "online" || b.saleQueuedAt === undefined) continue;
+    if (!next || b.saleQueuedAt < next.saleQueuedAt!) next = b;
+  }
+  if (!next) return;
+  await ctx.db.patch(next._id, { saleQueuedAt: undefined });
+  await ctx.scheduler.runAfter(0, internal.moments.detectFor, { billboardId: next._id, trigger: "queue" });
+}
+
 /** Payment applied and booking confirmed for a moment's hold. */
 export async function onMomentPaid(
   ctx: MutationCtx,
@@ -81,6 +104,8 @@ export async function onMomentPaid(
     billboardId: moment.billboardId,
     trigger: "next_spot",
   });
+  // The host's live moment is over: the next queued screen sells.
+  await releaseWorkspace(ctx, moment.workspaceId);
   const booking = await ctx.db.get(bookingId);
   if (booking?.status === "scheduled") {
     await addMomentStep(ctx, moment, "scheduled", "Scheduled on the screen", "The player picks it up through its live query.", now);

@@ -6,8 +6,8 @@ import schema from "./schema";
 import * as momentsModule from "./moments";
 import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { ensureUpcomingSlots } from "./lib/inventory";
-import { NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS } from "./lib/liveAuction";
-import { onMomentPaid } from "./lib/momentHooks";
+import { BIDDING_MS, EXTENSION_MS, MAX_EXTENSIONS, NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS, minNextLiveBid } from "./lib/liveAuction";
+import { onMomentPaid, releaseWorkspace } from "./lib/momentHooks";
 import { rankReplies, standingCovers } from "./lib/moment";
 import { decryptSecret, encryptSecret } from "./lib/demoCrypto";
 
@@ -163,7 +163,87 @@ async function liveWorld() {
     await rivet.customer.mutation(api.agentKeys.revoke, { agentKeyId: rivet.agentKeyId });
   }
 
-  return { t, host, workspaceId, led, launchKit, rivet, addScreen, addCampaign, camera, flush, momentsOf, offersOf, pendingDetects, revokeAll };
+  type Company = typeof launchKit;
+
+  /** The company's agent calls the agent API with its bearer key. */
+  async function agent(company: Company, path: string, body: Record<string, unknown>) {
+    const res = await t.fetch(`/api/agent/${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${company.key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  }
+  const reply = (company: Company, offerId: Id<"flashOffers">, decision: "accept" | "counter" | "pass", amountMinor?: number) =>
+    agent(company, `offers/${offerId}/reply`, { decision, amountMinor });
+  const bid = (company: Company, offerId: Id<"flashOffers">, amountMinor: number) => agent(company, `offers/${offerId}/bid`, { amountMinor });
+
+  async function momentDoc(momentId: Id<"moments">) {
+    return (await t.run(async (ctx) => ctx.db.get(momentId)))!;
+  }
+
+  async function bidsOf(momentId: Id<"moments">) {
+    return await t.run(async (ctx) =>
+      ctx.db
+        .query("momentBids")
+        .withIndex("by_moment", (q) => q.eq("momentId", momentId))
+        .take(50),
+    );
+  }
+
+  /** The camera sees `people` on a screen; returns its new moment and each company's offer. */
+  async function announce(billboardId: Id<"billboards"> = led, people = 10) {
+    await camera(billboardId, people);
+    await flush();
+    const all = await momentsOf(billboardId);
+    const m = all[all.length - 1];
+    const offers = await offersOf(m._id);
+    const offerOf = (c: Company) => offers.find((o) => o.advertiserId === c.advertiserId)!._id;
+    return { m, lk: offerOf(launchKit), rv: offerOf(rivet) };
+  }
+
+  /** Announce on the LED, both companies join, and the join window passes: bidding is open. */
+  async function auction() {
+    const a = await announce();
+    expect((await reply(launchKit, a.lk, "accept")).status).toBe(200);
+    expect((await reply(rivet, a.rv, "accept")).status).toBe(200);
+    vi.advanceTimersByTime(2_000);
+    await t.finishInProgressScheduledFunctions();
+    await flush();
+    return { ...a, m: await momentDoc(a.m._id) };
+  }
+
+  /** Move the clock and run what came due. */
+  async function advance(ms: number) {
+    vi.advanceTimersByTime(ms);
+    await t.finishInProgressScheduledFunctions();
+    await flush();
+  }
+
+  return {
+    t,
+    host,
+    workspaceId,
+    led,
+    launchKit,
+    rivet,
+    addScreen,
+    addCampaign,
+    camera,
+    flush,
+    momentsOf,
+    offersOf,
+    pendingDetects,
+    revokeAll,
+    agent,
+    reply,
+    bid,
+    momentDoc,
+    bidsOf,
+    announce,
+    auction,
+    advance,
+  };
 }
 
 describe("live auction settings", () => {
@@ -450,5 +530,371 @@ describe("announce", () => {
     // `api` is a proxy that names any function, so check the deployment has none by that name.
     const ref = (api.moments as unknown as Record<string, typeof api.moments.setRehearsalSettlement>).simulateCrowd;
     await expect(w.host.mutation(ref, { billboardId: w.led } as never)).rejects.toThrow();
+  });
+});
+
+describe("live auction lifecycle", () => {
+  test("two companies: auction rises in 5¢ steps, highest bid wins and gets a hold", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5); // no jitter
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.auction();
+    expect(m.status).toBe("bidding");
+    expect(m.extensions).toBe(0);
+    expect(m.hardClosesAt).toBe(m.biddingClosesAt! + MAX_EXTENSIONS * EXTENSION_MS);
+    expect(m.biddingClosesAt! - Date.now()).toBeLessThanOrEqual(BIDDING_MS);
+    expect(m.biddingClosesAt! - Date.now()).toBeGreaterThan(BIDDING_MS - 3_000);
+
+    const O = m.priceMinor;
+    const b2 = minNextLiveBid({ leaderMinor: O, openingMinor: O });
+    const b3 = minNextLiveBid({ leaderMinor: b2, openingMinor: O });
+    expect(b2 - O).toBe(5);
+    expect(b3 - b2).toBe(5);
+    const first = await w.bid(w.launchKit, lk, O);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ offerId: lk, currentMinor: O, youLead: true, bidsLeft: 4 });
+    expect((await w.bid(w.rivet, rv, b2)).status).toBe(200);
+    expect((await w.bid(w.launchKit, lk, b3)).status).toBe(200);
+    await w.flush();
+    const mid = await w.momentDoc(m._id);
+    expect(mid).toMatchObject({ currentMinor: b3, leaderOfferId: lk });
+
+    await w.advance(mid.biddingClosesAt! - Date.now() + 1);
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("awarded");
+    expect(done.winnerOfferId).toBe(lk);
+    const hold = (await w.t.run(async (ctx) => ctx.db.get(done.holdId!)))!;
+    expect(hold.amountMinor).toBe(b3);
+    const bids = await w.bidsOf(m._id);
+    expect(bids).toHaveLength(3);
+    expect(bids.every((b) => b.kind === "bid")).toBe(true);
+    expect(bids.map((b) => b.amountMinor)).toEqual([O, b2, b3]);
+  });
+
+  test("bid rules: too low, sixth bid, leader can't raise, closed", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    // Generous limits so ten rising bids stay within the standing instructions.
+    const generous = { maxPricePerSpotMinor: 5_000, minRelevantViewers: 3, dailyBudgetMinor: 50_000 };
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(w.launchKit.agentKeyId, { standing: generous });
+      await ctx.db.patch(w.rivet.agentKeyId, { standing: generous });
+    });
+    const { m, lk, rv } = await w.auction();
+    const O = m.priceMinor;
+    const low = await w.bid(w.rivet, rv, O - 1);
+    expect(low.status).toBe(409);
+    expect(low.body.error.code).toBe("BID_TOO_LOW");
+
+    expect((await w.bid(w.launchKit, lk, O)).status).toBe(200);
+    const leading = await w.bid(w.launchKit, lk, minNextLiveBid({ leaderMinor: O, openingMinor: O }));
+    expect(leading.status).toBe(409);
+    expect(leading.body.error.code).toBe("ALREADY_LEADING");
+
+    // Review Focus 3: the same amount back to back from two companies: the second is too low.
+    const same = minNextLiveBid({ leaderMinor: O, openingMinor: O });
+    expect((await w.bid(w.rivet, rv, same)).status).toBe(200);
+    const dup = await w.bid(w.launchKit, lk, same);
+    expect(dup.status).toBe(409);
+    expect(dup.body.error.code).toBe("BID_TOO_LOW");
+
+    // Each company has 5 bids: after 5 each, the sixth is refused.
+    let leader = same;
+    for (let i = 0; i < 8; i++) {
+      const [who, offerId] = i % 2 === 0 ? [w.launchKit, lk] : [w.rivet, rv];
+      leader = minNextLiveBid({ leaderMinor: leader, openingMinor: O });
+      const res = await w.bid(who, offerId, leader);
+      expect(res.status).toBe(200);
+    }
+    const offers = await w.offersOf(m._id);
+    expect(offers.map((o) => o.bidCount)).toEqual([5, 5]);
+    const sixth = await w.bid(w.launchKit, lk, minNextLiveBid({ leaderMinor: leader, openingMinor: O }));
+    expect(sixth.status).toBe(409);
+    expect(sixth.body.error.code).toBe("BID_LIMIT");
+
+    // After the close, nobody can bid.
+    const closesAt = (await w.momentDoc(m._id)).biddingClosesAt!;
+    vi.setSystemTime(closesAt);
+    await w.t.run(async (ctx) => ctx.db.patch(lk, { bidCount: 0 }));
+    const closed = await w.bid(w.launchKit, lk, minNextLiveBid({ leaderMinor: leader, openingMinor: O }));
+    expect(closed.status).toBe(409);
+    expect(closed.body.error.code).toBe("BIDDING_CLOSED");
+  });
+
+  test("late bids extend by 3 s, at most twice", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.auction();
+    const O = m.priceMinor;
+    const closes: number[] = [m.biddingClosesAt!];
+    let amount = O;
+    const turns = [
+      [w.launchKit, lk],
+      [w.rivet, rv],
+      [w.launchKit, lk],
+    ] as const;
+    for (const [who, offerId] of turns) {
+      vi.setSystemTime(closes[closes.length - 1] - 1_000);
+      const res = await w.bid(who, offerId, amount);
+      expect(res.status).toBe(200);
+      closes.push((await w.momentDoc(m._id)).biddingClosesAt!);
+      amount = minNextLiveBid({ leaderMinor: amount, openingMinor: O });
+    }
+    expect(closes.slice(1).map((c, i) => c - closes[i])).toEqual([EXTENSION_MS, EXTENSION_MS, 0]);
+    const after = await w.momentDoc(m._id);
+    expect(after.extensions).toBe(2);
+    expect(after.biddingClosesAt).toBe(after.hardClosesAt);
+    // A close that runs before the extended time does nothing; after it, the leader wins.
+    await w.t.mutation(internal.liveAuction.closeBidding, { momentId: m._id });
+    expect((await w.momentDoc(m._id)).status).toBe("bidding");
+    await w.advance(20_000);
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("awarded");
+    expect(done.winnerOfferId).toBe(lk);
+  });
+
+  test("exactly one taker: sold at the opening price without bidding", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.announce();
+    expect((await w.reply(w.launchKit, lk, "accept")).status).toBe(200);
+    expect((await w.reply(w.rivet, rv, "pass")).status).toBe(200);
+    await w.flush();
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("awarded");
+    expect(done.winnerOfferId).toBe(lk);
+    expect(done.biddingClosesAt).toBeUndefined();
+    expect(done.steps.some((s) => s.key === "auction_started")).toBe(false);
+    const hold = (await w.t.run(async (ctx) => ctx.db.get(done.holdId!)))!;
+    expect(hold.amountMinor).toBe(m.priceMinor);
+    expect(await w.bidsOf(m._id)).toHaveLength(0);
+  });
+
+  test("only counters: negotiation never goes below the minimum", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.announce();
+    const O = m.priceMinor;
+    expect((await w.reply(w.launchKit, lk, "counter", 40)).status).toBe(200);
+    expect((await w.reply(w.rivet, rv, "pass")).status).toBe(200);
+    await w.flush();
+    const s1 = O - Math.round((O - 40) * 0.35);
+    let n = await w.momentDoc(m._id);
+    expect(n).toMatchObject({ status: "negotiating", negotiationOfferId: lk, negotiationRound: 1, sellerMinor: s1 });
+    expect((await w.bidsOf(m._id)).map((b) => [b.kind, b.amountMinor])).toEqual([
+      ["buyer_offer", 40],
+      ["seller_counter", s1],
+    ]);
+
+    const second = await w.reply(w.launchKit, lk, "counter", 55);
+    expect(second.status).toBe(200);
+    const s2 = s1 - Math.round((s1 - 55) * 0.25);
+    n = await w.momentDoc(m._id);
+    expect(n).toMatchObject({ status: "negotiating", negotiationRound: 2, sellerMinor: s2 });
+    // Another company can't jump in.
+    expect((await w.reply(w.rivet, rv, "accept")).status).toBe(409);
+
+    expect((await w.reply(w.launchKit, lk, "accept")).status).toBe(200);
+    await w.flush();
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("awarded");
+    expect(done.winnerOfferId).toBe(lk);
+    const hold = (await w.t.run(async (ctx) => ctx.db.get(done.holdId!)))!;
+    expect(hold.amountMinor).toBe(s2);
+  });
+
+  test("final negotiation round below the minimum: no takers, and the host is free", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.announce();
+    expect((await w.reply(w.launchKit, lk, "counter", 40)).status).toBe(200);
+    expect((await w.reply(w.rivet, rv, "pass")).status).toBe(200);
+    for (const amount of [41, 42]) {
+      expect((await w.reply(w.launchKit, lk, "counter", amount)).status).toBe(200);
+      expect((await w.momentDoc(m._id)).status).toBe("negotiating");
+    }
+    expect((await w.reply(w.launchKit, lk, "counter", 20)).status).toBe(200);
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("no_takers");
+    expect(done.negotiationRound).toBe(4);
+    expect(m.priceMinor).toBeGreaterThan(m.floorMinor);
+    expect((await w.pendingDetects()).some((s) => s.args[0].trigger === "reoffer")).toBe(true);
+    // Nothing else runs on this host, so another screen can sell straight away.
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBeNull();
+  });
+
+  test("a negotiation that runs out of time ends with no takers", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.announce();
+    await w.reply(w.launchKit, lk, "counter", 40);
+    await w.reply(w.rivet, rv, "pass");
+    await w.flush();
+    expect((await w.momentDoc(m._id)).status).toBe("negotiating");
+    await w.advance(18_000);
+    expect((await w.momentDoc(m._id)).status).toBe("no_takers");
+    const late = await w.reply(w.launchKit, lk, "accept");
+    expect(late.status).toBe(409);
+  });
+
+  test("winner who doesn't pay in 60 s: runner-up at its last bid", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.auction();
+    const O = m.priceMinor;
+    const b2 = minNextLiveBid({ leaderMinor: O, openingMinor: O });
+    const b3 = minNextLiveBid({ leaderMinor: b2, openingMinor: O });
+    await w.bid(w.launchKit, lk, O);
+    await w.bid(w.rivet, rv, b2);
+    await w.bid(w.launchKit, lk, b3);
+    await w.advance((await w.momentDoc(m._id)).biddingClosesAt! - Date.now() + 1);
+    expect((await w.momentDoc(m._id)).winnerOfferId).toBe(lk);
+
+    await w.advance(60_000);
+    const after = await w.momentDoc(m._id);
+    expect(after.status).toBe("awarded");
+    expect(after.winnerOfferId).toBe(rv);
+    const offers = await w.offersOf(m._id);
+    expect(offers.find((o) => o._id === rv)!.status).toBe("won");
+    expect(offers.find((o) => o._id === lk)!.status).toBe("defaulted");
+    const hold = (await w.t.run(async (ctx) => ctx.db.get(after.holdId!)))!;
+    expect(hold.amountMinor).toBe(b2);
+    const exceptions = await w.t.run(async (ctx) => ctx.db.query("financeExceptions").take(10));
+    expect(exceptions.some((e) => e.kind === "winner_default")).toBe(true);
+
+    // Rivet doesn't pay either: nobody is left, the moment fails and the host is free.
+    await w.advance(60_000);
+    expect((await w.momentDoc(m._id)).status).toBe("failed");
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBeNull();
+  });
+
+  test("the queue drains when the host is free", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const phone = await w.addScreen("Phone");
+    const { m, lk, rv } = await w.announce();
+    await w.camera(phone, 10);
+    await w.flush();
+    expect((await w.t.run(async (ctx) => ctx.db.get(phone)))!.saleQueuedAt).toBeDefined();
+    expect(await w.momentsOf(phone)).toHaveLength(0);
+
+    await w.reply(w.launchKit, lk, "pass");
+    await w.reply(w.rivet, rv, "pass");
+    await w.flush();
+    expect((await w.momentDoc(m._id)).status).toBe("no_takers");
+    const phoneMoments = await w.momentsOf(phone);
+    expect(phoneMoments).toHaveLength(1);
+    expect(phoneMoments[0]).toMatchObject({ trigger: "queue", status: "offering" });
+    expect((await w.t.run(async (ctx) => ctx.db.get(phone)))!.saleQueuedAt).toBeUndefined();
+  });
+
+  test("a re-offer that comes due while another screen sells waits in the queue, then resumes", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const phone = await w.addScreen("Phone");
+    const led = await w.announce();
+    await w.reply(w.launchKit, led.lk, "pass");
+    await w.reply(w.rivet, led.rv, "pass");
+    await w.flush();
+    expect((await w.momentDoc(led.m._id)).status).toBe("no_takers");
+
+    // The phone sells next, and its winner is still paying when the LED's re-offer comes due.
+    const ph = await w.announce(phone);
+    await w.t.run(async (ctx) => ctx.db.patch(ph.m._id, { status: "awarded" }));
+    await w.advance(REOFFER_DELAY_MS);
+    expect(await w.momentsOf(w.led)).toHaveLength(1);
+    expect((await w.t.run(async (ctx) => ctx.db.get(w.led)))!.saleQueuedAt).toBeDefined();
+
+    // The phone's spot is paid: the LED leaves the queue, same crowd, so its re-offer chain restarts.
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(ph.m._id, { status: "paid" });
+      await releaseWorkspace(ctx, w.workspaceId);
+    });
+    await w.flush();
+    expect(await w.momentsOf(w.led)).toHaveLength(1);
+    expect((await w.pendingDetects()).filter((s) => s.args[0].billboardId === w.led && s.args[0].trigger === "reoffer")).toHaveLength(1);
+    await w.advance(REOFFER_DELAY_MS);
+    const all = await w.momentsOf(w.led);
+    expect(all).toHaveLength(2);
+    expect(all[1]).toMatchObject({ trigger: "reoffer", reofferRound: 1, status: "offering" });
+    expect(all[1].priceMinor).toBeLessThan(led.m.priceMinor);
+  });
+
+  test("a paid winner frees the host: the queued screen sells next", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const phone = await w.addScreen("Phone");
+    const { m, lk } = await w.announce();
+    await w.reply(w.launchKit, lk, "accept");
+    await w.advance(2_000); // Rivet never answers: sold to LaunchKit at the opening price
+    const sold = await w.momentDoc(m._id);
+    expect(sold.status).toBe("awarded");
+    await w.camera(phone, 10);
+    await w.flush();
+    expect(await w.momentsOf(phone)).toHaveLength(0);
+    // Settle the hold as the payment route would, then the payment hook runs.
+    await w.t.run(async (ctx) => {
+      const hold = (await ctx.db.get(sold.holdId!))!;
+      await ctx.db.patch(hold._id, { status: "converted" });
+      const bookingId = await ctx.db.insert("bookings", {
+        workspaceId: w.workspaceId,
+        billboardId: w.led,
+        slotIds: hold.slotIds,
+        amountMinor: hold.amountMinor,
+        currency: "USD",
+        traceId: hold.traceId,
+        holdId: hold._id,
+        quoteId: hold.quoteId,
+        campaignId: w.launchKit.campaignId,
+        status: "confirmed",
+      });
+      await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: "0xabc", amountMinor: hold.amountMinor });
+    });
+    await w.flush();
+    const phoneMoments = await w.momentsOf(phone);
+    expect(phoneMoments).toHaveLength(1);
+    expect(phoneMoments[0].trigger).toBe("queue");
+  });
+
+  test("an auction nobody bids in ends with no takers and a re-offer", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m } = await w.auction();
+    await w.advance(m.biddingClosesAt! - Date.now() + 1);
+    expect((await w.momentDoc(m._id)).status).toBe("no_takers");
+    expect((await w.pendingDetects()).some((s) => s.args[0].trigger === "reoffer")).toBe(true);
+  });
+
+  test("webhooks: offer carries the price story; auction events reach every participant", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk } = await w.auction();
+    const offer = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: lk, event: "flash_offer" });
+    expect(offer.ok && offer.payload).toMatchObject({
+      type: "flash_offer",
+      valueMinor: m.valueMinor,
+      openingMinor: m.priceMinor,
+      minimumMinor: m.floorMinor,
+      why: m.priceWhy,
+    });
+    const started = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: lk, event: "auction_started" });
+    expect(started.ok && started.payload).toMatchObject({
+      type: "auction_started",
+      openingMinor: m.priceMinor,
+      minNextMinor: m.priceMinor,
+      closesAt: m.biddingClosesAt,
+      bidsLeft: 5,
+      participants: 2,
+      links: { bid: `/api/agent/offers/${lk}/bid` },
+    });
+    await w.bid(w.launchKit, lk, m.priceMinor);
+    const mine = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: lk, event: "auction_update" });
+    expect(mine.ok && mine.payload).toMatchObject({ type: "auction_update", currentMinor: m.priceMinor, youLead: true, bidsLeft: 4, lastBidBy: "you" });
+    const fetchMock = vi.mocked(fetch);
+    await w.flush();
+    const events = fetchMock.mock.calls
+      .filter(([url]) => String(url).startsWith("https://agent.test/"))
+      .map(([, init]) => (init?.headers as Record<string, string>)["X-BillboardOS-Event"]);
+    expect(events.filter((e) => e === "auction_started")).toHaveLength(2);
+    expect(events.filter((e) => e === "auction_update")).toHaveLength(2);
   });
 });

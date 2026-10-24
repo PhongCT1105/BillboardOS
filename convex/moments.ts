@@ -6,27 +6,23 @@ import { flashOfferStatus, momentStatus, momentStep, momentTrigger, paymentMode,
 import { recordAudit } from "./lib/audit";
 import { authenticateAgent, assertWithinBudget, keyStatus } from "./lib/agentKeys";
 import { loadTrailingAudience } from "./lib/audienceWindow";
-import { PRICING_POLICY_VERSION } from "./lib/pricing";
 import { DEFAULT_CPM_MINOR, DEFAULT_LIVE_MINIMUM_MINOR, MAX_JITTER, livePrice, referenceCpm } from "./lib/livePrice";
-import { NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS } from "./lib/liveAuction";
+import { NEGOTIATION_TIME_CAP_MS, NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS } from "./lib/liveAuction";
 import {
   MAX_OFFERS,
   MIN_REMAINING_MS,
-  PAY_WINDOW_MS,
   audienceMix,
   campaignFit,
   momentSettingsOf,
-  rankReplies,
   replyAllowed,
   standingCovers,
   validateMomentSettings,
   validateStanding,
   type Standing,
 } from "./lib/moment";
-import { addMomentStep, creativeReady } from "./lib/momentHooks";
-import { endHold, takeHold } from "./holds";
+import { addMomentStep, creativeReady, releaseWorkspace } from "./lib/momentHooks";
 import { applyVerifiedPayment } from "./payments";
-import { releaseWorkspace } from "./liveAuction";
+import { closeJoinCore, negotiationReply } from "./liveAuction";
 import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
 
 /**
@@ -38,7 +34,6 @@ import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib
  */
 
 const DAY = 24 * 60 * 60_000;
-const FLASH_HOLD_TTL_MS = 3 * 60_000;
 const MAX_APPROVALS_SCANNED = 100;
 const NEXT_SLOT_LOOKAHEAD_MS = 2 * 60 * 60_000;
 
@@ -241,6 +236,17 @@ async function findTargets(
 type DetectResult = { momentId: Id<"moments"> | null; reason: string };
 
 /**
+ * Nobody bought this moment's spot: announce it again after a pause, about
+ * 15% lower (the next re-offer round), unless it is already at its minimum,
+ * where it holds as a standing offer. Returns whether a re-offer was scheduled.
+ */
+export async function scheduleReoffer(ctx: MutationCtx, moment: Doc<"moments">): Promise<boolean> {
+  if (moment.priceMinor <= moment.floorMinor) return false;
+  await ctx.scheduler.runAfter(REOFFER_DELAY_MS, internal.moments.detectFor, { billboardId: moment.billboardId, trigger: "reoffer" });
+  return true;
+}
+
+/**
  * Announce a spot on this screen from the camera's live count: queue behind
  * the host's running auction, price it live, offer it to every company whose
  * profile, reach target and limits fit, or record no takers and re-offer.
@@ -399,7 +405,6 @@ export async function detectCore(
 
   if (!offering) {
     const reoffer = price.openingMinor > price.minimumMinor;
-    const scheduleReoffer = reoffer && !reofferAlreadyScheduled;
     await addMomentStep(
       ctx,
       moment,
@@ -413,7 +418,7 @@ export async function detectCore(
             : `Re-offering in ${REOFFER_DELAY_MS / 1000} s, about 15% lower.`
       }`,
     );
-    if (scheduleReoffer) await ctx.scheduler.runAfter(REOFFER_DELAY_MS, internal.moments.detectFor, { billboardId: billboard._id, trigger: "reoffer" });
+    if (!reofferAlreadyScheduled) await scheduleReoffer(ctx, moment);
     await releaseWorkspace(ctx, workspaceId);
     return { momentId, reason: "no eligible customers" };
   }
@@ -458,8 +463,28 @@ export async function detectCore(
 export const detectFor = internalMutation({
   args: { billboardId: v.id("billboards"), trigger: momentTrigger },
   returns: v.object({ momentId: v.union(v.id("moments"), v.null()), reason: v.string() }),
-  handler: async (ctx, args) => await detectCore(ctx, args.billboardId, args.trigger),
+  handler: async (ctx, args) => {
+    const result = await detectCore(ctx, args.billboardId, args.trigger);
+    if (args.trigger === "queue" && result.momentId === null && !HOST_BUSY_REASONS.has(result.reason)) {
+      // A re-offer that came due while the host was busy queued instead: restart its chain.
+      if (result.reason === "holding") {
+        const waiting = await ctx.db
+          .query("moments")
+          .withIndex("by_billboard", (q) => q.eq("billboardId", args.billboardId))
+          .order("desc")
+          .first();
+        if (waiting) await scheduleReoffer(ctx, waiting);
+      }
+      // This screen doesn't sell after all: it passes its turn on (the host is still free).
+      const billboard = await ctx.db.get(args.billboardId);
+      if (billboard?.workspaceId) await releaseWorkspace(ctx, billboard.workspaceId);
+    }
+    return result;
+  },
 });
+
+/** detectCore reasons that mean the host is running a moment (so the queue must wait). */
+const HOST_BUSY_REASONS = new Set(["queued", "a moment is already in progress on this screen"]);
 
 /** Called by the audience and event code: cheap pre-check, then detect in its own transaction. */
 export async function scheduleDetect(ctx: MutationCtx, billboardId: Id<"billboards">, trigger: "arrivals" | "event"): Promise<void> {
@@ -472,7 +497,11 @@ export async function scheduleDetect(ctx: MutationCtx, billboardId: Id<"billboar
 
 // ---------------------------------------------------------------- replies (agent API)
 
-/** POST /api/agent/offers/{id}/reply: accept | counter | pass, within the window. */
+/**
+ * POST /api/agent/offers/{id}/reply: accept | counter | pass. While the join
+ * window is open it joins (or passes on) the live auction; during a
+ * negotiation it answers the host's counter-offer.
+ */
 export const reply = internalMutation({
   args: {
     token: v.string(),
@@ -489,6 +518,39 @@ export const reply = internalMutation({
     if (!offer || offer.agentKeyId !== agent.key._id) fail("NOT_FOUND", "Offer not found");
     const moment = (await ctx.db.get(offer.momentId))!;
     const now = Date.now();
+    const reasoning = (args.reasoning ?? "").trim().slice(0, 300) || undefined;
+    const company = agent.advertiser.displayName;
+
+    /** Whole cents, within the key's standing instructions and budget cap. */
+    async function checkAmount(amount: number): Promise<void> {
+      if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 10_000_000) fail("INVALID_INPUT", "amountMinor must be whole cents for a counter");
+      const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayMinor(ctx, agent.key._id, now));
+      if (why) fail("STANDING_INSTRUCTIONS", `Refused: ${why}`);
+      await assertWithinBudget(ctx, agent.key, amount);
+    }
+
+    if (moment.status === "negotiating") {
+      const respondBy = moment.startedAt + NEGOTIATION_TIME_CAP_MS;
+      if (moment.negotiationOfferId !== offer._id || now >= respondBy) fail("OFFER_CLOSED", "The negotiation is not open to you");
+      const sellerMinor = moment.sellerMinor ?? moment.priceMinor;
+      let amount: number | null = null;
+      if (args.decision !== "pass") {
+        amount = args.decision === "accept" ? sellerMinor : (args.amountMinor ?? NaN);
+        await checkAmount(Number.isSafeInteger(amount) ? Math.min(amount, sellerMinor) : amount);
+      }
+      await negotiationReply(ctx, moment, offer, args.decision, amount ?? undefined, reasoning);
+      await recordAudit(ctx, {
+        workspaceId: moment.workspaceId,
+        traceId: `moment:${moment._id}`,
+        actor: agent.actor,
+        type: "moment.reply",
+        subjectId: offer._id,
+        reason: `negotiation ${args.decision}${amount !== null ? ` ${usd(amount)}` : ""}${reasoning ? `: ${reasoning}` : ""}`.slice(0, 1000),
+      });
+      const after = (await ctx.db.get(offer._id))!;
+      return { offerId: offer._id, status: after.status, amountMinor: amount, windowClosesAt: respondBy };
+    }
+
     if (moment.status !== "offering" || now >= moment.offerClosesAt) fail("OFFER_CLOSED", "The response window has closed");
     if (offer.status !== "sent") fail("ALREADY_REPLIED", `Already replied: ${offer.status}`);
     let status: "accepted" | "countered" | "passed";
@@ -498,21 +560,16 @@ export const reply = internalMutation({
     } else {
       amount = args.decision === "accept" ? offer.priceMinor : args.amountMinor ?? NaN;
       if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 10_000_000) fail("INVALID_INPUT", "amountMinor must be whole cents for a counter");
-      if (amount >= offer.priceMinor) amount = offer.priceMinor; // countering at/above the ask is an accept
+      if (amount >= offer.priceMinor) amount = offer.priceMinor; // countering at/above the opening price is an accept
       status = amount === offer.priceMinor ? "accepted" : "countered";
-      // Standing instructions are enforced server-side too, and the key's budget cap applies.
-      const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayMinor(ctx, agent.key._id, now));
-      if (why) fail("STANDING_INSTRUCTIONS", `Refused: ${why}`);
-      await assertWithinBudget(ctx, agent.key, amount);
+      await checkAmount(amount);
     }
-    const reasoning = (args.reasoning ?? "").trim().slice(0, 300) || undefined;
     await ctx.db.patch(offer._id, { status, replyAmountMinor: amount ?? undefined, replyReasoning: reasoning, repliedAt: now });
-    const company = agent.advertiser.displayName;
     await addMomentStep(
       ctx,
       moment,
       `reply:${offer._id}`,
-      `${company}${offer.simulatedAgent ? " (simulated customer agent)" : ""}: ${status === "passed" ? "pass" : status === "accepted" ? `accept ${usd(amount!)}` : `counter ${usd(amount!)}`}`,
+      `${company}: ${status === "passed" ? "pass" : status === "accepted" ? `accept ${usd(amount!)}` : `counter ${usd(amount!)}`}`,
       reasoning,
       now,
     );
@@ -524,179 +581,13 @@ export const reply = internalMutation({
       subjectId: offer._id,
       reason: `${status}${amount !== null ? ` ${usd(amount)}` : ""}${reasoning ? `: ${reasoning}` : ""}`.slice(0, 1000),
     });
-    // Close early once everyone answered.
+    // Close the join window early once everyone answered.
     const offers = await ctx.db
       .query("flashOffers")
       .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
       .take(MAX_OFFERS + 1);
-    if (offers.every((o) => o.status !== "sent")) await closeCore(ctx, moment._id, "everyone replied");
+    if (offers.every((o) => o.status !== "sent")) await closeJoinCore(ctx, moment._id, "everyone replied");
     return { offerId: offer._id, status, amountMinor: amount, windowClosesAt: moment.offerClosesAt };
-  },
-});
-
-// ---------------------------------------------------------------- close, award, default
-
-async function award(ctx: MutationCtx, moment: Doc<"moments">, excludeOfferIds: Set<string>): Promise<boolean> {
-  const offers = await ctx.db
-    .query("flashOffers")
-    .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
-    .take(MAX_OFFERS + 1);
-  const ranked = rankReplies(
-    offers
-      .filter((o) => !excludeOfferIds.has(o._id))
-      .map((o) => ({ offerId: o._id, status: o.status, amountMinor: o.replyAmountMinor ?? null, repliedAt: o.repliedAt ?? null })),
-    moment.floorMinor,
-  );
-  const workspace = (await ctx.db.get(moment.workspaceId))!;
-  for (const r of ranked) {
-    const offer = offers.find((o) => o._id === r.offerId)!;
-    const key = await ctx.db.get(offer.agentKeyId);
-    const amount = r.amountMinor!;
-    if (!key || keyStatus(key, Date.now()) !== "active") continue;
-    try {
-      await assertWithinBudget(ctx, key, amount);
-    } catch {
-      await addMomentStep(ctx, moment, `skip:${offer._id}`, "Skipped a reply over its budget cap");
-      continue;
-    }
-    const now = Date.now();
-    const company = (await ctx.db.get(offer.advertiserId))?.displayName ?? "company";
-    const actor = `agent:${company}/${key.name}`;
-    const traceId = `moment:${moment._id}`;
-    const quoteId = await ctx.db.insert("quotes", {
-      workspaceId: moment.workspaceId,
-      campaignId: offer.campaignId,
-      billboardId: moment.billboardId,
-      slotIds: [moment.slotId],
-      amountMinor: amount,
-      currency: "USD",
-      expiresAt: now + 10 * 60_000,
-      pricingBasis: [
-        `Flash spot from ${workspace.name}'s seller agent: ${Math.round((moment.spotEndAt - moment.spotStartAt) / 60_000)} min, ask ${usd(moment.priceMinor)}, won at ${usd(amount)}`,
-        moment.reasoning,
-      ],
-      confidence: "medium",
-      policyVersion: PRICING_POLICY_VERSION,
-      status: "open",
-      traceId,
-      agentKeyId: key._id,
-      screenAmountMinor: moment.priceMinor,
-    });
-    let hold: Doc<"holds">;
-    try {
-      hold = await takeHold(ctx, (await ctx.db.get(quoteId))!, `moment:${moment._id}:${offer._id}`, actor, {
-        agentKeyId: key._id,
-        inProgressMinRemainingMs: 60_000,
-        ttlMs: FLASH_HOLD_TTL_MS,
-      });
-    } catch (error) {
-      await ctx.db.patch(quoteId, { status: "expired" });
-      const message = error instanceof ConvexError ? String((error.data as { message?: string }).message) : "hold failed";
-      await addMomentStep(ctx, moment, "failed", "Could not hold the spot", message);
-      await ctx.db.patch(moment._id, { status: "failed" });
-      return true; // nothing else can win this slot either
-    }
-    await ctx.db.patch(offer._id, { status: "won", holdId: hold._id });
-    await ctx.db.patch(moment._id, { status: "awarded", winnerOfferId: offer._id, holdId: hold._id });
-    await addMomentStep(ctx, moment, "winner", `${company} wins at ${usd(amount)}${offer.simulatedAgent ? " (simulated customer agent)" : ""}`, `Highest acceptable reply at or above the seller's floor; ties go to the earliest.`, now);
-    await addMomentStep(ctx, moment, "hold", "Spot held for the winner", `Hold ${hold._id}; pay over x402 within ${PAY_WINDOW_MS / 1000} s.`, now);
-    await recordAudit(ctx, {
-      workspaceId: moment.workspaceId,
-      traceId,
-      actor: `seller-agent:${workspace.name}`,
-      type: "moment.awarded",
-      subjectId: moment._id,
-      reason: `Flash spot awarded to ${company} at ${usd(amount)} (ask ${usd(moment.priceMinor)}, floor policy applied); hold ${hold._id}`,
-    });
-    await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId: offer._id, event: "flash_won" });
-    for (const o of offers) {
-      if (o._id === offer._id || o.status === "lost" || o.status === "defaulted") continue;
-      if (o.status === "accepted" || o.status === "countered") {
-        await ctx.db.patch(o._id, { status: "lost" });
-        await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId: o._id, event: "flash_lost" });
-      }
-    }
-    await ctx.scheduler.runAfter(PAY_WINDOW_MS, internal.moments.payDeadline, { momentId: moment._id, offerId: offer._id });
-    return true;
-  }
-  return false;
-}
-
-async function closeCore(ctx: MutationCtx, momentId: Id<"moments">, why: string): Promise<void> {
-  const moment = await ctx.db.get(momentId);
-  if (!moment || moment.status !== "offering") return;
-  const offers = await ctx.db
-    .query("flashOffers")
-    .withIndex("by_moment", (q) => q.eq("momentId", momentId))
-    .take(MAX_OFFERS + 1);
-  for (const o of offers) if (o.status === "sent") await ctx.db.patch(o._id, { status: "expired" });
-  await addMomentStep(ctx, moment, "window_closed", `Window closed: ${why}`);
-  const awarded = await award(ctx, moment, new Set());
-  if (!awarded) {
-    await ctx.db.patch(momentId, { status: "no_takers" });
-    await addMomentStep(ctx, moment, "no_takers", "No acceptable replies", `Nothing at or above the seller's floor of ${usd(moment.floorMinor)}.`);
-    await recordAudit(ctx, {
-      workspaceId: moment.workspaceId,
-      traceId: `moment:${momentId}`,
-      actor: "system",
-      type: "moment.closed",
-      subjectId: momentId,
-      reason: `No acceptable replies (floor ${usd(moment.floorMinor)})`,
-    });
-  }
-}
-
-/** Old end-of-window close; nothing schedules it any more (announce schedules liveAuction.closeJoin). Task 6 removes it. */
-export const close = internalMutation({
-  args: { momentId: v.id("moments") },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    await closeCore(ctx, args.momentId, "time is up");
-    return null;
-  },
-});
-
-/** The winner has 60 s to pay; otherwise release, open a winner_default exception, award the next best. */
-export const payDeadline = internalMutation({
-  args: { momentId: v.id("moments"), offerId: v.id("flashOffers") },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const moment = await ctx.db.get(args.momentId);
-    const offer = await ctx.db.get(args.offerId);
-    if (!moment || !offer || moment.winnerOfferId !== offer._id || moment.status !== "awarded" || !offer.holdId) return null;
-    const hold = await ctx.db.get(offer.holdId);
-    if (!hold || hold.status === "converted") return null; // paid: nothing to do
-    if (hold.status === "active") await endHold(ctx, hold, "released", "system", "Flash spot winner did not pay within 60 s");
-    await ctx.db.patch(offer._id, { status: "defaulted" });
-    await ctx.db.insert("financeExceptions", {
-      workspaceId: moment.workspaceId,
-      kind: "winner_default",
-      status: "open",
-      holdId: hold._id,
-      billboardId: moment.billboardId,
-      advertiserId: offer.advertiserId,
-      expectedMinor: hold.amountMinor,
-      observedMinor: 0,
-      evidence: `Flash spot winner did not pay ${usd(hold.amountMinor)} within ${PAY_WINDOW_MS / 1000} s (moment ${moment._id}).`,
-      nextAction: "Review the buyer agent's standing instructions or wallet; the spot went to the next best offer if any.",
-    });
-    await addMomentStep(ctx, moment, "defaulted", "Winner did not pay in time", "Hold released; winner_default exception opened; offering the next best reply.");
-    await ctx.db.patch(moment._id, { status: "offering", winnerOfferId: undefined, holdId: undefined });
-    const excluded = new Set<string>([offer._id]);
-    const offers = await ctx.db
-      .query("flashOffers")
-      .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
-      .take(MAX_OFFERS + 1);
-    for (const o of offers) if (o.status === "defaulted") excluded.add(o._id);
-    const fresh = (await ctx.db.get(moment._id))!;
-    // Restore "lost" replies so they can be ranked again.
-    for (const o of offers) if (o.status === "lost") await ctx.db.patch(o._id, { status: o.replyAmountMinor === o.priceMinor ? "accepted" : "countered" });
-    const awarded = await award(ctx, fresh, excluded);
-    if (!awarded) {
-      await ctx.db.patch(moment._id, { status: "failed" });
-      await addMomentStep(ctx, moment, "failed", "No one left to award", "The spot went back on sale.");
-    }
-    return null;
   },
 });
 

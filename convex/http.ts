@@ -173,6 +173,9 @@ const STATUS_FOR_CODE: Record<string, number> = {
   NEGOTIATION_CLOSED: 409,
   MAX_ROUNDS: 409,
   OFFER_CLOSED: 409,
+  NOT_BIDDING: 409,
+  BIDDING_CLOSED: 409,
+  BID_LIMIT: 409,
   ALREADY_REPLIED: 409,
   STANDING_INSTRUCTIONS: 409,
 };
@@ -305,6 +308,15 @@ const agentPost = httpAction(async (ctx, request) => {
           amountMinor: num(body.amountMinor),
           reasoning: str(body.reasoning),
         }),
+      );
+    }
+    const offerBid = /^offers\/([^/]+)\/bid$/.exec(path);
+    if (offerBid) {
+      const amountMinor = num(body.amountMinor);
+      if (amountMinor === undefined) return missing(["amountMinor (number)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.liveAuction.placeBid, { token, offerId: offerBid[1], amountMinor, reasoning: str(body.reasoning) }),
       );
     }
     const action = /^auctions\/([^/]+)\/(join|bid|auto-bid)$/.exec(path);
