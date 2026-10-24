@@ -1,7 +1,9 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { campaignStatus, creativeStatus, currency } from "./schema";
+import { audienceTags, campaignStatus, creativeStatus, currency } from "./schema";
+import { validateTags } from "./lib/match";
+import { requestAssessment } from "./valuation";
 import { recordAudit } from "./lib/audit";
 
 const MAX_BRIEF_LENGTH = 4000;
@@ -20,6 +22,7 @@ export const campaignSummary = v.object({
   creativeStatus,
   creativeContentType: v.optional(v.string()),
   creativeReviewReason: v.optional(v.string()),
+  targetAudience: v.optional(audienceTags),
 });
 
 /** Campaigns, newest first (max 50), optionally for one advertiser. */
@@ -64,6 +67,7 @@ function toSummary(c: Doc<"campaigns">, advertiserName: string) {
     creativeStatus: c.creativeStatus ?? ("none" as const),
     creativeContentType: c.creativeContentType,
     creativeReviewReason: c.creativeReviewReason,
+    targetAudience: c.targetAudience,
   };
 }
 
@@ -74,6 +78,8 @@ export const create = mutation({
     brief: v.string(),
     targetCity: v.optional(v.string()),
     budgetMinor: v.number(),
+    /** Who the campaign wants to reach, e.g. { software: 0.7, startups: 0.3 }. */
+    targetAudience: v.optional(audienceTags),
   },
   returns: v.id("campaigns"),
   handler: async (ctx, args) => {
@@ -98,6 +104,10 @@ export const create = mutation({
         message: `budgetMinor must be an integer in (0, ${MAX_BUDGET_MINOR}] (US cents)`,
       });
     }
+    if (args.targetAudience) {
+      const problem = validateTags(args.targetAudience);
+      if (problem) throw new ConvexError({ code: "INVALID_INPUT", message: problem });
+    }
     const advertiser = await ctx.db.get(args.advertiserId);
     if (!advertiser) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Advertiser not found" });
@@ -111,7 +121,10 @@ export const create = mutation({
       currency: "USD",
       status: "active",
       creativeStatus: "none",
+      targetAudience: args.targetAudience,
     });
+    // Company analyst: assess (or refresh) this advertiser in the background.
+    await requestAssessment(ctx, args.advertiserId, "campaign created");
     await recordAudit(ctx, {
       traceId: `campaign:${campaignId}`,
       actor: "advertiser",

@@ -6,6 +6,7 @@ import { ensureUpcomingSlots } from "./lib/inventory";
 import { ingestBankLines } from "./bank";
 import { endHold } from "./holds";
 import { settleInvoice } from "./lib/finance";
+import { upsertEvent } from "./events";
 import {
   FIXTURE_ADVERTISERS,
   FIXTURE_BANK_LINES,
@@ -13,6 +14,8 @@ import {
 } from "./fixtures/financeFixture";
 
 const BILLBOARD_NAME = "Moscone West Screen";
+/** Moscone West: mostly software people, some startups, some tourists. */
+const MOSCONE_AUDIENCE = { software: 0.6, startups: 0.2, tourists: 0.2 };
 
 /**
  * Idempotent demo seed (`npm run seed`). Creates, only if missing:
@@ -48,6 +51,10 @@ export const demo = internalMutation({
         deviceStatus: "online",
       });
       billboard = (await ctx.db.get(billboardId))!;
+    }
+    // Who is likely in front of the screen (matching only; never changes price).
+    if (!billboard.audienceTags) {
+      await ctx.db.patch(billboard._id, { audienceTags: MOSCONE_AUDIENCE });
     }
     // Rolling 12h of 15-minute slots (same helper the cron uses).
     slotsCreated = await ensureUpcomingSlots(ctx, billboard._id, Date.now());
@@ -430,5 +437,108 @@ export const addScenarioBankLine = internalMutation({
       "operator:scenario",
     );
     return { bankTransactionId: r.inserted[0], externalId };
+  },
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Pricing world for ADR 0003 demos (`npx convex run seed:pricingDemo`),
+ * idempotent. Run after seed:demo.
+ *  - A conference at Moscone today 08:00-18:00 local (event uplift x1.3, SEEDED).
+ *  - Target audiences for the demo campaigns (matching and agent bids).
+ *  - "Nvidia" (big brand, prepay) with a "Nvidia GTC promo" campaign, for the
+ *    two-agent auction demo against Golden Gate Coffee.
+ */
+export const pricingDemo = internalMutation({
+  args: {},
+  returns: v.object({
+    eventId: v.id("events"),
+    eventCreated: v.boolean(),
+    nvidiaAdvertiserId: v.id("advertisers"),
+    nvidiaCampaignId: v.id("campaigns"),
+    goldenGateCampaignId: v.union(v.id("campaigns"), v.null()),
+  }),
+  handler: async (ctx) => {
+    const billboard = await ctx.db
+      .query("billboards")
+      .withIndex("by_name", (q) => q.eq("name", BILLBOARD_NAME))
+      .first();
+    if (!billboard) {
+      throw new ConvexError({ code: "NOT_SEEDED", message: "Run seed:demo first" });
+    }
+    if (!billboard.audienceTags) await ctx.db.patch(billboard._id, { audienceTags: MOSCONE_AUDIENCE });
+
+    // Today's local midnight for the screen's fixed offset.
+    const now = Date.now();
+    const offsetMs = billboard.utcOffsetMinutes * 60_000;
+    const localMidnight = Math.floor((now + offsetMs) / DAY_MS) * DAY_MS - offsetMs;
+    const event = await upsertEvent(
+      ctx,
+      {
+        billboardId: billboard._id,
+        name: "DevWorld Summit (Moscone West)",
+        startsAt: localMidnight + 8 * HOUR_MS,
+        endsAt: localMidnight + 18 * HOUR_MS,
+        expectedAttendance: 25_000,
+        audienceTags: { software: 0.7, startups: 0.2, press: 0.1 },
+        upliftMultiplier: 1.3,
+        confidence: 0.8,
+        source: "seed",
+        explanation: "SEEDED demo event: a large developer conference next door draws software and startup crowds.",
+      },
+      "system:seed",
+    );
+
+    let nvidia = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", "Nvidia"))
+      .first();
+    const nvidiaAdvertiserId = nvidia?._id ?? (await ctx.db.insert("advertisers", { displayName: "Nvidia", paymentTerms: "prepay" }));
+    nvidia = (await ctx.db.get(nvidiaAdvertiserId))!;
+    let nvidiaCampaign = await ctx.db
+      .query("campaigns")
+      .withIndex("by_advertiser", (q) => q.eq("advertiserId", nvidiaAdvertiserId))
+      .first();
+    if (!nvidiaCampaign) {
+      const id = await ctx.db.insert("campaigns", {
+        advertiserId: nvidiaAdvertiserId,
+        brief: "Nvidia GTC promo: reach developers and AI builders near Moscone during conference week.",
+        targetCity: "San Francisco",
+        budgetMinor: 500_000, // $5,000
+        currency: "USD",
+        status: "active",
+        creativeStatus: "none",
+        targetAudience: { software: 0.6, ai: 0.4 },
+      });
+      nvidiaCampaign = (await ctx.db.get(id))!;
+    }
+
+    const goldenGate = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", "Golden Gate Coffee Co."))
+      .first();
+    let goldenGateCampaignId: Id<"campaigns"> | null = null;
+    if (goldenGate) {
+      const c = await ctx.db
+        .query("campaigns")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", goldenGate._id))
+        .first();
+      if (c) {
+        goldenGateCampaignId = c._id;
+        if (!c.targetAudience) {
+          await ctx.db.patch(c._id, { targetAudience: { tourists: 0.4, software: 0.3, startups: 0.3 } });
+        }
+      }
+    }
+
+    return {
+      eventId: event.eventId,
+      eventCreated: event.created,
+      nvidiaAdvertiserId,
+      nvidiaCampaignId: nvidiaCampaign._id,
+      goldenGateCampaignId,
+    };
   },
 });

@@ -172,6 +172,49 @@ export const collectionTaskStatus = v.union(
   v.literal("resolved"),
 );
 
+export const brandTier = v.union(
+  v.literal("enterprise"),
+  v.literal("established"),
+  v.literal("growth"),
+  v.literal("startup"),
+  v.literal("unknown"),
+);
+
+export const valuationMethod = v.union(v.literal("claude"), v.literal("heuristic"), v.literal("override"));
+
+export const stageKey = v.union(
+  v.literal("crowd"),
+  v.literal("time"),
+  v.literal("event"),
+  v.literal("scarcity"),
+  v.literal("market"),
+);
+
+/** A pricing stage as applied to one slot (see lib/pricing.ts). */
+export const appliedStage = v.object({
+  key: stageKey,
+  multiplier: v.number(),
+  confidence: v.number(),
+  /** 1 + (multiplier - 1) x confidence, as used by the combiner. */
+  effective: v.number(),
+  explanation: v.string(),
+});
+
+/** Per-slot screen-price breakdown stored on a quote. */
+export const slotPriceBreakdown = v.object({
+  slotId: v.id("slots"),
+  slotStartAt: v.number(),
+  computedMinor: v.number(),
+  /** Screen price after floor/ceiling (before any company adjustment). */
+  screenMinor: v.number(),
+  floorApplied: v.boolean(),
+  ceilingApplied: v.boolean(),
+  stages: v.array(appliedStage),
+});
+
+/** Audience mix weights, e.g. { software: 0.6, startups: 0.2, tourists: 0.2 }. */
+export const audienceTags = v.record(v.string(), v.number());
+
 export const audienceSource = v.union(
   v.literal("camera"),
   v.literal("simulated"),
@@ -185,6 +228,11 @@ export const auditEventType = v.union(
   v.literal("demo.reset"),
   v.literal("inventory.generated"),
   v.literal("billboard.baseline_changed"),
+  v.literal("billboard.audience_tags_changed"),
+  v.literal("event.recorded"),
+  v.literal("valuation.assessed"),
+  v.literal("valuation.overridden"),
+  v.literal("valuation.failed"),
   v.literal("campaign.created"),
   v.literal("quote.created"),
   v.literal("quote.expired"),
@@ -253,6 +301,10 @@ export const billboardFields = {
   deviceStatus,
   /** "Normal traffic" in people per 15 min for demand pricing; missing = 120. */
   audienceBaselinePerBucket: v.optional(v.number()),
+  /** Max price per slot; missing = 4x base rate. */
+  priceCeilingMinor: v.optional(v.number()),
+  /** Who is likely in front of this screen (shares, ~sum 1). Used for matching, not price. */
+  audienceTags: v.optional(audienceTags),
 };
 
 export const slotFields = {
@@ -267,6 +319,8 @@ export const slotFields = {
 export const advertiserFields = {
   displayName: v.string(),
   paymentTerms,
+  /** Last time a company valuation was scheduled (debounces refreshes). */
+  valuationRequestedAt: v.optional(v.number()),
   /** Names this advertiser appears under on bank statements (matching evidence). */
   payerAliases: v.optional(v.array(v.string())),
 };
@@ -285,6 +339,8 @@ export const campaignFields = {
   creativeContentType: v.optional(v.string()),
   creativeSubmittedAt: v.optional(v.number()),
   creativeReviewReason: v.optional(v.string()),
+  /** Who the campaign wants to reach (weights). Used for screen matching and bidding. */
+  targetAudience: v.optional(audienceTags),
 };
 
 export const quoteFields = {
@@ -303,6 +359,14 @@ export const quoteFields = {
   status: quoteStatus,
   /** Correlates every audit event in this quote -> hold -> payment -> booking chain. */
   traceId: v.string(),
+  /** Structured screen-price stages per slot (buyer-visible explanation). */
+  priceBreakdown: v.optional(v.array(slotPriceBreakdown)),
+  /** Sum of screen prices before company valuation (operator-only). */
+  screenAmountMinor: v.optional(v.number()),
+  /** Company valuation applied to this posted quote (operator-only, never shown to the buyer). */
+  companyMultiplier: v.optional(v.number()),
+  companyAssessmentId: v.optional(v.id("companyAssessments")),
+  companyMethod: v.optional(v.union(valuationMethod, v.literal("inline_heuristic"))),
 };
 
 export const holdFields = {
@@ -479,6 +543,60 @@ export const collectionTaskFields = {
   resolution: v.optional(v.string()),
 };
 
+export const eventSource = v.union(v.literal("seed"), v.literal("operator"), v.literal("claude"));
+
+export const eventFields = {
+  billboardId: v.id("billboards"),
+  name: v.string(),
+  startsAt: v.number(),
+  endsAt: v.number(),
+  expectedAttendance: v.optional(v.number()),
+  audienceTags: v.optional(audienceTags),
+  /** Price uplift while the event is on (clamped to x1.0..x1.5 by the event stage). */
+  upliftMultiplier: v.number(),
+  /** 0..1 */
+  confidence: v.number(),
+  source: eventSource,
+  explanation: v.string(),
+};
+
+export const saleKind = v.union(v.literal("posted"), v.literal("terms"), v.literal("auction"));
+
+/** One row per sold slot: the market-history stage's evidence. */
+export const priceHistoryFields = {
+  billboardId: v.id("billboards"),
+  slotId: v.id("slots"),
+  slotStartAt: v.number(),
+  /** Local hour band, e.g. "evening" (see lib/pricing.ts hourBand). */
+  hourBand: v.string(),
+  unitPriceMinor: v.number(),
+  /** unitPrice / (base x hour factor): how the sale compared to a plain time-adjusted base. */
+  normalizedRatio: v.number(),
+  kind: saleKind,
+  recordedAt: v.number(),
+};
+
+/** Company willingness-to-pay assessment (ADR 0003 section 2). Operator-only data. */
+export const companyAssessmentFields = {
+  advertiserId: v.id("advertisers"),
+  /** Clamped to x0.75..x1.5 in code before storage. */
+  multiplier: v.number(),
+  brandTier,
+  reasoning: v.string(),
+  /** URLs the analyst cited (web search results). */
+  sources: v.array(v.string()),
+  /** 0..1 */
+  confidence: v.number(),
+  method: valuationMethod,
+  model: v.optional(v.string()),
+  /** Compact, company-level summary of what the analyst saw (no personal data). */
+  inputsSummary: v.string(),
+  assessedAt: v.number(),
+  expiresAt: v.number(),
+  /** Who set an override ("operator:<email>"). */
+  overriddenBy: v.optional(v.string()),
+};
+
 export const auditEventFields = {
   traceId: v.string(),
   /** e.g. "system", "operator", "agent:pricing", "buyer:<name>" */
@@ -522,7 +640,20 @@ export default defineSchema({
     .index("by_advertiser", ["advertiserId"])
     .index("by_creativeStatus", ["creativeStatus"]),
 
-  quotes: defineTable(quoteFields).index("by_campaign", ["campaignId"]),
+  quotes: defineTable(quoteFields)
+    .index("by_campaign", ["campaignId"])
+    .index("by_billboard_and_expiresAt", ["billboardId", "expiresAt"]),
+
+  companyAssessments: defineTable(companyAssessmentFields).index("by_advertiser_and_assessedAt", [
+    "advertiserId",
+    "assessedAt",
+  ]),
+
+  events: defineTable(eventFields).index("by_billboard_and_startsAt", ["billboardId", "startsAt"]),
+
+  priceHistory: defineTable(priceHistoryFields)
+    .index("by_billboard_and_band_and_recordedAt", ["billboardId", "hourBand", "recordedAt"])
+    .index("by_recordedAt", ["recordedAt"]),
 
   holds: defineTable(holdFields)
     .index("by_idempotencyKey", ["idempotencyKey"])

@@ -68,8 +68,9 @@ describe("quotes", () => {
     const { t, seed, slots } = await setup();
     const baseline = await t.mutation(api.quotes.create, {
       campaignId: seed.campaignId,
-      slotIds: [slots[0]._id],
+      slotIds: [slots[4]._id],
     });
+    // slots[4] airs 10:15 local, more than an hour out: no last-minute discount.
     expect(baseline.amountMinor).toBe(4000);
     expect(baseline.confidence).toBe("low");
     expect(baseline.expiresAt - START).toBeGreaterThanOrEqual(QUOTE_TTL_MS);
@@ -86,7 +87,7 @@ describe("quotes", () => {
     vi.setSystemTime(START + 2 * 60 * 1000);
     const busy = await t.mutation(api.quotes.create, {
       campaignId: seed.campaignId,
-      slotIds: [slots[0]._id],
+      slotIds: [slots[4]._id],
     });
     expect(busy.amountMinor).toBe(6000);
     expect(busy.confidence).toBe("high");
@@ -242,7 +243,7 @@ describe("payments", () => {
     const ctx = await setup();
     const q = await ctx.t.mutation(api.quotes.create, {
       campaignId: ctx.seed.campaignId,
-      slotIds: [ctx.slots[0]._id, ctx.slots[1]._id],
+      slotIds: [ctx.slots[4]._id, ctx.slots[5]._id],
     });
     const hold = await ctx.t.mutation(api.holds.create, {
       quoteId: q.quoteId,
@@ -276,8 +277,8 @@ describe("payments", () => {
       quote: await ctx.db.get(q.quoteId),
       booking: await ctx.db.get(result.bookingId),
       payment: await ctx.db.get(result.paymentId),
-      s0: await ctx.db.get(slots[0]._id),
-      s1: await ctx.db.get(slots[1]._id),
+      s0: await ctx.db.get(slots[4]._id),
+      s1: await ctx.db.get(slots[5]._id),
     }));
     expect(state.hold?.status).toBe("converted");
     expect(state.quote?.status).toBe("accepted");
@@ -291,7 +292,7 @@ describe("payments", () => {
 
     // Later scheduled expiries are no-ops on a converted hold.
     await t.finishAllScheduledFunctions(vi.runAllTimers);
-    const s0 = await t.run(async (ctx) => await ctx.db.get(slots[0]._id));
+    const s0 = await t.run(async (ctx) => await ctx.db.get(slots[4]._id));
     expect(s0?.state).toBe("booked");
 
     const summary = await t.query(api.dashboard.summary, {});
@@ -337,7 +338,7 @@ describe("payments", () => {
     expect(open).toHaveLength(1);
     expect(open[0].expectedMinor).toBe(8000);
     expect(open[0].observedMinor).toBe(8000);
-    const s0 = await t.run(async (ctx) => await ctx.db.get(slots[0]._id));
+    const s0 = await t.run(async (ctx) => await ctx.db.get(slots[4]._id));
     expect(s0?.state).toBe("available");
 
     // Replay of the late payment returns the same exception.
@@ -366,7 +367,7 @@ describe("payments", () => {
     const ex = await t.run(async (ctx) => await ctx.db.get(result.financeExceptionId));
     expect(ex?.expectedMinor).toBe(8000);
     expect(ex?.observedMinor).toBe(7999);
-    const s0 = await t.run(async (ctx) => await ctx.db.get(slots[0]._id));
+    const s0 = await t.run(async (ctx) => await ctx.db.get(slots[4]._id));
     expect(s0?.state).toBe("held");
   });
 

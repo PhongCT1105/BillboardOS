@@ -3,8 +3,7 @@ import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
-import { priceQuote } from "./lib/pricing";
-import { loadTrailingAudience } from "./lib/audienceWindow";
+import { computeScreenPrice } from "./lib/screenPrice";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
@@ -122,21 +121,11 @@ export const nowPlaying = query({
       )
       .take(HOUSE_AD_MAX_SLOTS);
     const available = upcoming.filter((s) => s.state === "available");
-    const { sample: audience } = await loadTrailingAudience(ctx.db, billboard._id, at);
     let fromPriceMinor: number | null = null;
-    for (const slot of available) {
-      const price = priceQuote({
-        baseRateMinor: billboard.baseRateMinor,
-        reserveFloorMinor: billboard.reserveFloorMinor,
-        utcOffsetMinutes: billboard.utcOffsetMinutes,
-        audienceBaselinePerBucket: billboard.audienceBaselinePerBucket,
-        slotStartTimes: [slot.startAt],
-        audience,
-        now: at,
-      });
-      if (fromPriceMinor === null || price.amountMinor < fromPriceMinor) {
-        fromPriceMinor = price.amountMinor;
-      }
+    if (available.length > 0) {
+      // Same screen-price harness as quotes (all stages), priced in one pass.
+      const { price } = await computeScreenPrice(ctx.db, billboard, available, at);
+      fromPriceMinor = Math.min(...price.slotPrices.map((p) => p.amountMinor));
     }
     const message =
       fromPriceMinor === null

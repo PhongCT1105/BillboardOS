@@ -2,11 +2,13 @@ import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { currency, pricingConfidence } from "./schema";
+import { currency, pricingConfidence, slotPriceBreakdown } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { MAX_KEY_LENGTH, MAX_SLOTS_PER_QUOTE, QUOTE_TTL_MS } from "./lib/constants";
-import { PRICING_POLICY_VERSION, priceQuote } from "./lib/pricing";
-import { loadTrailingAudience } from "./lib/audienceWindow";
+import { PRICING_POLICY_VERSION } from "./lib/pricing";
+import { computeScreenPrice } from "./lib/screenPrice";
+import { applyCompanyMultiplier, heuristicAssessment } from "./lib/valuation";
+import { currentAssessment, gatherCompanyInputs, requestAssessment } from "./valuation";
 import { assertBoundedString } from "./lib/validators";
 
 /**
@@ -32,6 +34,8 @@ export const create = mutation({
     confidence: pricingConfidence,
     policyVersion: v.string(),
     traceId: v.string(),
+    /** Screen-price stages per slot (crowd, time, event, scarcity, market). */
+    priceBreakdown: v.array(slotPriceBreakdown),
   }),
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -95,18 +99,44 @@ export const create = mutation({
       });
     }
 
-    // Audience over the trailing 15 minutes (current + share of previous bucket).
-    const audience = await loadTrailingAudience(ctx.db, billboardId, now);
-
-    const price = priceQuote({
-      baseRateMinor: billboard.baseRateMinor,
-      reserveFloorMinor: billboard.reserveFloorMinor,
-      utcOffsetMinutes: billboard.utcOffsetMinutes,
-      audienceBaselinePerBucket: billboard.audienceBaselinePerBucket,
-      slotStartTimes: slots.map((s) => s.startAt),
-      audience: audience.sample,
-      now,
+    // Screen price: crowd (trailing 15 min), time, event, scarcity, market.
+    const { price, audienceAggregateId } = await computeScreenPrice(ctx.db, billboard, slots, now, {
+      excludeCampaignId: args.campaignId,
     });
+    const screenBreakdown = price.slotPrices.map((p, i) => ({
+      slotId: slots[i]._id,
+      slotStartAt: p.slotStartAt,
+      computedMinor: p.computedMinor,
+      screenMinor: p.amountMinor,
+      floorApplied: p.floorApplied,
+      ceilingApplied: p.ceilingApplied,
+      stages: p.stages,
+    }));
+    const priceBreakdown = screenBreakdown;
+
+    // Company valuation (posted quotes only; hidden from the buyer). Never
+    // blocks: use the latest assessment, or an inline heuristic, and schedule
+    // a refresh when stale.
+    const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now);
+    let companyMultiplier = 1;
+    let companyMethod: "claude" | "heuristic" | "override" | "inline_heuristic" = "inline_heuristic";
+    if (valuation.assessment) {
+      companyMultiplier = valuation.assessment.multiplier;
+      companyMethod = valuation.assessment.method;
+    } else {
+      companyMultiplier = heuristicAssessment(await gatherCompanyInputs(ctx.db, campaign.advertiserId)).multiplier;
+    }
+    if (!valuation.fresh) {
+      await requestAssessment(ctx, campaign.advertiserId, "quote requested without a fresh assessment");
+    }
+    const finalAmountMinor = screenBreakdown.reduce(
+      (sum, b) => sum + applyCompanyMultiplier(b.screenMinor, companyMultiplier, billboard.reserveFloorMinor, price.ceilingMinor),
+      0,
+    );
+    const pricingBasis =
+      finalAmountMinor === price.amountMinor
+        ? price.pricingBasis
+        : [...price.pricingBasis, `Price for your account: $${(finalAmountMinor / 100).toFixed(2)}`];
 
     const expiresAt = now + QUOTE_TTL_MS;
     const traceId = `trace_${crypto.randomUUID()}`;
@@ -114,15 +144,20 @@ export const create = mutation({
       campaignId: args.campaignId,
       billboardId,
       slotIds: args.slotIds,
-      amountMinor: price.amountMinor,
+      amountMinor: finalAmountMinor,
       currency: "USD",
       expiresAt,
-      pricingBasis: price.pricingBasis,
+      pricingBasis,
       confidence: price.confidence,
-      audienceAggregateId: audience.newest?._id,
+      audienceAggregateId,
       policyVersion: PRICING_POLICY_VERSION,
       status: "open",
       traceId,
+      priceBreakdown,
+      screenAmountMinor: price.amountMinor,
+      companyMultiplier,
+      companyAssessmentId: valuation.assessment?._id,
+      companyMethod,
     });
 
     await ctx.scheduler.runAt(expiresAt, internal.quotes.expire, { quoteId });
@@ -132,12 +167,15 @@ export const create = mutation({
       actor,
       type: "quote.created",
       subjectId: quoteId,
-      reason: `Quoted ${args.slotIds.length} slot(s) at ${price.amountMinor} USD minor units (${price.confidence} confidence)`,
+      reason: `Quoted ${args.slotIds.length} slot(s) at ${finalAmountMinor} USD minor units (screen ${price.amountMinor}, company x${companyMultiplier.toFixed(2)} ${companyMethod}; ${price.confidence} confidence)`,
       data: {
         campaignId: args.campaignId,
         billboardId,
         slotIds: args.slotIds,
-        amountMinor: price.amountMinor,
+        amountMinor: finalAmountMinor,
+        screenAmountMinor: price.amountMinor,
+        companyMultiplier,
+        companyMethod,
         confidence: price.confidence,
         policyVersion: PRICING_POLICY_VERSION,
         expiresAt,
@@ -148,13 +186,14 @@ export const create = mutation({
       quoteId,
       billboardId,
       slotIds: args.slotIds,
-      amountMinor: price.amountMinor,
+      amountMinor: finalAmountMinor,
       currency: "USD" as const,
       expiresAt,
-      pricingBasis: price.pricingBasis,
+      pricingBasis,
       confidence: price.confidence,
       policyVersion: PRICING_POLICY_VERSION,
       traceId,
+      priceBreakdown,
     };
   },
 });

@@ -1,4 +1,7 @@
 /// <reference types="vite/client" />
+// Never call the real Claude API from tests: the company analyst falls back
+// to its deterministic heuristic when no key is set.
+delete process.env.ANTHROPIC_API_KEY;
 import type { TestConvexForDataModel } from "convex-test";
 import type { DataModel } from "./_generated/dataModel";
 

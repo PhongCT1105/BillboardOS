@@ -21,6 +21,7 @@ import type * as collections from "../collections.js";
 import type * as creatives from "../creatives.js";
 import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
+import type * as events from "../events.js";
 import type * as finance from "../finance.js";
 import type * as fixtures_financeAnswerKey from "../fixtures/financeAnswerKey.js";
 import type * as fixtures_financeFixture from "../fixtures/financeFixture.js";
@@ -32,11 +33,16 @@ import type * as lib_collections from "../lib/collections.js";
 import type * as lib_constants from "../lib/constants.js";
 import type * as lib_finance from "../lib/finance.js";
 import type * as lib_inventory from "../lib/inventory.js";
+import type * as lib_marketHistory from "../lib/marketHistory.js";
+import type * as lib_match from "../lib/match.js";
 import type * as lib_operator from "../lib/operator.js";
 import type * as lib_pricing from "../lib/pricing.js";
 import type * as lib_reconcile from "../lib/reconcile.js";
 import type * as lib_scheduling from "../lib/scheduling.js";
+import type * as lib_screenPrice from "../lib/screenPrice.js";
+import type * as lib_stages from "../lib/stages.js";
 import type * as lib_validators from "../lib/validators.js";
+import type * as lib_valuation from "../lib/valuation.js";
 import type * as operators from "../operators.js";
 import type * as payments from "../payments.js";
 import type * as playback from "../playback.js";
@@ -45,6 +51,8 @@ import type * as quotes from "../quotes.js";
 import type * as reconciliation from "../reconciliation.js";
 import type * as seed from "../seed.js";
 import type * as slots from "../slots.js";
+import type * as valuation from "../valuation.js";
+import type * as valuationAgent from "../valuationAgent.js";
 
 import type {
   ApiFromModules,
@@ -66,6 +74,7 @@ declare const fullApi: ApiFromModules<{
   creatives: typeof creatives;
   crons: typeof crons;
   dashboard: typeof dashboard;
+  events: typeof events;
   finance: typeof finance;
   "fixtures/financeAnswerKey": typeof fixtures_financeAnswerKey;
   "fixtures/financeFixture": typeof fixtures_financeFixture;
@@ -77,11 +86,16 @@ declare const fullApi: ApiFromModules<{
   "lib/constants": typeof lib_constants;
   "lib/finance": typeof lib_finance;
   "lib/inventory": typeof lib_inventory;
+  "lib/marketHistory": typeof lib_marketHistory;
+  "lib/match": typeof lib_match;
   "lib/operator": typeof lib_operator;
   "lib/pricing": typeof lib_pricing;
   "lib/reconcile": typeof lib_reconcile;
   "lib/scheduling": typeof lib_scheduling;
+  "lib/screenPrice": typeof lib_screenPrice;
+  "lib/stages": typeof lib_stages;
   "lib/validators": typeof lib_validators;
+  "lib/valuation": typeof lib_valuation;
   operators: typeof operators;
   payments: typeof payments;
   playback: typeof playback;
@@ -90,6 +104,8 @@ declare const fullApi: ApiFromModules<{
   reconciliation: typeof reconciliation;
   seed: typeof seed;
   slots: typeof slots;
+  valuation: typeof valuation;
+  valuationAgent: typeof valuationAgent;
 }>;
 
 /**

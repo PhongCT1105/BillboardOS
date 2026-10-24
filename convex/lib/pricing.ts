@@ -1,13 +1,20 @@
 /**
- * Deterministic slot pricing. Pure: no database, no clock, no randomness.
- * Same inputs always produce the same amount and the same explanation.
+ * Deterministic slot pricing harness (ADR 0003). Pure: no database, no clock,
+ * no randomness. Same inputs always produce the same amount and explanation.
  *
- * price = round(baseRate * demandMultiplier * hourFactor), never below reserveFloor.
+ * A screen price is a list of STAGES, each `{ key, multiplier, confidence,
+ * explanation }`. The combiner multiplies the confidence-weighted multipliers
+ * (effective = 1 + (multiplier - 1) x confidence, rounded to 2 dp) onto the
+ * base rate and clamps the result to [reserve floor, ceiling].
  *
- * - demandMultiplier: recent audience count vs. a baseline, clamped, and
- *   shrunk toward 1.0 by the measurement's confidence. Missing or stale
- *   audience data -> 1.0 (baseline price) with "low" confidence.
- * - hourFactor: fixed table by local hour of the slot start.
+ *   crowd    camera audience over the trailing 15 min vs this screen's normal
+ *   time     local hour-of-day table
+ *   event    nearby event uplift            (lib/stages.ts)
+ *   scarcity utilization, live interest, last-minute decay (lib/stages.ts)
+ *   market   recent sale prices in the same hour band      (lib/stages.ts)
+ *
+ * Company valuation (lib/valuation.ts) is applied AFTER the screen price,
+ * for posted quotes only, and is never part of the buyer-facing explanation.
  */
 
 export const PRICING_POLICY_VERSION = "pricing-v1";
@@ -101,16 +108,35 @@ export type SlotPricingInput = {
   slotStartAt: number;
 };
 
+export type StageKey = "crowd" | "time" | "event" | "scarcity" | "market";
+
+/** One pricing stage. `confidence` (0..1) shrinks the multiplier toward 1.0. */
+export type PricingStage = {
+  key: StageKey;
+  multiplier: number;
+  confidence: number;
+  explanation: string;
+};
+
+/** A stage as stored on a quote: includes the weighted multiplier actually used. */
+export type AppliedStage = PricingStage & { effective: number };
+
 export type DemandResult = {
   multiplier: number;
   confidence: PricingConfidence;
   basis: string[];
+  /** The crowd stage (multiplier = clamped raw ratio, confidence = measurement confidence). */
+  stage: PricingStage;
 };
 
 export type SlotPrice = {
+  slotStartAt: number;
   amountMinor: number;
+  computedMinor: number;
   hourFactor: number;
   floorApplied: boolean;
+  ceilingApplied: boolean;
+  stages: AppliedStage[];
   basis: string[];
 };
 
@@ -120,7 +146,11 @@ export type QuotePrice = {
   demandMultiplier: number;
   pricingBasis: string[];
   slotPrices: SlotPrice[];
+  ceilingMinor: number;
 };
+
+/** Default price ceiling: 4x the base rate (overridable per billboard). */
+export const DEFAULT_CEILING_MULTIPLE = 4;
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -142,7 +172,7 @@ export function localHour(timestampMs: number, utcOffsetMinutes: number): number
   return local.getUTCHours();
 }
 
-function localTimeLabel(timestampMs: number, utcOffsetMinutes: number): string {
+export function localTimeLabel(timestampMs: number, utcOffsetMinutes: number): string {
   const local = new Date(timestampMs + utcOffsetMinutes * 60_000);
   const hh = String(local.getUTCHours()).padStart(2, "0");
   const mm = String(local.getUTCMinutes()).padStart(2, "0");
@@ -153,8 +183,28 @@ export function hourFactorFor(timestampMs: number, utcOffsetMinutes: number): nu
   return HOUR_FACTORS[localHour(timestampMs, utcOffsetMinutes)] ?? 1.0;
 }
 
+/** Ceiling for a screen: explicit value, else 4x base; never below the floor. */
+export function effectiveCeiling(
+  baseRateMinor: number,
+  reserveFloorMinor: number,
+  ceilingMinor?: number | null,
+): number {
+  const c =
+    ceilingMinor !== undefined && ceilingMinor !== null && Number.isSafeInteger(ceilingMinor) && ceilingMinor > 0
+      ? ceilingMinor
+      : baseRateMinor * DEFAULT_CEILING_MULTIPLE;
+  return Math.max(c, reserveFloorMinor);
+}
+
+/** 1 + (m - 1) x confidence, rounded to 2 dp; invalid input -> 1.0. */
+export function effectiveMultiplier(stage: PricingStage): number {
+  if (!Number.isFinite(stage.multiplier) || stage.multiplier <= 0) return 1;
+  const c = Number.isFinite(stage.confidence) ? Math.min(1, Math.max(0, stage.confidence)) : 0;
+  return round2(1 + (stage.multiplier - 1) * c);
+}
+
 /**
- * Demand multiplier from the most recent audience sample.
+ * Crowd stage from the trailing audience sample.
  * `audience` null, stale, in the future, or malformed -> baseline 1.0, low confidence.
  */
 export function demandFromAudience(
@@ -164,10 +214,12 @@ export function demandFromAudience(
 ): DemandResult {
   const baseline = effectiveBaseline(baselinePerBucket);
   if (audience === null) {
+    const explanation = "No recent audience data: baseline demand x1.00 (low confidence)";
     return {
       multiplier: 1,
       confidence: "low",
-      basis: ["No recent audience data: baseline demand x1.00 (low confidence)"],
+      basis: [explanation],
+      stage: { key: "crowd", multiplier: 1, confidence: 0, explanation },
     };
   }
   const age = now - audience.bucketStart;
@@ -180,17 +232,25 @@ export function demandFromAudience(
     age >= 0 &&
     age <= AUDIENCE_STALE_AFTER_MS;
   if (!valid) {
+    const explanation = "Audience data stale or invalid: baseline demand x1.00 (low confidence)";
     return {
       multiplier: 1,
       confidence: "low",
-      basis: ["Audience data stale or invalid: baseline demand x1.00 (low confidence)"],
+      basis: [explanation],
+      stage: { key: "crowd", multiplier: 1, confidence: 0, explanation },
     };
   }
 
   const raw = audience.countEstimate / baseline;
   const clamped = Math.min(DEMAND_MULTIPLIER_MAX, Math.max(DEMAND_MULTIPLIER_MIN, raw));
+  const stage: PricingStage = {
+    key: "crowd",
+    multiplier: clamped,
+    confidence: audience.confidence,
+    explanation: "",
+  };
   // Shrink toward 1.0 by confidence: an uncertain count moves the price less.
-  const multiplier = round2(1 + (clamped - 1) * audience.confidence);
+  const multiplier = effectiveMultiplier(stage);
   const confidence: PricingConfidence =
     audience.confidence >= 0.75 ? "high" : audience.confidence >= 0.4 ? "medium" : "low";
 
@@ -198,33 +258,101 @@ export function demandFromAudience(
   const measured = audience.window
     ? `Audience ${audience.countEstimate} people in the last 15 min (${sourceLabel}, confidence ${audience.confidence.toFixed(2)}, ${Math.round(audience.window.coverage * 100)}% of the window measured)`
     : `Audience ${audience.countEstimate} people/15min (${sourceLabel}, confidence ${audience.confidence.toFixed(2)})`;
+  const basis = [
+    `${measured}; ${baseline} people per 15 min is normal here`,
+    `Demand multiplier x${multiplier.toFixed(2)} (raw x${round2(raw).toFixed(2)}, clamped to [${DEMAND_MULTIPLIER_MIN}, ${DEMAND_MULTIPLIER_MAX}], weighted by confidence)`,
+  ];
+  stage.explanation = basis.join("; ");
+  return { multiplier, confidence, basis, stage };
+}
+
+/** Time-of-day stage. */
+export function timeStage(slotStartAt: number, utcOffsetMinutes: number): PricingStage {
+  const factor = hourFactorFor(slotStartAt, utcOffsetMinutes);
   return {
-    multiplier,
-    confidence,
-    basis: [
-      `${measured}; ${baseline} people per 15 min is normal here`,
-      `Demand multiplier x${multiplier.toFixed(2)} (raw x${round2(raw).toFixed(2)}, clamped to [${DEMAND_MULTIPLIER_MIN}, ${DEMAND_MULTIPLIER_MAX}], weighted by confidence)`,
-    ],
+    key: "time",
+    multiplier: factor,
+    confidence: 1,
+    explanation: `Local ${localTimeLabel(slotStartAt, utcOffsetMinutes)} is in the x${factor.toFixed(2)} time-of-day band`,
   };
 }
 
-/** Price for one slot given an already-computed demand multiplier. */
-export function priceSlot(input: SlotPricingInput, demandMultiplier: number): SlotPrice {
+const STAGE_WORD: Record<StageKey, string> = {
+  crowd: "demand",
+  time: "hour",
+  event: "event",
+  scarcity: "scarcity",
+  market: "market",
+};
+
+/**
+ * Combiner: base x product of effective stage multipliers, rounded, clamped to
+ * [floor, ceiling]. Stages are applied in the order given.
+ */
+export function combineStages(args: {
+  baseRateMinor: number;
+  reserveFloorMinor: number;
+  ceilingMinor: number;
+  stages: PricingStage[];
+}): { computedMinor: number; amountMinor: number; floorApplied: boolean; ceilingApplied: boolean; stages: AppliedStage[] } {
+  let x = args.baseRateMinor;
+  const applied: AppliedStage[] = [];
+  for (const stage of args.stages) {
+    const effective = effectiveMultiplier(stage);
+    applied.push({ ...stage, effective });
+    x *= effective;
+  }
+  const computedMinor = Math.round(x);
+  const floorApplied = computedMinor < args.reserveFloorMinor;
+  const ceilingApplied = !floorApplied && computedMinor > args.ceilingMinor;
+  const amountMinor = floorApplied ? args.reserveFloorMinor : ceilingApplied ? args.ceilingMinor : computedMinor;
+  return { computedMinor, amountMinor, floorApplied, ceilingApplied, stages: applied };
+}
+
+/** Price for one slot: crowd + time stages, plus any extra screen stages. */
+export function priceSlot(
+  input: SlotPricingInput & { ceilingMinor?: number },
+  demand: DemandResult | number,
+  extraStages: PricingStage[] = [],
+): SlotPrice {
   assertMoney("baseRateMinor", input.baseRateMinor);
   assertMoney("reserveFloorMinor", input.reserveFloorMinor);
-  if (!Number.isFinite(demandMultiplier) || demandMultiplier <= 0) {
-    throw new Error(`demandMultiplier must be a positive finite number, got ${demandMultiplier}`);
+  const crowd: PricingStage =
+    typeof demand === "number"
+      ? { key: "crowd", multiplier: demand, confidence: 1, explanation: `Demand x${demand.toFixed(2)}` }
+      : demand.stage;
+  if (!Number.isFinite(crowd.multiplier) || crowd.multiplier <= 0) {
+    throw new Error(`demand multiplier must be a positive finite number, got ${crowd.multiplier}`);
   }
-  const hourFactor = hourFactorFor(input.slotStartAt, input.utcOffsetMinutes);
-  const computed = Math.round(input.baseRateMinor * demandMultiplier * hourFactor);
-  const floorApplied = computed < input.reserveFloorMinor;
-  const amountMinor = floorApplied ? input.reserveFloorMinor : computed;
+  const time = timeStage(input.slotStartAt, input.utcOffsetMinutes);
+  const ceilingMinor = effectiveCeiling(input.baseRateMinor, input.reserveFloorMinor, input.ceilingMinor);
+  const combined = combineStages({
+    baseRateMinor: input.baseRateMinor,
+    reserveFloorMinor: input.reserveFloorMinor,
+    ceilingMinor,
+    stages: [crowd, time, ...extraStages],
+  });
   const label = localTimeLabel(input.slotStartAt, input.utcOffsetMinutes);
+  const factors = combined.stages.map((s) => `x${s.effective.toFixed(2)} ${STAGE_WORD[s.key]}`).join(" ");
   const basis = [
-    `Slot ${label} local: ${usd(input.baseRateMinor)} x${demandMultiplier.toFixed(2)} demand x${hourFactor.toFixed(2)} hour = ${usd(computed)}` +
-      (floorApplied ? `, raised to reserve floor ${usd(input.reserveFloorMinor)}` : ""),
+    `Slot ${label} local: ${usd(input.baseRateMinor)} ${factors} = ${usd(combined.computedMinor)}` +
+      (combined.floorApplied ? `, raised to reserve floor ${usd(input.reserveFloorMinor)}` : "") +
+      (combined.ceilingApplied ? `, capped at ceiling ${usd(ceilingMinor)}` : ""),
+    // Extra stages explain themselves when they moved the price.
+    ...combined.stages
+      .filter((s) => s.key !== "crowd" && s.key !== "time" && s.effective !== 1)
+      .map((s) => `  ${STAGE_WORD[s.key]}: ${s.explanation}`),
   ];
-  return { amountMinor, hourFactor, floorApplied, basis };
+  return {
+    slotStartAt: input.slotStartAt,
+    amountMinor: combined.amountMinor,
+    computedMinor: combined.computedMinor,
+    hourFactor: time.multiplier,
+    floorApplied: combined.floorApplied,
+    ceilingApplied: combined.ceilingApplied,
+    stages: combined.stages,
+    basis,
+  };
 }
 
 /** Price a set of slots on one billboard. Total = sum of per-slot prices. */
@@ -237,20 +365,27 @@ export function priceQuote(args: {
   now: number;
   /** Billboard's normal traffic per 15 min; defaults to BASELINE_AUDIENCE_PER_BUCKET. */
   audienceBaselinePerBucket?: number;
+  /** Billboard's price ceiling per slot; defaults to 4x base. */
+  ceilingMinor?: number;
+  /** Extra screen-price stages per slot (event, scarcity, market), from lib/stages.ts. */
+  extraStagesFor?: (slotStartAt: number, index: number) => PricingStage[];
 }): QuotePrice {
   if (args.slotStartTimes.length === 0) {
     throw new Error("priceQuote requires at least one slot");
   }
   const demand = demandFromAudience(args.audience, args.now, args.audienceBaselinePerBucket);
-  const slotPrices = args.slotStartTimes.map((slotStartAt) =>
+  const ceilingMinor = effectiveCeiling(args.baseRateMinor, args.reserveFloorMinor, args.ceilingMinor);
+  const slotPrices = args.slotStartTimes.map((slotStartAt, i) =>
     priceSlot(
       {
         baseRateMinor: args.baseRateMinor,
         reserveFloorMinor: args.reserveFloorMinor,
         utcOffsetMinutes: args.utcOffsetMinutes,
         slotStartAt,
+        ceilingMinor,
       },
-      demand.multiplier,
+      demand,
+      args.extraStagesFor?.(slotStartAt, i) ?? [],
     ),
   );
   const amountMinor = slotPrices.reduce((sum, s) => sum + s.amountMinor, 0);
@@ -266,5 +401,18 @@ export function priceQuote(args: {
     demandMultiplier: demand.multiplier,
     pricingBasis,
     slotPrices,
+    ceilingMinor,
   };
+}
+
+/** Coarse local-time band, matching the time-of-day table's groups. */
+export function hourBand(timestampMs: number, utcOffsetMinutes: number): string {
+  const h = localHour(timestampMs, utcOffsetMinutes);
+  if (h < 6) return "overnight";
+  if (h < 9) return "morning";
+  if (h < 12) return "late-morning";
+  if (h < 14) return "lunch";
+  if (h < 17) return "afternoon";
+  if (h < 20) return "evening";
+  return "night";
 }

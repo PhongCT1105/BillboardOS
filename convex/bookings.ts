@@ -5,6 +5,7 @@ import { recordAudit } from "./lib/audit";
 import { NET15_MS, nextInvoiceNumber } from "./lib/finance";
 import { usd } from "./lib/reconcile";
 import { scheduleBooking } from "./lib/scheduling";
+import { recordSaleHistory } from "./lib/marketHistory";
 
 /**
  * Book a held slot on credit for an advertiser on net15 terms: converts the
@@ -135,6 +136,9 @@ export const confirmOnTerms = mutation({
       reason: `${number} for ${usd(hold.amountMinor)} issued to ${advertiser.displayName}, due ${new Date(dueAt).toISOString().slice(0, 10)}`,
       data: { number, amountMinor: hold.amountMinor, dueAt, bookingId },
     });
+
+    const bookedDoc = await ctx.db.get(bookingId);
+    if (bookedDoc) await recordSaleHistory(ctx, bookedDoc, "terms", now);
 
     if (campaign.creativeStatus === "approved") {
       const booking = await ctx.db.get(bookingId);

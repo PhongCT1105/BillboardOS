@@ -104,7 +104,7 @@ describe("per-billboard audience baseline", () => {
       source: "camera",
     });
     vi.setSystemTime(START + 2 * MIN); // 9 of 15 trailing minutes measured -> full confidence
-    const before = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const before = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[4]._id] });
     expect(before.amountMinor).toBe(3200); // $40 x0.80
     expect(before.pricingBasis.join(" ")).toContain("120 people per 15 min is normal here");
 
@@ -117,7 +117,7 @@ describe("per-billboard audience baseline", () => {
     const set = await t.mutation(api.billboards.setAudienceBaseline, { billboardId: seed.billboardId, peoplePer15Min: 20 });
     expect(set).toMatchObject({ previous: 120, audienceBaselinePerBucket: 20 });
 
-    const after = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const after = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[4]._id] });
     expect(after.amountMinor).toBe(6000); // $40 x1.50
     expect(after.pricingBasis.join(" ")).toContain("20 people per 15 min is normal here");
 
@@ -180,7 +180,8 @@ describe("trailing 15-minute audience window", () => {
     vi.setSystemTime(at(16, 20));
     await add(6); // bucket 16:15
     await t.mutation(api.billboards.setAudienceBaseline, { billboardId: seed.billboardId, peoplePer15Min: 20 });
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id] });
+    // slots[5] airs 10:30 local (more than an hour out): no last-minute discount.
+    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[5]._id] });
     expect(q.pricingBasis.join(" ")).toContain("Audience 26 people in the last 15 min");
     expect(q.amountMinor).toBe(5200); // $40 x1.30 (26/20) x1.0
   });
