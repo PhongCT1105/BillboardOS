@@ -1,6 +1,6 @@
 /**
- * The live moment (ADR 0006), pure parts: detector maths, flash spot pricing,
- * standing-instruction checks and winner selection. Code decides every
+ * The live moment (ADR 0006), pure parts: settings, audience mix and campaign
+ * fit, standing-instruction checks and winner selection. Code decides every
  * number; reasoning strings explain them.
  */
 import { matchScore, normalizeTags, type AudienceTags } from "./match";
@@ -67,52 +67,6 @@ export function audienceMix(screenTags: AudienceTags | undefined, eventTags: Aud
   const out: AudienceTags = {};
   for (const k of new Set([...Object.keys(s), ...Object.keys(e)])) out[k] = Math.max(s[k] ?? 0, e[k] ?? 0);
   return out;
-}
-
-export type Detection = {
-  crowd: number;
-  segment: string;
-  segmentShare: number;
-  relevantViewers: number;
-  reasoning: string;
-  fires: boolean;
-};
-
-/**
- * Relevant viewers = trailing crowd x the best segment's share (max of the
- * screen's usual mix and the live event's audience).
- */
-export function detect(input: {
-  crowd: number;
-  crowdSimulated: boolean;
-  screenTags: AudienceTags | undefined;
-  event: { name: string; tags: AudienceTags | undefined; uplift: number } | null;
-  threshold: number;
-}): Detection {
-  const screen = normalizeTags(input.screenTags);
-  const event = normalizeTags(input.event?.tags);
-  let segment = "general";
-  let share = 1;
-  let fromEvent = false;
-  const keys = new Set([...Object.keys(screen), ...Object.keys(event)]);
-  if (keys.size > 0) {
-    share = -1;
-    for (const k of keys) {
-      const value = Math.max(screen[k] ?? 0, event[k] ?? 0);
-      if (value > share) {
-        share = value;
-        segment = k;
-        fromEvent = (event[k] ?? 0) > (screen[k] ?? 0);
-      }
-    }
-  }
-  const relevantViewers = Math.round(input.crowd * share);
-  const parts = [`${input.crowd} people in the last 15 min${input.crowdSimulated ? " (SIMULATED crowd)" : ""}`];
-  if (input.event) parts.push(`${input.event.name} next door${input.event.uplift > 1 ? ` (x${input.event.uplift.toFixed(1)})` : ""}`);
-  parts.push(`${Math.round(share * 100)}% ${segment} audience${fromEvent ? " (from the event)" : ""} -> ~${relevantViewers} relevant viewers`);
-  const fires = relevantViewers >= input.threshold;
-  parts.push(fires ? `at or above the ${input.threshold} threshold: offering the next spot` : `below the ${input.threshold} threshold`);
-  return { crowd: input.crowd, segment, segmentShare: share, relevantViewers, reasoning: parts.join("; "), fires };
 }
 
 /** Campaign fit for this moment: match against the live mix, and its relevant viewers. */

@@ -6,18 +6,16 @@ import { flashOfferStatus, momentStatus, momentStep, momentTrigger, paymentMode,
 import { recordAudit } from "./lib/audit";
 import { authenticateAgent, assertWithinBudget, keyStatus } from "./lib/agentKeys";
 import { loadTrailingAudience } from "./lib/audienceWindow";
-import { computeScreenPrice } from "./lib/screenPrice";
-import { AUDIENCE_BUCKET_MS, PRICING_POLICY_VERSION } from "./lib/pricing";
-import { policyOf } from "./lib/negotiation";
+import { PRICING_POLICY_VERSION } from "./lib/pricing";
+import { DEFAULT_CPM_MINOR, DEFAULT_LIVE_MINIMUM_MINOR, MAX_JITTER, livePrice, referenceCpm } from "./lib/livePrice";
+import { NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS } from "./lib/liveAuction";
 import {
   MAX_OFFERS,
   MIN_REMAINING_MS,
   PAY_WINDOW_MS,
   audienceMix,
   campaignFit,
-  detect,
   momentSettingsOf,
-  proRata,
   rankReplies,
   replyAllowed,
   standingCovers,
@@ -28,13 +26,15 @@ import {
 import { addMomentStep, creativeReady } from "./lib/momentHooks";
 import { endHold, takeHold } from "./holds";
 import { applyVerifiedPayment } from "./payments";
-import { requireCustomer, requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
+import { releaseWorkspace } from "./liveAuction";
+import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
 
 /**
- * The live moment (ADR 0006): the seller agent notices a relevant crowd,
- * offers the next spot to matching customers' agents, picks a winner within
- * a short window, holds the spot for the winner to pay over x402, and the
- * player starts the pre-approved creative. Every step is timestamped.
+ * The live moment (ADR 0006): from the camera's live count the host's
+ * pricing agent prices the next spot and announces it to every company whose
+ * profile, reach target and limits fit (one live auction per host at a time;
+ * other screens queue). The lifecycle after the announcement lives in
+ * liveAuction.ts. Every step is timestamped.
  */
 
 const DAY = 24 * 60 * 60_000;
@@ -59,14 +59,6 @@ async function liveEvents(ctx: QueryCtx, billboardId: Id<"billboards">, now: num
 
 async function activeEvent(ctx: QueryCtx, billboardId: Id<"billboards">, now: number) {
   return (await liveEvents(ctx, billboardId, now))[0] ?? null;
-}
-
-async function latestMoment(ctx: QueryCtx, billboardId: Id<"billboards">) {
-  return await ctx.db
-    .query("moments")
-    .withIndex("by_billboard", (q) => q.eq("billboardId", billboardId))
-    .order("desc")
-    .first();
 }
 
 /** Money this key committed in the last 24 h (active + converted holds): the daily budget's "spent". */
@@ -99,23 +91,94 @@ async function pickSpot(ctx: QueryCtx, billboard: Doc<"billboards">, now: number
   return null;
 }
 
+/** A camera reading counts for this long (by its 15-minute bucket start). */
+const READING_MAX_AGE_MS = 15 * 60_000;
+/** Moments looked at for the queue check and the screen's sales history. */
+const RECENT_MOMENTS = 20;
+/** A live auction or negotiation is running, or its winner is paying. */
+const BUSY_STATUSES: ReadonlySet<Doc<"moments">["status"]> = new Set(["offering", "bidding", "negotiating", "awarded"]);
+
+/** One live auction (or negotiation) per host at a time: is one running on any of its screens? */
+export async function workspaceBusy(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<boolean> {
+  const recent = await ctx.db
+    .query("moments")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .order("desc")
+    .take(RECENT_MOMENTS);
+  return recent.some((m) => BUSY_STATUSES.has(m.status));
+}
+
+/**
+ * People in view right now: the newest camera bucket from the last 15
+ * minutes, using its peak in view. Simulated rows and older readings never count.
+ */
+export async function latestCameraReading(
+  ctx: QueryCtx,
+  billboardId: Id<"billboards">,
+  now: number,
+): Promise<{ peopleInView: number; bucketStart: number } | null> {
+  const rows = await ctx.db
+    .query("audienceAggregates")
+    .withIndex("by_billboard_and_bucketStart", (q) => q.eq("billboardId", billboardId).gte("bucketStart", now - READING_MAX_AGE_MS))
+    .order("desc")
+    .take(4);
+  const row = rows.find((r) => r.source === "camera");
+  return row ? { peopleInView: row.peakInView ?? 0, bucketStart: row.bucketStart } : null;
+}
+
+/** The screen's latest moment, how long it has gone without a paid ad, and its reference CPM. */
+async function screenHistory(ctx: QueryCtx, billboard: Doc<"billboards">, now: number) {
+  const recent = await ctx.db
+    .query("moments")
+    .withIndex("by_billboard", (q) => q.eq("billboardId", billboard._id))
+    .order("desc")
+    .take(RECENT_MOMENTS);
+  const lastPaid = recent.find((m) => m.paidMinor !== undefined);
+  const idleMs = Math.max(0, now - (lastPaid ? lastPaid.spotEndAt : billboard._creationTime));
+  const sales = recent
+    .filter((m) => m.paidMinor !== undefined && m.impressions !== undefined)
+    .reverse() // oldest first
+    .map((m) => ({ amountMinor: m.paidMinor!, impressions: m.impressions! }));
+  const cpmRefMinor = referenceCpm(sales, billboard.cpmMinor ?? DEFAULT_CPM_MINOR);
+  return { latest: recent[0] ?? null, idleMs, cpmRefMinor };
+}
+
+/** The biggest audience segment in the mix (a screen without tags is "general"). */
+function topSegment(mix: Record<string, number>): { segment: string; share: number } {
+  let best = { segment: "general", share: 1 };
+  let first = true;
+  for (const [segment, share] of Object.entries(mix)) {
+    if (first || share > best.share) best = { segment, share };
+    first = false;
+  }
+  return best;
+}
+
 type Target = {
   campaign: Doc<"campaigns">;
   key: Doc<"agentKeys">;
   matchScore: number;
   relevantViewers: number;
-  simulatedAgent: boolean;
 };
 
 /**
- * Customers to offer the spot to: active campaigns with a creative ready on
- * this host's screens, audience match >= threshold, an active agent key with
- * a webhook and the hold + pay scopes, and standing instructions that cover
- * the seller's floor. One offer per company (its best-matching campaign).
+ * Companies to announce the spot to: active campaigns with a creative ready
+ * on this host's screens, audience match >= threshold, an active agent key
+ * with a webhook and the hold + pay + bid scopes, and standing instructions
+ * that cover the published minimum and the company's reach target
+ * (relevant viewers = people in view x match). One offer per company: its
+ * best-matching campaign.
  */
 async function findTargets(
   ctx: QueryCtx,
-  input: { workspaceId: Id<"workspaces">; mix: Record<string, number>; crowd: number; floorMinor: number; minMatch: number; now: number },
+  input: {
+    workspaceId: Id<"workspaces">;
+    mix: Record<string, number>;
+    peopleInView: number;
+    minimumMinor: number;
+    minMatch: number;
+    now: number;
+  },
 ): Promise<{ targets: Target[]; skipped: string[] }> {
   const approvals = await ctx.db
     .query("creativeApprovals")
@@ -128,7 +191,7 @@ async function findTargets(
     if (!campaign || campaign.status !== "active") continue;
     const company = (await ctx.db.get(campaign.advertiserId))?.displayName ?? "company";
     if (!(await creativeReady(ctx, campaign, input.workspaceId))) continue;
-    const fit = campaignFit(input.mix, campaign.targetAudience, input.crowd);
+    const fit = campaignFit(input.mix, campaign.targetAudience, input.peopleInView);
     if (fit.matchScore < input.minMatch) {
       skipped.push(`${company}: audience match ${Math.round(fit.matchScore * 100)}% < ${Math.round(input.minMatch * 100)}%`);
       continue;
@@ -138,13 +201,13 @@ async function findTargets(
       .withIndex("by_advertiser", (q) => q.eq("advertiserId", campaign.advertiserId))
       .take(20);
     let chosen: Doc<"agentKeys"> | null = null;
-    let reason = "no agent key with a webhook and standing instructions";
+    let reason = "no agent key with a webhook, the hold, pay and bid scopes, and standing instructions";
     for (const k of keys) {
       if (keyStatus(k, input.now) !== "active" || !k.webhookUrl || !k.standing) continue;
-      if (!k.scopes.includes("hold") || !k.scopes.includes("pay")) continue;
+      if (!k.scopes.includes("hold") || !k.scopes.includes("pay") || !k.scopes.includes("bid")) continue;
       if (k.campaignIds && !k.campaignIds.includes(campaign._id)) continue;
       const why = standingCovers(k.standing, {
-        floorMinor: input.floorMinor,
+        floorMinor: input.minimumMinor,
         relevantViewers: fit.relevantViewers,
         spentTodayMinor: await spentTodayMinor(ctx, k._id, input.now),
       });
@@ -159,19 +222,9 @@ async function findTargets(
       skipped.push(`${company}: ${reason}`);
       continue;
     }
-    const demo = await ctx.db
-      .query("demoAgents")
-      .withIndex("by_advertiser", (q) => q.eq("advertiserId", campaign.advertiserId))
-      .first();
     const prev = best.get(campaign.advertiserId);
     if (!prev || fit.matchScore > prev.matchScore) {
-      best.set(campaign.advertiserId, {
-        campaign,
-        key: chosen,
-        matchScore: fit.matchScore,
-        relevantViewers: fit.relevantViewers,
-        simulatedAgent: demo?.agentKeyId === chosen._id,
-      });
+      best.set(campaign.advertiserId, { campaign, key: chosen, matchScore: fit.matchScore, relevantViewers: fit.relevantViewers });
     }
   }
   const targets = [...best.values()].sort((a, b) => b.matchScore - a.matchScore).slice(0, MAX_OFFERS);
@@ -180,7 +233,12 @@ async function findTargets(
 
 type DetectResult = { momentId: Id<"moments"> | null; reason: string };
 
-/** Detector + targeting + offers. Returns the new moment, or why nothing happened. */
+/**
+ * Announce a spot on this screen from the camera's live count: queue behind
+ * the host's running auction, price it live, offer it to every company whose
+ * profile, reach target and limits fit, or record no takers and re-offer.
+ * Returns the new moment, or why nothing happened.
+ */
 export async function detectCore(
   ctx: MutationCtx,
   billboardId: Id<"billboards">,
@@ -189,91 +247,107 @@ export async function detectCore(
   const now = Date.now();
   const billboard = await ctx.db.get(billboardId);
   if (!billboard?.workspaceId || billboard.deviceStatus !== "online") return { momentId: null, reason: "screen offline or unassigned" };
-  const workspace = (await ctx.db.get(billboard.workspaceId))!;
+  const workspaceId = billboard.workspaceId;
+  const workspace = (await ctx.db.get(workspaceId))!;
   const settings = momentSettingsOf(workspace);
   if (!settings.enabled) return { momentId: null, reason: "moment detector is off for this host" };
 
-  const last = await latestMoment(ctx, billboard._id);
-  if (last) {
-    const busy = last.status === "offering" || last.status === "awarded" || ((last.status === "paid" || last.status === "playing") && last.spotEndAt > now);
-    if (busy) return { momentId: null, reason: "a moment is already in progress on this screen" };
+  // One live auction or negotiation per host: this screen waits its turn (first come, first served).
+  if (await workspaceBusy(ctx, workspaceId)) {
+    if (billboard.saleQueuedAt === undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: now });
+    return { momentId: null, reason: "queued" };
   }
 
-  const { sample } = await loadTrailingAudience(ctx.db, billboard._id, now);
-  // Evaluate each live event (and none); keep the one that explains the most relevant viewers.
-  const candidates = [null, ...(await liveEvents(ctx, billboard._id, now))];
-  let event: Doc<"events"> | null = null;
-  let detection: ReturnType<typeof detect> | null = null;
-  for (const e of candidates) {
-    const d = detect({
-      crowd: sample?.countEstimate ?? 0,
-      crowdSimulated: sample?.source === "simulated",
-      screenTags: billboard.audienceTags,
-      event: e ? { name: e.name, tags: e.audienceTags, uplift: e.upliftMultiplier } : null,
-      threshold: settings.minPeopleInView,
-    });
-    if (!detection || d.relevantViewers > detection.relevantViewers) {
-      detection = d;
-      event = e;
-    }
+  const history = await screenHistory(ctx, billboard, now);
+  const last = history.latest;
+  if (last && (last.status === "paid" || last.status === "playing") && last.spotEndAt - now > NEXT_SPOT_LEAD_MS) {
+    return { momentId: null, reason: "playing" };
   }
-  if (!detection) return { momentId: null, reason: "no detection" };
-  if (!detection.fires) return { momentId: null, reason: detection.reasoning };
+
+  const reading = await latestCameraReading(ctx, billboard._id, now);
+  if (!reading) return { momentId: null, reason: "no camera reading in the last 15 minutes" };
+  const peopleInView = reading.peopleInView;
+  if (peopleInView < settings.minPeopleInView) {
+    return { momentId: null, reason: `${peopleInView} people in view, below the ${settings.minPeopleInView} needed` };
+  }
 
   const slot = await pickSpot(ctx, billboard, now);
-  if (!slot) return { momentId: null, reason: `${detection.reasoning}; but no spot is free in the next 2 hours` };
+  if (!slot) return { momentId: null, reason: `${peopleInView} people in view, but no spot is free in the next 2 hours` };
   const spotStartAt = Math.max(now, slot.startAt);
-  const covered = slot.endAt - spotStartAt;
-  const { price } = await computeScreenPrice(ctx.db, billboard, [slot], now);
-  const priceMinor = proRata(price.slotPrices[0].amountMinor, covered);
-  const floorRatio = policyOf(workspace).floorRatio;
-  const floorMinor = Math.max(1, Math.ceil(priceMinor * floorRatio), Math.ceil((billboard.reserveFloorMinor * covered) / (15 * 60_000)));
+  const spotMs = slot.endAt - spotStartAt;
+  const reofferRound = last?.status === "no_takers" && last.slotId === slot._id ? (last.reofferRound ?? 0) + 1 : 0;
+  const minimumMinor =
+    Number.isSafeInteger(billboard.reserveFloorMinor) && billboard.reserveFloorMinor > 0 ? billboard.reserveFloorMinor : DEFAULT_LIVE_MINIMUM_MINOR;
+
+  const event = await activeEvent(ctx, billboard._id, now);
   const mix = audienceMix(billboard.audienceTags, event?.audienceTags);
   const { targets, skipped } = await findTargets(ctx, {
-    workspaceId: billboard.workspaceId,
+    workspaceId,
     mix,
-    crowd: detection.crowd,
-    floorMinor,
+    peopleInView,
+    minimumMinor,
     minMatch: settings.minMatch,
     now,
   });
+  const bestMatch = targets.reduce((m, t) => Math.max(m, t.matchScore), 0);
+  const price = livePrice({
+    peopleInView,
+    spotMs,
+    cpmRefMinor: history.cpmRefMinor,
+    bestMatch,
+    idleMs: history.idleMs,
+    msUntilStart: Math.max(0, slot.startAt - now),
+    reofferRound,
+    minimumMinor,
+    jitter: (Math.random() * 2 - 1) * MAX_JITTER,
+  });
 
-  // Automatic triggers stay quiet when nobody can buy; the labeled simulation records why.
-  if (targets.length === 0 && trigger !== "simulated") {
-    return { momentId: null, reason: `${detection.reasoning}; no eligible customers (${skipped.join("; ") || "no ready creatives"})` };
-  }
-  const minutes = Math.round(covered / 60_000);
-  const offerClosesAt = now + settings.joinWindowMs;
+  const { segment, share } = topSegment(mix);
+  const minutes = Math.round(spotMs / 60_000);
+  const offering = targets.length > 0;
+  const offerClosesAt = offering ? now + settings.joinWindowMs : now;
+  const joinSeconds = Math.round(settings.joinWindowMs / 1000);
   const momentId = await ctx.db.insert("moments", {
-    workspaceId: billboard.workspaceId,
+    workspaceId,
     billboardId: billboard._id,
     trigger,
-    status: targets.length > 0 ? "offering" : "no_takers",
+    status: offering ? "offering" : "no_takers",
     startedAt: now,
-    crowd: detection.crowd,
-    segment: detection.segment,
-    segmentShare: detection.segmentShare,
-    relevantViewers: detection.relevantViewers,
+    crowd: peopleInView,
+    segment,
+    segmentShare: share,
+    relevantViewers: Math.round(peopleInView * share),
     eventName: event?.name,
-    crowdSource: sample?.source ?? "none",
-    reasoning: detection.reasoning,
+    crowdSource: "camera",
+    reasoning: price.why,
     slotId: slot._id,
     spotStartAt,
     spotEndAt: slot.endAt,
-    priceMinor,
-    floorMinor,
+    priceMinor: price.openingMinor,
+    floorMinor: price.minimumMinor,
+    valueMinor: price.valueMinor,
+    peopleInView,
+    plays: price.plays,
+    impressions: price.impressions,
+    priceWhy: price.why,
+    reofferRound,
     offerClosesAt,
     steps: [
-      { key: "detected", label: "Crowd detected", at: now, detail: detection.reasoning },
+      {
+        key: "detected",
+        label: `${peopleInView} ${peopleInView === 1 ? "person" : "people"} in view`,
+        at: now,
+        detail: `Camera count${event ? `; ${event.name} next door` : ""}.`,
+      },
       {
         key: "priced",
-        label: `${minutes}-minute spot priced at ${usd(priceMinor)}`,
+        label: `${minutes}-minute spot: bidding opens at ${usd(price.openingMinor)}`,
         at: now,
-        detail: `${slot.startAt <= now ? "Rest of the current slot" : "Next available slot"}, pro-rata screen price (${minutes} of 15 min).`,
+        detail: `${slot.startAt <= now ? "Rest of the current slot" : "Next available slot"}. ${price.why}`,
       },
       {
         key: "targeted",
-        label: `${targets.length} customer${targets.length === 1 ? "" : "s"} targeted`,
+        label: `${targets.length} compan${targets.length === 1 ? "y" : "ies"} targeted`,
         at: now,
         detail: [
           ...targets.map((t) => `${t.campaign.brief.slice(0, 40)}: ${Math.round(t.matchScore * 100)}% match, ~${t.relevantViewers} relevant`),
@@ -283,32 +357,50 @@ export async function detectCore(
     ],
   });
   await recordAudit(ctx, {
-    workspaceId: billboard.workspaceId,
+    workspaceId,
     traceId: `moment:${momentId}`,
     actor: `seller-agent:${workspace.name}`,
     type: "moment.detected",
     subjectId: momentId,
-    reason: `${detection.reasoning}; ${minutes}-min spot at ${usd(priceMinor)}; ${targets.length} customer(s) targeted`.slice(0, 1000),
-    data: { trigger, crowd: detection.crowd, relevantViewers: detection.relevantViewers, priceMinor, floorMinor },
+    reason: `${price.why}; ${targets.length} compan${targets.length === 1 ? "y" : "ies"} targeted`.slice(0, 1000),
+    data: {
+      trigger,
+      peopleInView,
+      valueMinor: price.valueMinor,
+      openingMinor: price.openingMinor,
+      minimumMinor: price.minimumMinor,
+      reofferRound,
+    },
   });
   const moment = (await ctx.db.get(momentId))!;
-  if (targets.length === 0) {
-    await addMomentStep(ctx, moment, "no_takers", "No eligible customers", skipped.join("; ") || "No ready creatives for this host.");
+
+  if (!offering) {
+    const reoffer = price.openingMinor > price.minimumMinor;
+    await addMomentStep(
+      ctx,
+      moment,
+      "no_takers",
+      "No eligible companies",
+      `${skipped.join("; ") || "No ready creatives for this host."} ${
+        reoffer ? `Re-offering in ${REOFFER_DELAY_MS / 1000} s, about 15% lower.` : `Holding at the ${usd(price.minimumMinor)} minimum.`
+      }`,
+    );
+    if (reoffer) await ctx.scheduler.runAfter(REOFFER_DELAY_MS, internal.moments.detectFor, { billboardId: billboard._id, trigger: "reoffer" });
+    await releaseWorkspace(ctx, workspaceId);
     return { momentId, reason: "no eligible customers" };
   }
 
   for (const t of targets) {
     const offerId = await ctx.db.insert("flashOffers", {
       momentId,
-      workspaceId: billboard.workspaceId,
+      workspaceId,
       advertiserId: t.campaign.advertiserId,
       campaignId: t.campaign._id,
       agentKeyId: t.key._id,
-      priceMinor,
+      priceMinor: price.openingMinor,
       relevantViewers: t.relevantViewers,
       matchScore: t.matchScore,
       status: "sent",
-      simulatedAgent: t.simulatedAgent,
       delivery: { status: "pending", attempts: 0 },
       sentAt: now,
     });
@@ -318,23 +410,23 @@ export async function detectCore(
       trigger: "flash_offer",
       flashOfferId: offerId,
       billboardId: billboard._id,
-      workspaceId: billboard.workspaceId,
+      workspaceId,
       slotIds: [slot._id],
-      slots: [{ slotId: slot._id, startAt: spotStartAt, endAt: slot.endAt, screenPriceMinor: priceMinor }],
+      slots: [{ slotId: slot._id, startAt: spotStartAt, endAt: slot.endAt, screenPriceMinor: price.openingMinor }],
       matchCount: 1,
-      priceMinor,
-      reason: `Flash offer from ${workspace.name}: ${minutes} min on ${billboard.name} for ${usd(priceMinor)}, ~${t.relevantViewers} relevant viewers. Reply within ${Math.round(settings.joinWindowMs / 1000)} s.`,
+      priceMinor: price.openingMinor,
+      reason: `Live spot from ${workspace.name}: ${minutes} min on ${billboard.name}, bidding opens at ${usd(price.openingMinor)} (minimum ${usd(price.minimumMinor)}), ~${t.relevantViewers} matching people in view. Join within ${joinSeconds} s.`,
       createdAt: now,
       inbox: { status: "delivered" },
     });
     await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId, event: "flash_offer" });
   }
-  await addMomentStep(ctx, moment, "offers_sent", `${targets.length} flash offer${targets.length === 1 ? "" : "s"} sent`, `Signed webhooks + inbox; window closes in ${Math.round(settings.joinWindowMs / 1000)} s.`);
-  await ctx.scheduler.runAt(offerClosesAt, internal.moments.close, { momentId });
+  await addMomentStep(ctx, moment, "offers_sent", `${targets.length} live offer${targets.length === 1 ? "" : "s"} sent`, `Signed webhooks + inbox; joining closes in ${joinSeconds} s.`);
+  await ctx.scheduler.runAt(offerClosesAt, internal.liveAuction.closeJoin, { momentId });
   return { momentId, reason: "offers sent" };
 }
 
-/** Event-driven entry point (sensor arrivals, event changes). */
+/** Event-driven entry point (camera arrivals, event changes, queue, re-offers, next spot). */
 export const detectFor = internalMutation({
   args: { billboardId: v.id("billboards"), trigger: momentTrigger },
   returns: v.object({ momentId: v.union(v.id("moments"), v.null()), reason: v.string() }),
@@ -349,40 +441,6 @@ export async function scheduleDetect(ctx: MutationCtx, billboardId: Id<"billboar
   if (!ws || !momentSettingsOf(ws).enabled) return;
   await ctx.scheduler.runAfter(0, internal.moments.detectFor, { billboardId, trigger });
 }
-
-/**
- * Host-only, clearly labeled: write a SIMULATED audience bucket of N people
- * for the current 15 minutes, then run the detector (cooldown bypassed, but
- * never while a moment is in progress).
- */
-export const simulateCrowd = mutation({
-  args: { billboardId: v.id("billboards"), people: v.optional(v.number()) },
-  returns: v.object({ momentId: v.union(v.id("moments"), v.null()), reason: v.string() }),
-  handler: async (ctx, args) => {
-    const member = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
-    const people = args.people ?? 30;
-    if (!Number.isSafeInteger(people) || people < 1 || people > 1000) fail("INVALID_INPUT", "people must be 1..1000");
-    const now = Date.now();
-    const bucketStart = now - (now % AUDIENCE_BUCKET_MS);
-    const billboard = (await ctx.db.get(args.billboardId))!;
-    const existing = await ctx.db
-      .query("audienceAggregates")
-      .withIndex("by_billboard_and_bucketStart", (q) => q.eq("billboardId", args.billboardId).eq("bucketStart", bucketStart))
-      .first();
-    const fields = { countEstimate: people, source: "simulated" as const, confidence: 1, peakInView: Math.max(1, Math.round(people / 4)) };
-    if (existing) await ctx.db.patch(existing._id, fields);
-    else await ctx.db.insert("audienceAggregates", { workspaceId: billboard.workspaceId, billboardId: args.billboardId, bucketStart, ...fields });
-    await recordAudit(ctx, {
-      workspaceId: billboard.workspaceId,
-      traceId: `billboard:${args.billboardId}`,
-      actor: member.actor,
-      type: "moment.detected",
-      subjectId: args.billboardId,
-      reason: `SIMULATED crowd: ${people} people written to the current 15-minute bucket by ${member.email}`,
-    });
-    return await detectCore(ctx, args.billboardId, "simulated");
-  },
-});
 
 // ---------------------------------------------------------------- replies (agent API)
 
@@ -560,7 +618,7 @@ async function closeCore(ctx: MutationCtx, momentId: Id<"moments">, why: string)
   }
 }
 
-/** Scheduled at the end of the response window (no-op if already closed early). */
+/** Old end-of-window close; nothing schedules it any more (announce schedules liveAuction.closeJoin). Task 6 removes it. */
 export const close = internalMutation({
   args: { momentId: v.id("moments") },
   returns: v.null(),

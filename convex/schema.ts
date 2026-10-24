@@ -82,6 +82,7 @@ export const bookingStatus = v.union(
 export const paymentProvider = v.union(
   v.literal("x402"),
   v.literal("nessie"),
+  /** Legacy: kept so old rows validate; no new code writes it. */
   v.literal("manual"),
 );
 
@@ -1118,6 +1119,7 @@ export default defineSchema({
     negotiationOfferTtlMs: v.optional(v.number()),
     /** Moment detector (ADR 0006). Missing = defaults in lib/moment.ts. */
     momentEnabled: v.optional(v.boolean()),
+    /** Legacy: kept so old rows validate; no new code writes it. */
     momentMinRelevantViewers: v.optional(v.number()),
     /** Legacy: kept so old rows validate; no new code writes it. */
     momentCooldownMs: v.optional(v.number()),
@@ -1256,6 +1258,7 @@ export default defineSchema({
     .index("by_campaign", ["campaignId"]),
 
   /**
+   * Legacy: kept so old rows validate; no new code writes it.
    * Hosted demo customer agents (labeled "simulated customer agent"). The agent
    * key is stored AES-GCM encrypted (key derived from INTERNAL_API_SECRET) and
    * never returned by any query.

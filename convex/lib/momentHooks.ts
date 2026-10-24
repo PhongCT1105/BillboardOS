@@ -1,6 +1,8 @@
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
+import { internal } from "../_generated/api";
 import { recordAudit } from "./audit";
+import { NEXT_SPOT_LEAD_MS } from "./liveAuction";
 
 /**
  * Small hooks the payment and player code call so the live-moment timeline
@@ -74,6 +76,11 @@ export async function onMomentPaid(
       : `$${(payment.amountMinor / 100).toFixed(2)} USDC, tx ${payment.externalRef}${payment.network ? ` on ${payment.network}` : ""}`,
     now,
   );
+  // No dead air: the next spot on this screen goes on sale a minute before this one ends.
+  await ctx.scheduler.runAt(Math.max(now, moment.spotEndAt - NEXT_SPOT_LEAD_MS), internal.moments.detectFor, {
+    billboardId: moment.billboardId,
+    trigger: "next_spot",
+  });
   const booking = await ctx.db.get(bookingId);
   if (booking?.status === "scheduled") {
     await addMomentStep(ctx, moment, "scheduled", "Scheduled on the screen", "The player picks it up through its live query.", now);

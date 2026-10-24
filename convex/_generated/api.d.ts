@@ -68,6 +68,7 @@ import type * as lib_x402_agentCard from "../lib/x402/agentCard.js";
 import type * as lib_x402_cdpEngine from "../lib/x402/cdpEngine.js";
 import type * as lib_x402_flow from "../lib/x402/flow.js";
 import type * as lib_x402_money from "../lib/x402/money.js";
+import type * as liveAuction from "../liveAuction.js";
 import type * as migrations from "../migrations.js";
 import type * as momentDelivery from "../momentDelivery.js";
 import type * as moments from "../moments.js";
@@ -155,6 +156,7 @@ declare const fullApi: ApiFromModules<{
   "lib/x402/cdpEngine": typeof lib_x402_cdpEngine;
   "lib/x402/flow": typeof lib_x402_flow;
   "lib/x402/money": typeof lib_x402_money;
+  liveAuction: typeof liveAuction;
   migrations: typeof migrations;
   momentDelivery: typeof momentDelivery;
   moments: typeof moments;

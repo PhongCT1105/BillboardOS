@@ -45,27 +45,9 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
   // Keep showing the last result while a query re-subscribes with new time args (no flicker on stage).
   const live = useSticky(useQuery(api.moments.live, { billboardId, atMinute }));
   const playing = useSticky(useQuery(api.player.nowPlaying, { billboardId, atMinute: Math.floor(now / MINUTE) * MINUTE }));
-  const simulate = useMutation(api.moments.simulateCrowd);
-  const [people, setPeople] = useState("30");
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
 
   if (live === undefined) return <div className="h-96 animate-pulse rounded-lg bg-panel" />;
   const m = live.latest;
-  const active = m !== null && (m.status === "offering" || m.status === "awarded" || m.status === "paid" || m.status === "playing") && m.spotEndAt > now;
-
-  async function run() {
-    setBusy(true);
-    setNote(null);
-    try {
-      const r = await simulate({ billboardId, people: Number(people) || 30 });
-      if (!r.momentId) setNote(r.reason);
-    } catch (err) {
-      setNote(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -75,28 +57,7 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
           <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">{live.screen.name}</h1>
           <p className="mt-1 text-sm text-muted">{live.screen.locationLabel}</p>
         </div>
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="flex flex-col gap-1 text-xs text-muted">
-            People
-            <input
-              value={people}
-              onChange={(e) => setPeople(e.target.value)}
-              inputMode="numeric"
-              className="w-20 rounded-md border border-line bg-ink px-2 py-2 font-mono text-sm text-fg"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={run}
-            disabled={busy || active}
-            title={active ? "A moment is in progress on this screen" : "Writes a SIMULATED audience reading and runs the seller agent"}
-            className="rounded-md border border-amber-400/70 bg-amber-400/15 px-4 py-2 text-sm font-semibold text-amber-200 transition-transform active:scale-[0.98] disabled:opacity-40"
-          >
-            Simulate crowd (simulated)
-          </button>
-        </div>
       </header>
-      {note && <p className="text-sm text-muted">{note}</p>}
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Fact label="Normal traffic" value={`${live.screen.normalTrafficPer15Min} / 15 min`} />
