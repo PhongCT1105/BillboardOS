@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { mutation } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
 import { audienceSource } from "./schema";
 
 /** Audience is aggregated into 15-minute buckets (matches slot length). */
@@ -68,5 +68,31 @@ export const record = mutation({
       ...fields,
     });
     return { aggregateId, bucketStart };
+  },
+});
+
+/** Last 48 audience buckets (12h) for a billboard, oldest first, for a sparkline. */
+export const recentForBillboard = query({
+  args: { billboardId: v.id("billboards") },
+  returns: v.array(
+    v.object({
+      bucketStart: v.number(),
+      countEstimate: v.number(),
+      source: audienceSource,
+      confidence: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query("audienceAggregates")
+      .withIndex("by_billboard_and_bucketStart", (q) => q.eq("billboardId", args.billboardId))
+      .order("desc")
+      .take(48);
+    return rows.reverse().map((r) => ({
+      bucketStart: r.bucketStart,
+      countEstimate: r.countEstimate,
+      source: r.source,
+      confidence: r.confidence,
+    }));
   },
 });

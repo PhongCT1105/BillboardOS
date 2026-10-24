@@ -2,15 +2,14 @@ import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
+import { ensureUpcomingSlots } from "./lib/inventory";
 
-const SLOT_MS = 15 * 60 * 1000;
-const SLOT_COUNT = 48;
 const BILLBOARD_NAME = "Moscone West Screen";
 
 /**
  * Idempotent demo seed (`npm run seed`). Creates, only if missing:
- * one San Francisco billboard with 48 fifteen-minute slots starting at the
- * next quarter hour, two advertisers, and one active campaign.
+ * one San Francisco billboard, 15-minute slots for the next 12 hours (topped
+ * up on every run), two advertisers, and one active campaign.
  */
 export const demo = internalMutation({
   args: {},
@@ -40,20 +39,11 @@ export const demo = internalMutation({
         baseRateMinor: 4000, // $40
         deviceStatus: "online",
       });
-      const now = Date.now();
-      const firstStart = Math.ceil((now + 1) / SLOT_MS) * SLOT_MS;
-      for (let i = 0; i < SLOT_COUNT; i++) {
-        const startAt = firstStart + i * SLOT_MS;
-        await ctx.db.insert("slots", {
-          billboardId,
-          startAt,
-          endAt: startAt + SLOT_MS,
-          state: "available",
-        });
-        slotsCreated++;
-      }
       billboard = (await ctx.db.get(billboardId))!;
     }
+    // Rolling 12h of 15-minute slots (same helper the cron uses).
+    slotsCreated = await ensureUpcomingSlots(ctx, billboard._id, Date.now());
+    if (slotsCreated > 0) created = true;
 
     const advertiserSpecs = [
       { displayName: "Golden Gate Coffee Co.", paymentTerms: "prepay" as const },
@@ -86,6 +76,7 @@ export const demo = internalMutation({
         budgetMinor: 30000, // $300
         currency: "USD",
         status: "active",
+        creativeStatus: "none",
       });
       campaign = (await ctx.db.get(campaignId))!;
     }

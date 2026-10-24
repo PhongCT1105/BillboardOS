@@ -43,6 +43,15 @@ export const campaignStatus = v.union(
   v.literal("cancelled"),
 );
 
+export const creativeStatus = v.union(
+  v.literal("none"),
+  v.literal("pending_review"),
+  v.literal("approved"),
+  v.literal("rejected"),
+);
+
+export const playbackStatus = v.union(v.literal("played"), v.literal("failed"));
+
 export const pricingConfidence = v.union(
   v.literal("low"),
   v.literal("medium"),
@@ -102,6 +111,8 @@ export const audienceSource = v.union(
 export const auditEventType = v.union(
   // inventory / booking lifecycle
   v.literal("seed.completed"),
+  v.literal("inventory.generated"),
+  v.literal("campaign.created"),
   v.literal("quote.created"),
   v.literal("quote.expired"),
   v.literal("slot.held"),
@@ -112,6 +123,7 @@ export const auditEventType = v.union(
   v.literal("payment.replayed"),
   v.literal("payment.exception"),
   v.literal("booking.confirmed"),
+  v.literal("booking.scheduled"),
   v.literal("finance.exception_opened"),
   // agent / operator events (used by later steps)
   v.literal("brief.parsed"),
@@ -120,8 +132,11 @@ export const auditEventType = v.union(
   v.literal("counteroffer.received"),
   v.literal("policy.evaluated"),
   v.literal("payment.verification_requested"),
+  v.literal("creative.attached"),
   v.literal("creative.approved"),
+  v.literal("creative.rejected"),
   v.literal("playback.observed"),
+  v.literal("playback.failed"),
   v.literal("operator.approved"),
 );
 
@@ -169,6 +184,13 @@ export const campaignFields = {
   budgetMinor: v.number(),
   currency,
   status: campaignStatus,
+  /** Missing on legacy rows = "none". */
+  creativeStatus: v.optional(creativeStatus),
+  /** Storage id of the creative; URLs are resolved on read, never stored. */
+  creativeStorageId: v.optional(v.id("_storage")),
+  creativeContentType: v.optional(v.string()),
+  creativeSubmittedAt: v.optional(v.number()),
+  creativeReviewReason: v.optional(v.string()),
 };
 
 export const quoteFields = {
@@ -206,6 +228,7 @@ export const holdFields = {
 export const bookingFields = {
   holdId: v.id("holds"),
   quoteId: v.id("quotes"),
+  campaignId: v.id("campaigns"),
   billboardId: v.id("billboards"),
   slotIds: v.array(v.id("slots")),
   amountMinor: v.number(),
@@ -251,6 +274,18 @@ export const audienceAggregateFields = {
   confidence: v.number(),
 };
 
+export const playbackEventFields = {
+  bookingId: v.id("bookings"),
+  slotId: v.id("slots"),
+  billboardId: v.id("billboards"),
+  campaignId: v.id("campaigns"),
+  /** Creative that was on screen; absent if the campaign had none (failed delivery). */
+  storageId: v.optional(v.id("_storage")),
+  contentType: v.optional(v.string()),
+  observedAt: v.number(),
+  status: playbackStatus,
+};
+
 export const auditEventFields = {
   traceId: v.string(),
   /** e.g. "system", "operator", "agent:pricing", "buyer:<name>" */
@@ -277,9 +312,9 @@ export default defineSchema({
     "displayName",
   ]),
 
-  campaigns: defineTable(campaignFields).index("by_advertiser", [
-    "advertiserId",
-  ]),
+  campaigns: defineTable(campaignFields)
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_creativeStatus", ["creativeStatus"]),
 
   quotes: defineTable(quoteFields).index("by_campaign", ["campaignId"]),
 
@@ -289,7 +324,8 @@ export default defineSchema({
 
   bookings: defineTable(bookingFields)
     .index("by_hold", ["holdId"])
-    .index("by_billboard", ["billboardId"]),
+    .index("by_billboard", ["billboardId"])
+    .index("by_campaign_and_status", ["campaignId", "status"]),
 
   payments: defineTable(paymentFields)
     .index("by_externalRef", ["externalRef"])
@@ -303,6 +339,10 @@ export default defineSchema({
     "by_billboard_and_bucketStart",
     ["billboardId", "bucketStart"],
   ),
+
+  playbackEvents: defineTable(playbackEventFields)
+    .index("by_slot_and_status", ["slotId", "status"])
+    .index("by_billboard", ["billboardId"]),
 
   auditEvents: defineTable(auditEventFields)
     .index("by_trace", ["traceId"])

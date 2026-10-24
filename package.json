@@ -16,17 +16,22 @@
     "seed": "convex run seed:demo"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@phosphor-icons/react": "^2.1.10",
     "convex": "^1.48.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "convex-test": "^0.0.65",
+    "tailwindcss": "^4.3.3",
     "typescript": "~5.9.3",
     "vite": "^8.3.5",
     "vitest": "^5.0.5"

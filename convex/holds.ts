@@ -200,12 +200,14 @@ export const release = mutation({
   args: {
     holdId: v.id("holds"),
     idempotencyKey: v.string(),
-    actor: v.string(),
+    /** Defaults to "buyer". */
+    actor: v.optional(v.string()),
     reason: v.optional(v.string()),
   },
   returns: v.object({ holdId: v.id("holds"), status: holdStatus }),
   handler: async (ctx, args) => {
-    assertBoundedString("actor", args.actor, MAX_KEY_LENGTH);
+    const actor = args.actor ?? "buyer";
+    assertBoundedString("actor", actor, MAX_KEY_LENGTH);
     const hold = await ctx.db.get(args.holdId);
     if (!hold) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Hold not found" });
@@ -220,7 +222,7 @@ export const release = mutation({
       ctx,
       hold,
       "released",
-      args.actor,
+      actor,
       (args.reason ?? "Cancelled by holder").slice(0, 500),
     );
     return { holdId: hold._id, status: "released" as const };

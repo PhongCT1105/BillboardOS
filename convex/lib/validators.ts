@@ -1,8 +1,10 @@
 import { ConvexError, v } from "convex/values";
 import {
+  advertiserFields,
   auditEventFields,
   billboardFields,
   financeExceptionFields,
+  playbackEventFields,
   quoteFields,
   slotFields,
 } from "../schema";
@@ -12,6 +14,18 @@ export const billboardDoc = v.object({
   _id: v.id("billboards"),
   _creationTime: v.number(),
   ...billboardFields,
+});
+
+export const advertiserDoc = v.object({
+  _id: v.id("advertisers"),
+  _creationTime: v.number(),
+  ...advertiserFields,
+});
+
+export const playbackEventDoc = v.object({
+  _id: v.id("playbackEvents"),
+  _creationTime: v.number(),
+  ...playbackEventFields,
 });
 
 export const slotDoc = v.object({
