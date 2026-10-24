@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import type { FunctionReturnType } from "convex/server";
@@ -10,7 +11,8 @@ import { BookPage } from "./book/BookPage";
 import { FinancePage } from "./finance/FinancePage";
 import { SensorPage } from "./sensor/SensorPage";
 import { SignInPage } from "./auth/SignInPage";
-import { CreateCompany, CreateWorkspace, RoleChooser } from "./auth/Onboarding";
+import { AutoSetup } from "./auth/AutoSetup";
+import { readPendingRole } from "./auth/SignInPage";
 import { AlertsBadgeLink, CUSTOMER_TABS, CustomerPage, type CustomerTab } from "./customer/CustomerPage";
 import { WorkspacePage } from "./workspace/WorkspacePage";
 import { MomentPage } from "./moment/MomentPage";
@@ -31,6 +33,12 @@ function Shell({ route }: { route: string }) {
   const me = useQuery(api.accounts.me, isAuthenticated ? {} : "skip");
   const loading = isLoading || (isAuthenticated && me === undefined);
   const signedIn = isAuthenticated && me ? me : null;
+  // A fresh sign-up stays on the setup screen until every starter step has finished.
+  const [setupRunning, setSetupRunning] = useState(false);
+  const userId = signedIn?.userId;
+  useEffect(() => {
+    if (userId && readPendingRole()) setSetupRunning(true);
+  }, [userId]);
 
   return (
     <div className="min-h-[100dvh]">
@@ -58,15 +66,15 @@ function Shell({ route }: { route: string }) {
         </div>
       </header>
       {loading ? (
-        <main className="mx-auto max-w-[1400px] px-4 pt-8 md:px-6">
-          <div className="h-64 animate-pulse rounded bg-panel" />
+        <main className="grid min-h-[calc(100dvh-3.5rem)] place-items-center px-4">
+          <p className="animate-pulse text-sm text-muted">Loading your workspace...</p>
         </main>
       ) : !signedIn ? (
         <SignInPage />
-      ) : signedIn.accountType === null ? (
-        <RoleChooser />
+      ) : setupRunning || needsSetup(signedIn) ? (
+        <AutoSetup me={signedIn} onDone={() => setSetupRunning(false)} />
       ) : signedIn.accountType === "host" ? (
-        <HostArea me={signedIn} route={route} />
+        <HostArea route={route} />
       ) : (
         <CustomerArea me={signedIn} route={route} />
       )}
@@ -74,8 +82,13 @@ function Shell({ route }: { route: string }) {
   );
 }
 
-function HostArea({ me, route }: { me: Me; route: string }) {
-  if (me.workspaces.length === 0) return <CreateWorkspace />;
+/** New accounts land on automatic setup until they have a workspace (host) or company (customer). */
+function needsSetup(me: Me): boolean {
+  if (me.accountType === null) return true;
+  return me.accountType === "host" ? me.workspaces.length === 0 : me.companies.length === 0;
+}
+
+function HostArea({ route }: { route: string }) {
   const sensorMatch = route.match(/^\/sensor\/([^/]+)$/);
   if (sensorMatch) return <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />;
   if (route === "/finance") return <FinancePage />;
@@ -92,7 +105,6 @@ function HostArea({ me, route }: { me: Me; route: string }) {
 }
 
 function CustomerArea({ me, route }: { me: Me; route: string }) {
-  if (me.companies.length === 0) return <CreateCompany />;
   if (route === "/book") return <BookPage />;
   const tabMatch = route.match(/^\/customer(?:\/([a-z]+))?$/);
   if (tabMatch || route === "/" || route === "/console") {

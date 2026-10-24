@@ -6,13 +6,16 @@ import "@fontsource-variable/geist";
 import "@fontsource-variable/geist-mono";
 import "./index.css";
 import { App } from "./App";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ConvexAuthProvider client={convex}>
-      <App />
-    </ConvexAuthProvider>
+    <ErrorBoundary>
+      <ConvexAuthProvider client={convex}>
+        <App />
+      </ConvexAuthProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );
