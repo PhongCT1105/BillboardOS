@@ -6,8 +6,10 @@ import { AlertsPanel } from "./AlertsPanel";
 import { AgentKeysPanel } from "./AgentKeysPanel";
 import { BookingsPanel } from "./BookingsPanel";
 import { NegotiationsPanel } from "./NegotiationsPanel";
+import { AgentSetupPanel } from "./AgentSetupPanel";
 
 export const CUSTOMER_TABS = [
+  { key: "agent", label: "Agent" },
   { key: "alerts", label: "Alerts" },
   { key: "watch", label: "Watch rules" },
   { key: "campaigns", label: "Campaigns" },
@@ -44,6 +46,7 @@ export function CustomerPage({ tab, companyName }: { tab: CustomerTab; companyNa
         ))}
       </nav>
       <div className="mt-8">
+        {tab === "agent" && <AgentSetupPanel />}
         {tab === "alerts" && <AlertsPanel />}
         {tab === "watch" && <WatchRulesPanel />}
         {tab === "campaigns" && <CampaignsPanel />}
