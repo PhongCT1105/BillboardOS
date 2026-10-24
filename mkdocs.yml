@@ -1,0 +1,44 @@
+site_name: BillboardOS
+site_description: Documentation for the BillboardOS Cal Hacks 13.0 project
+repo_url: https://github.com/PhongCT1105/BillboardOS
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: cyan
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+nav:
+  - Home: index.md
+  - Competition:
+      - Guide & rules: competition/index.md
+      - Sponsor track catalog: competition/sponsor-tracks.md
+      - Track strategy: competition/track-strategy.md
+      - Source register: competition/sources.md
+  - Product:
+      - Product vision: product/vision.md
+      - MVP requirements: product/requirements.md
+  - Architecture:
+      - System overview: architecture/overview.md
+      - Agent protocol: architecture/agents.md
+      - Payments & risk: architecture/payments-and-risk.md
+      - Data model: architecture/data-model.md
+  - Development:
+      - Getting started: development/getting-started.md
+      - Roadmap: development/roadmap.md
+  - Demo: demo/judging.md
+  - Notes:
+      - Original ideation: notes/ideation.md
+      - Open questions: notes/open-questions.md
+  - Decisions: decisions/0001-scope.md
