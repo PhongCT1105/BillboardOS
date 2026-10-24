@@ -19,3 +19,6 @@ site/
 
 # Copied from node_modules by postinstall
 public/mediapipe/
+
+# Brainstorm mockups (local only)
+.superpowers/
