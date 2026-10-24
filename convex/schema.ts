@@ -1,4 +1,5 @@
 import { defineSchema, defineTable } from "convex/server";
+import { authTables } from "@convex-dev/auth/server";
 import { v } from "convex/values";
 
 /**
@@ -180,6 +181,7 @@ export const audienceSource = v.union(
 export const auditEventType = v.union(
   // inventory / booking lifecycle
   v.literal("seed.completed"),
+  v.literal("operator.granted"),
   v.literal("demo.reset"),
   v.literal("inventory.generated"),
   v.literal("billboard.baseline_changed"),
@@ -492,6 +494,19 @@ export const auditEventFields = {
 // ---------------------------------------------------------------------------
 
 export default defineSchema({
+  // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
+  ...authTables,
+
+  /** Signed-in users allowed to act as operator/controller. */
+  operators: defineTable({
+    userId: v.id("users"),
+    email: v.string(),
+    /** "system:first-user" or "operator:<email>" */
+    grantedBy: v.string(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_email", ["email"]),
+
   billboards: defineTable(billboardFields).index("by_name", ["name"]),
 
   slots: defineTable(slotFields).index("by_billboard_and_startAt", [

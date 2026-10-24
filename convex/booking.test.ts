@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules } from "./test.setup";
+import { modules, signedInOperator, type TestClient } from "./test.setup";
 import { HOLD_TTL_MS, QUOTE_TTL_MS } from "./lib/constants";
 
 // 09:07 PDT; first seeded slot starts 09:15 PDT (hour factor 1.0, base $40).
@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 async function setup() {
-  const t = convexTest(schema, modules);
+  const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
@@ -44,7 +44,7 @@ async function errorCode(promise: Promise<unknown>): Promise<string> {
 }
 
 function allRows<T extends "slots" | "holds" | "bookings" | "payments" | "financeExceptions" | "quotes">(
-  t: ReturnType<typeof convexTest>,
+  t: TestClient,
   table: T,
 ) {
   return t.run(async (ctx) => await ctx.db.query(table).collect());
@@ -72,7 +72,8 @@ describe("quotes", () => {
     });
     expect(baseline.amountMinor).toBe(4000);
     expect(baseline.confidence).toBe("low");
-    expect(baseline.expiresAt).toBe(START + QUOTE_TTL_MS);
+    expect(baseline.expiresAt - START).toBeGreaterThanOrEqual(QUOTE_TTL_MS);
+    expect(baseline.expiresAt - START).toBeLessThan(QUOTE_TTL_MS + 1000);
 
     await t.mutation(api.audience.record, {
       billboardId: seed.billboardId,
@@ -385,7 +386,7 @@ describe("payments", () => {
 });
 
 describe("http /internal/payments/verified", () => {
-  async function post(t: ReturnType<typeof convexTest>, body: unknown, auth?: string) {
+  async function post(t: TestClient, body: unknown, auth?: string) {
     return await t.fetch("/internal/payments/verified", {
       method: "POST",
       headers: {

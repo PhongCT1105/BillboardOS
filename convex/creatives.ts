@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { creativeStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { scheduleBooking } from "./lib/scheduling";
+import { requireOperator } from "./lib/operator";
 
 const MAX_CREATIVE_BYTES = 50 * 1024 * 1024;
 const MAX_BOOKINGS_TO_SCHEDULE = 100;
@@ -87,7 +88,7 @@ export const attach = mutation({
 /**
  * Operator decision on a pending creative. Approving schedules every
  * not-yet-finished slot of the campaign's confirmed bookings.
- * TODO(auth): operator-only once auth exists.
+ * Operator only.
  */
 export const review = mutation({
   args: {
@@ -101,6 +102,7 @@ export const review = mutation({
     slotsScheduled: v.number(),
   }),
   handler: async (ctx, args) => {
+    const operator = await requireOperator(ctx);
     const reason = args.reason.trim().slice(0, 500);
     if (reason.length === 0) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "reason is required" });
@@ -122,7 +124,7 @@ export const review = mutation({
     });
     await recordAudit(ctx, {
       traceId: `campaign:${args.campaignId}`,
-      actor: "operator",
+      actor: operator.actor,
       type: args.decision === "approved" ? "creative.approved" : "creative.rejected",
       subjectId: args.campaignId,
       reason,
@@ -139,7 +141,7 @@ export const review = mutation({
         )
         .take(MAX_BOOKINGS_TO_SCHEDULE);
       for (const booking of bookings) {
-        slotsScheduled += await scheduleBooking(ctx, booking, now, "operator");
+        slotsScheduled += await scheduleBooking(ctx, booking, now, operator.actor);
       }
     }
     return { campaignId: args.campaignId, creativeStatus: args.decision, slotsScheduled };
@@ -160,6 +162,7 @@ export const pendingReview = query({
     }),
   ),
   handler: async (ctx) => {
+    await requireOperator(ctx);
     const campaigns = await ctx.db
       .query("campaigns")
       .withIndex("by_creativeStatus", (q) => q.eq("creativeStatus", "pending_review"))

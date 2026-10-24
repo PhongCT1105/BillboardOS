@@ -1,13 +1,10 @@
 import { useState } from "react";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import { errorMessage, money, words } from "../lib/format";
 
 type Approval = FunctionReturnType<typeof api.approvals.pending>[number];
-
-/** No auth yet: the console acts as the controller. Agents request; only a person approves. */
-const CONTROLLER = "controller";
 
 export function ApprovalQueue({ approvals }: { approvals: Approval[] | undefined }) {
   const pending = approvals?.filter((a) => a.status === "pending");
@@ -34,6 +31,9 @@ export function ApprovalQueue({ approvals }: { approvals: Approval[] | undefined
 
 function ApprovalItem({ approval }: { approval: Approval }) {
   const decide = useMutation(api.approvals.decide);
+  // The approver is whoever is signed in; the server enforces this too.
+  const me = useQuery(api.operators.me);
+  const ownRequest = me?.email != null && approval.requestedBy === `operator:${me.email}`;
   const [rejecting, setRejecting] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -45,9 +45,8 @@ function ApprovalItem({ approval }: { approval: Approval }) {
     try {
       await decide({
         approvalId: approval._id,
-        approvedBy: CONTROLLER,
         decision,
-        note: decision === "approved" ? note || "Approved by controller" : note,
+        note: decision === "approved" ? note || "Approved" : note,
       });
     } catch (err) {
       setError(errorMessage(err));
@@ -65,6 +64,9 @@ function ApprovalItem({ approval }: { approval: Approval }) {
       <p className="mt-1 text-sm text-muted">{approval.subjectLabel}</p>
       <p className="mt-2 text-sm">{approval.reason}</p>
       <p className="mt-1 text-xs text-faint">Requested by {approval.requestedBy}</p>
+      {ownRequest && (
+        <p className="mt-2 text-xs text-muted">You requested this, so another operator has to decide it.</p>
+      )}
 
       {rejecting && (
         <label className="mt-3 flex flex-col gap-2 text-sm">
@@ -100,7 +102,7 @@ function ApprovalItem({ approval }: { approval: Approval }) {
           <>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || ownRequest}
               onClick={() => submit("approved")}
               className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink active:scale-[0.98] disabled:opacity-50"
             >

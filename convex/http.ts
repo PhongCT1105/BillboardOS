@@ -2,12 +2,16 @@ import { httpRouter } from "convex/server";
 import { ConvexError } from "convex/values";
 import { env, httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { auth } from "./auth";
 
 /**
  * Internal HTTP surface for the Express x402 payment server.
  * Every route requires `Authorization: Bearer <INTERNAL_API_SECRET>`.
  */
 const http = httpRouter();
+
+// Convex Auth (operator sign-in): OAuth/JWKS discovery routes.
+auth.addHttpRoutes(http);
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

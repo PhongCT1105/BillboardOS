@@ -3,7 +3,7 @@ import { ConvexError } from "convex/values";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { modules } from "./test.setup";
+import { modules, signedInOperator, type TestClient } from "./test.setup";
 import { demandFromAudience, trailingAudience, LOW_COVERAGE_CONFIDENCE_CAP } from "./lib/pricing";
 
 // 09:07 PDT; current audience bucket starts 16:00Z; first slot 16:15Z (hour factor 1.0, base $40).
@@ -29,7 +29,7 @@ async function errorCode(promise: Promise<unknown>): Promise<string> {
 }
 
 async function setup() {
-  const t = convexTest(schema, modules);
+  const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,

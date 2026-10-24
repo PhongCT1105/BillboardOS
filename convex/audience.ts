@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { audienceSource } from "./schema";
 
 import { AUDIENCE_BUCKET_MS } from "./lib/pricing";
+import { requireOperator } from "./lib/operator";
 
 export { AUDIENCE_BUCKET_MS };
 const MAX_COUNT = 100_000;
@@ -12,8 +13,7 @@ const MAX_COUNT = 100_000;
  * Upserts: a later report for the same billboard+bucket replaces the earlier one.
  * Only aggregate counts are stored, never images or identities.
  *
- * TODO(auth): unauthenticated for the demo. Before anything public, require a
- * per-device secret (HTTP action with bearer token) or move behind auth.
+ * Operator only: the sensor laptop signs in as an operator.
  */
 export const record = mutation({
   args: {
@@ -27,6 +27,7 @@ export const record = mutation({
     bucketStart: v.number(),
   }),
   handler: async (ctx, args) => {
+    await requireOperator(ctx);
     if (
       !Number.isSafeInteger(args.countEstimate) ||
       args.countEstimate < 0 ||
@@ -81,7 +82,7 @@ const MAX_PEAK_IN_VIEW = 500;
  * people-in-view (dwell proxy), and the latest confidence/source.
  * Only aggregate counts are stored, never images or identities.
  *
- * TODO(auth): unauthenticated for the demo (same as `record`).
+ * Operator only: the sensor laptop signs in as an operator.
  */
 export const addArrivals = mutation({
   args: {
@@ -98,6 +99,7 @@ export const addArrivals = mutation({
     peakInView: v.number(),
   }),
   handler: async (ctx, args) => {
+    await requireOperator(ctx);
     if (!Number.isSafeInteger(args.arrivals) || args.arrivals < 0 || args.arrivals > MAX_ARRIVALS_PER_CALL) {
       throw new ConvexError({
         code: "INVALID_INPUT",

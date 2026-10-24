@@ -4,22 +4,21 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { approvalAction, approvalFields, approvalStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import {
-  assertActor,
   createApproval,
   invoiceBalance,
   resolveFinanceException,
   settleInvoice,
 } from "./lib/finance";
 import { usd } from "./lib/reconcile";
+import { requireOperator } from "./lib/operator";
 
 /**
- * Controls (segregation of duties). Anyone, including agents, may REQUEST.
- * Only a human who is not the requester may DECIDE. Executing an approved
+ * Controls (segregation of duties). Agents request through internal paths
+ * ("agent:*"); people request and decide as signed-in operators, whose
+ * identity ("operator:<email>") comes from the session, never from arguments.
+ * Only an operator who is not the requester may DECIDE. Executing an approved
  * request is the only way write-offs, refunds and manual matches change
  * ledger state, and the only way their finance exceptions get resolved.
- *
- * TODO(auth): requestedBy / approvedBy are caller-supplied for the demo.
- * Once auth exists derive them from ctx.auth and check a controller role.
  */
 
 type SubjectRef =
@@ -100,14 +99,13 @@ async function checkRequest(
   }
 }
 
-/** File a request for controller approval. Agents may call this; it never executes anything. */
+/** A signed-in operator files a request for another operator's approval. Never executes anything. */
 export const request = mutation({
   args: {
     action: approvalAction,
     /** Id of the invoice, payment or bank transaction the action is about. */
     subjectId: v.string(),
     amountMinor: v.number(),
-    requestedBy: v.string(),
     reason: v.string(),
     /** Required for apply_manual_match: the invoice to apply the bank line to. */
     invoiceId: v.optional(v.id("invoices")),
@@ -116,6 +114,7 @@ export const request = mutation({
   },
   returns: v.object({ approvalId: v.id("approvals"), status: approvalStatus, replayed: v.boolean() }),
   handler: async (ctx, args) => {
+    const operator = await requireOperator(ctx);
     const subject = await loadSubject(ctx, args.subjectId);
     if (!subject) throw new ConvexError({ code: "NOT_FOUND", message: "Subject not found" });
     await checkRequest(ctx, args.action, subject, args.amountMinor, args.invoiceId);
@@ -126,7 +125,7 @@ export const request = mutation({
         subjectKind: subject.kind,
         subjectId: subject.doc._id,
         amountMinor: args.amountMinor,
-        requestedBy: args.requestedBy,
+        requestedBy: operator.actor,
         reason: args.reason,
         invoiceId: args.invoiceId,
         financeExceptionId: args.financeExceptionId,
@@ -139,14 +138,13 @@ export const request = mutation({
 });
 
 /**
- * Controller decision. Hard rules: approver != requester, and no "agent:*"
- * identity can approve. Approving executes the action immediately; if the
+ * Controller decision by the signed-in operator. Hard rules: approver !=
+ * requester, and no "agent:*" identity can approve. Approving executes the action immediately; if the
  * world changed while the request waited, execution is skipped and recorded.
  */
 export const decide = mutation({
   args: {
     approvalId: v.id("approvals"),
-    approvedBy: v.string(),
     decision: v.union(v.literal("approved"), v.literal("rejected")),
     note: v.string(),
   },
@@ -156,7 +154,7 @@ export const decide = mutation({
     executionResult: v.union(v.string(), v.null()),
   }),
   handler: async (ctx, args) => {
-    const approver = assertActor("approvedBy", args.approvedBy);
+    const approver = (await requireOperator(ctx)).actor;
     const note = args.note.trim().slice(0, 1000);
     const approval = await ctx.db.get(args.approvalId);
     if (!approval) throw new ConvexError({ code: "NOT_FOUND", message: "Approval not found" });
@@ -367,6 +365,7 @@ export const pending = query({
     }),
   ),
   handler: async (ctx) => {
+    await requireOperator(ctx);
     const rows = await ctx.db
       .query("approvals")
       .withIndex("by_status", (q) => q.eq("status", "pending"))

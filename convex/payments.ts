@@ -5,6 +5,7 @@ import { financeExceptionKind, paymentProvider } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { ACCEPTED_PAYMENT_ASSETS, MAX_KEY_LENGTH } from "./lib/constants";
 import { scheduleBooking } from "./lib/scheduling";
+import { requireOperator } from "./lib/operator";
 
 /**
  * Result of reporting a verified payment. Discriminated on `outcome`:
@@ -325,12 +326,13 @@ export const recordVerified = internalMutation({
  * (simulated) payment of exactly the held amount in USD. Goes through the
  * same rules as verified payments (expired hold -> exception, replay-safe via
  * externalRef `manual:<holdId>`). Clearly labeled in the audit log.
- * TODO(auth): operator-only once auth exists; this is a public demo control.
+ * Operator only (signed-in operator; identity recorded as the audit actor).
  */
 export const recordManual = mutation({
   args: { holdId: v.id("holds"), note: v.string() },
   returns: recordVerifiedResult,
   handler: async (ctx, args): Promise<RecordVerifiedResult> => {
+    const operator = await requireOperator(ctx);
     const note = args.note.trim().slice(0, 500);
     const hold = await ctx.db.get(args.holdId);
     if (!hold) {
@@ -347,7 +349,7 @@ export const recordManual = mutation({
         idempotencyKey: `manual:${args.holdId}`,
       },
       {
-        actor: "operator",
+        actor: operator.actor,
         reasonPrefix: `MANUAL (simulated) payment${note ? ` [${note}]` : ""}: `,
       },
     );

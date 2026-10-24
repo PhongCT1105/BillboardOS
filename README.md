@@ -69,6 +69,8 @@ npm run typecheck               # web, convex and server
 | `#/book` | Advertiser booking: quote, hold, creative upload |
 | `#/player/<billboardId>` | Fullscreen billboard screen |
 
+**Operator accounts.** The console, Finance and Sensor pages need an operator sign-in; booking and the screen are public. The **first account created on a deployment becomes the operator**. Teammates create an account, then an operator grants them with `operators.grant` (by email). Demoing separation of duties on operator-filed requests needs two operator accounts; agent-filed requests (for example `agent:ar` refunds) can be approved by any operator.
+
 Convex reads its own environment, not `.env`: push server-side keys with `npx convex env set NAME value`.
 
 Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
@@ -77,14 +79,15 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 
 | Component | Status |
 |---|---|
-| Slot inventory, quotes, exclusive holds, hold expiry, bookings | **Real** (Convex transactions, 50+ tests) |
+| Slot inventory, quotes, exclusive holds, hold expiry, bookings | **Real** (Convex transactions, 69 tests) |
 | Deterministic pricing with reserve floor | **Real** |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
 | Manual payment button in the console | **Simulated** fallback, labeled "MANUAL (simulated)" in the audit log |
 | Invoices, reconciliation, approvals, collections planning | **Real logic** on **simulated** fixture data with planted errors and an answer key |
 | Bank feed | **Simulated** fixture today; Capital One Nessie sandbox next |
-| Audience counts | **Not built yet**; pricing falls back to baseline, labeled low confidence |
+| Audience counts | **Real** on-device person detection (MediaPipe) sending aggregate counts only; labeled **simulated** fallback button |
+| Operator sign-in and approvals by identity | **Real** (Convex Auth, email + password) |
 | CRS risk screening, CREAO agents, Claude explanations | **Not built yet** |
 
 ## Key sponsor ambitions

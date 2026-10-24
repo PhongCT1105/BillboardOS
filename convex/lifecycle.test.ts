@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules } from "./test.setup";
+import { modules, signedInOperator, type TestClient } from "./test.setup";
 
 // 09:07 PDT; first seeded slot is 16:15-16:30Z.
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -18,10 +18,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-type T = ReturnType<typeof convexTest>;
+type T = TestClient;
 
 async function setup() {
-  const t = convexTest(schema, modules);
+  const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
@@ -191,7 +191,7 @@ describe("creatives", () => {
     const [c] = await t.query(api.campaigns.list, {});
     expect(c.creativeReviewReason).toBe("Illegible text");
     const events = await t.query(api.audit.recent, {});
-    expect(events.some((e) => e.type === "creative.rejected" && e.actor === "operator")).toBe(true);
+    expect(events.some((e) => e.type === "creative.rejected" && e.actor === "operator:ops@billboardos.test")).toBe(true);
   });
 });
 
@@ -209,7 +209,7 @@ describe("manual payments", () => {
     });
     const trail = await t.query(api.audit.forTrace, { traceId: hold.traceId });
     const confirmed = trail.find((e) => e.type === "payment.confirmed")!;
-    expect(confirmed.actor).toBe("operator");
+    expect(confirmed.actor).toBe("operator:ops@billboardos.test");
     expect(confirmed.reason).toContain("MANUAL (simulated) payment");
 
     const again = await t.mutation(api.payments.recordManual, { holdId: hold.holdId, note: "again" });

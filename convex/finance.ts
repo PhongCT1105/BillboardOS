@@ -12,12 +12,14 @@ import { financeExceptionDoc } from "./lib/validators";
 import { invoiceBalance } from "./lib/finance";
 import { daysOverdue } from "./lib/collections";
 import { reconciliationSummary, runReconciliationBatch } from "./reconciliation";
+import { requireOperator } from "./lib/operator";
 
 /** Open finance exceptions needing operator review, newest first (max 100). */
 export const openExceptions = query({
   args: {},
   returns: v.array(financeExceptionDoc),
   handler: async (ctx) => {
+    await requireOperator(ctx);
     return await ctx.db
       .query("financeExceptions")
       .withIndex("by_status", (q) => q.eq("status", "open"))
@@ -53,6 +55,7 @@ export const receivables = query({
     }),
   ),
   handler: async (ctx, args) => {
+    await requireOperator(ctx);
     const asOf = args.asOf ?? Date.now();
     const invoices: Doc<"invoices">[] = [];
     for (const status of ["open", "partially_paid", "disputed"] as const) {
@@ -128,6 +131,7 @@ export const bankFeed = query({
     }),
   ),
   handler: async (ctx) => {
+    await requireOperator(ctx);
     const lines = await ctx.db.query("bankTransactions").withIndex("by_postedAt").order("desc").take(50);
     const rows = [];
     for (const t of lines) {
@@ -182,10 +186,13 @@ export const bankFeed = query({
  * Operator button: run the AR clerk over unmatched bank lines now.
  * Cash is applied as "agent:ar"; anything that needs a person becomes a
  * finance exception and/or an approval request.
- * TODO(auth): operator-only once auth exists.
+ * Operator only.
  */
 export const runReconciliation = mutation({
   args: {},
   returns: reconciliationSummary,
-  handler: async (ctx) => runReconciliationBatch(ctx, "operator"),
+  handler: async (ctx) => {
+    const operator = await requireOperator(ctx);
+    return await runReconciliationBatch(ctx, operator.actor);
+  },
 });

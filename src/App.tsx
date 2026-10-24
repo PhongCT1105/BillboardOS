@@ -1,4 +1,5 @@
-import { useQuery } from "convex/react";
+import { useConvexAuth, useQuery } from "convex/react";
+import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import { useHashRoute } from "./lib/hooks";
@@ -7,6 +8,7 @@ import { PlayerPage } from "./player/PlayerPage";
 import { BookPage } from "./book/BookPage";
 import { FinancePage } from "./finance/FinancePage";
 import { SensorPage } from "./sensor/SensorPage";
+import { NotOperatorPage, SignInPage } from "./auth/SignInPage";
 
 export function App() {
   const route = useHashRoute();
@@ -18,6 +20,8 @@ export function App() {
   }
 
   const sensorMatch = route.match(/^\/sensor\/([^/]+)$/);
+  // #/book and #/player are public; everything else is the operator's desk.
+  const operatorOnly = route !== "/book";
 
   return (
     <div className="min-h-[100dvh]">
@@ -52,16 +56,21 @@ export function App() {
               </a>
             )}
           </nav>
+          <AccountMenu />
         </div>
       </header>
-      {sensorMatch ? (
-        <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />
-      ) : route === "/book" ? (
-        <BookPage />
-      ) : route === "/finance" ? (
-        <FinancePage />
+      {operatorOnly ? (
+        <OperatorGate>
+          {sensorMatch ? (
+            <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />
+          ) : route === "/finance" ? (
+            <FinancePage />
+          ) : (
+            <ConsolePage />
+          )}
+        </OperatorGate>
       ) : (
-        <ConsolePage />
+        <BookPage />
       )}
     </div>
   );
@@ -77,5 +86,42 @@ function NavLink(props: { href: string; active: boolean; children: React.ReactNo
     >
       {props.children}
     </a>
+  );
+}
+
+/** Renders children only for a signed-in operator; otherwise sign-in or a "no access" note. */
+function OperatorGate({ children }: { children: React.ReactNode }) {
+  const { isLoading, isAuthenticated } = useConvexAuth();
+  const me = useQuery(api.operators.me, isAuthenticated ? {} : "skip");
+  if (isLoading || (isAuthenticated && me === undefined)) {
+    return (
+      <main className="mx-auto max-w-[1400px] px-4 pt-8 md:px-6">
+        <div className="h-64 animate-pulse rounded bg-panel" />
+      </main>
+    );
+  }
+  if (!isAuthenticated || me === null) return <SignInPage />;
+  if (!me?.isOperator) return <NotOperatorPage email={me?.email ?? null} />;
+  return <>{children}</>;
+}
+
+function AccountMenu() {
+  const { isAuthenticated } = useConvexAuth();
+  const { signOut } = useAuthActions();
+  const me = useQuery(api.operators.me, isAuthenticated ? {} : "skip");
+  if (!isAuthenticated || !me) return null;
+  return (
+    <div className="ml-auto flex items-center gap-3 text-sm">
+      <span className="hidden text-muted sm:inline" title={me.isOperator ? "Operator" : "Not an operator yet"}>
+        {me.email ?? "Signed in"}
+      </span>
+      <button
+        type="button"
+        onClick={() => void signOut()}
+        className="rounded-md border border-line px-3 py-1.5 text-muted transition-colors hover:text-fg"
+      >
+        Sign out
+      </button>
+    </div>
   );
 }

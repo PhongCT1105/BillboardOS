@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { query } from "./_generated/server";
+import { requireOperator } from "./lib/operator";
 
 const LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000;
@@ -45,6 +46,7 @@ export const summary = query({
     }),
   }),
   handler: async (ctx) => {
+    await requireOperator(ctx);
     const now = Date.now();
     const billboards = await ctx.db.query("billboards").take(MAX_BILLBOARDS);
 

@@ -1,10 +1,10 @@
-import { convexTest, type TestConvex } from "convex-test";
+import { convexTest } from "convex-test";
 import { ConvexError } from "convex/values";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules } from "./test.setup";
+import { modules, signedInOperator, signedInUser, type TestClient } from "./test.setup";
 import { FIXTURE_AS_OF, FIXTURE_BANK_LINES } from "./fixtures/financeFixture";
 import {
   COLLECTION_ANSWERS,
@@ -15,7 +15,7 @@ import {
 import { normalizeName, parseInvoiceNumbers, reconcileLine } from "./lib/reconcile";
 import { chooseTone, DAY_MS } from "./lib/collections";
 
-type T = TestConvex<typeof schema>;
+type T = TestClient;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -36,10 +36,12 @@ async function errorCode(promise: Promise<unknown>): Promise<string> {
 }
 
 async function seededAndReconciled() {
-  const t = convexTest(schema, modules);
+  const anon = convexTest(schema, modules);
+  const t = await signedInOperator(anon);
+  const ctrl = await signedInOperator(t, "controller@billboardos.test");
   const seed = await t.mutation(internal.seed.finance, {});
   const summary = await t.mutation(internal.reconciliation.run, {});
-  return { t, seed, summary };
+  return { anon, t, ctrl, seed, summary };
 }
 
 async function lineByExternalId(t: T, externalId: string) {
@@ -176,7 +178,7 @@ describe("planted errors reproduce the answer key exactly", () => {
   });
 
   test("console queries reflect the reconciled state", async () => {
-    const { t } = await seededAndReconciled();
+    const { t, ctrl } = await seededAndReconciled();
     const feed = await t.query(api.finance.bankFeed, {});
     expect(feed).toHaveLength(7);
     const bundled = feed.find((l) => l.externalId === "fx-bank-001")!;
@@ -203,31 +205,32 @@ describe("planted errors reproduce the answer key exactly", () => {
 
 describe("segregation of duties", () => {
   test("agents and requesters cannot approve; a controller can, and the exception resolves", async () => {
-    const { t } = await seededAndReconciled();
+    const { anon, t, ctrl } = await seededAndReconciled();
     const [refund] = await t.query(api.approvals.pending, {}).then((rows) => rows.filter((a) => a.action === "refund"));
 
+    // Identity comes from the session: signed out or non-operator accounts cannot decide.
+    const anonymous = anon;
     expect(
-      await errorCode(t.mutation(api.approvals.decide, { approvalId: refund._id, approvedBy: "agent:controller-bot", decision: "approved", note: "" })),
-    ).toBe("AGENT_CANNOT_APPROVE");
+      await errorCode(anonymous.mutation(api.approvals.decide, { approvalId: refund._id, decision: "approved", note: "" })),
+    ).toBe("UNAUTHENTICATED");
+    const stranger = await signedInUser(t);
     expect(
-      await errorCode(t.mutation(api.approvals.decide, { approvalId: refund._id, approvedBy: "agent:ar", decision: "approved", note: "" })),
-    ).toBe("AGENT_CANNOT_APPROVE");
+      await errorCode(stranger.mutation(api.approvals.decide, { approvalId: refund._id, decision: "approved", note: "" })),
+    ).toBe("NOT_OPERATOR");
 
     const writeOff = await t.mutation(api.approvals.request, {
       action: "write_off",
       subjectId: (await invoiceByNumber(t, "INV-1012"))._id,
       amountMinor: 4000,
-      requestedBy: "maria.ar",
       reason: "Sunset disputes $40 of the listening party; small balance",
       financeExceptionId: (await t.query(api.finance.openExceptions, {})).find((e) => e.kind === "short_payment")!._id,
     });
     expect(
-      await errorCode(t.mutation(api.approvals.decide, { approvalId: writeOff.approvalId, approvedBy: "Maria.AR", decision: "approved", note: "" })),
+      await errorCode(t.mutation(api.approvals.decide, { approvalId: writeOff.approvalId, decision: "approved", note: "" })),
     ).toBe("SOD_VIOLATION");
 
-    const decided = await t.mutation(api.approvals.decide, {
+    const decided = await ctrl.mutation(api.approvals.decide, {
       approvalId: writeOff.approvalId,
-      approvedBy: "controller",
       decision: "approved",
       note: "OK, under policy",
     });
@@ -237,9 +240,8 @@ describe("segregation of duties", () => {
     expect(inv.status).toBe("written_off");
     expect(balance(inv)).toBe(0);
 
-    const refundDone = await t.mutation(api.approvals.decide, {
+    const refundDone = await ctrl.mutation(api.approvals.decide, {
       approvalId: refund._id,
-      approvedBy: "controller",
       decision: "approved",
       note: "Refund the $30",
     });
@@ -253,18 +255,18 @@ describe("segregation of duties", () => {
     const resolved = await t.run(async (ctx) =>
       ctx.db.query("financeExceptions").withIndex("by_status", (q) => q.eq("status", "resolved")).collect(),
     );
-    expect(resolved.every((e) => e.resolvedBy === "controller")).toBe(true);
+    expect(resolved.every((e) => e.resolvedBy === "operator:controller@billboardos.test")).toBe(true);
     // Short-payment collection task closes with the invoice.
     const tasks = await t.query(api.collections.tasks, {});
     expect(tasks.filter((x) => x.invoiceNumber === "INV-1012")).toHaveLength(0);
 
     expect(
-      await errorCode(t.mutation(api.approvals.decide, { approvalId: refund._id, approvedBy: "cfo", decision: "approved", note: "" })),
+      await errorCode(ctrl.mutation(api.approvals.decide, { approvalId: refund._id, decision: "approved", note: "" })),
     ).toBe("NOT_PENDING");
   });
 
   test("manual match of an unidentified payment, and a stale approval is skipped", async () => {
-    const { t } = await seededAndReconciled();
+    const { t, ctrl } = await seededAndReconciled();
     const line = (await lineByExternalId(t, "fx-bank-007"))!;
     const inv1013 = await invoiceByNumber(t, "INV-1013");
     const exception = (await t.query(api.finance.openExceptions, {})).find((e) => e.kind === "unidentified_payment")!;
@@ -274,7 +276,6 @@ describe("segregation of duties", () => {
       action: "write_off",
       subjectId: inv1013._id,
       amountMinor: 30000,
-      requestedBy: "agent:collections",
       reason: "Uncollectible?",
     });
 
@@ -284,7 +285,6 @@ describe("segregation of duties", () => {
           action: "apply_manual_match",
           subjectId: line._id,
           amountMinor: 27500,
-          requestedBy: "maria.ar",
           reason: "missing invoiceId",
         }),
       ),
@@ -295,13 +295,11 @@ describe("segregation of duties", () => {
       subjectId: line._id,
       invoiceId: inv1013._id,
       amountMinor: 27500,
-      requestedBy: "maria.ar",
       reason: "J Smith Consulting is Sunset Records' agency (confirmed by phone)",
       financeExceptionId: exception._id,
     });
-    const r = await t.mutation(api.approvals.decide, {
+    const r = await ctrl.mutation(api.approvals.decide, {
       approvalId: match.approvalId,
-      approvedBy: "controller",
       decision: "approved",
       note: "Agency confirmed",
     });
@@ -315,12 +313,11 @@ describe("segregation of duties", () => {
       ctx.db.query("paymentApplications").withIndex("by_bankTransaction", (q) => q.eq("bankTransactionId", line._id)).collect(),
     );
     expect(apps).toHaveLength(1);
-    expect(apps[0]).toMatchObject({ rule: "manual_match", appliedBy: "maria.ar (approved by controller)" });
+    expect(apps[0]).toMatchObject({ rule: "manual_match", appliedBy: "operator:ops@billboardos.test (approved by operator:controller@billboardos.test)" });
 
     // ...and when the controller finally approves it, the balance has changed: skipped, not executed.
-    const late = await t.mutation(api.approvals.decide, {
+    const late = await ctrl.mutation(api.approvals.decide, {
       approvalId: staleWriteOff.approvalId,
-      approvedBy: "controller",
       decision: "approved",
       note: "fine",
     });
@@ -329,17 +326,16 @@ describe("segregation of duties", () => {
   });
 
   test("controller says no to an escalation -> collections falls back to firm", async () => {
-    const { t } = await seededAndReconciled();
+    const { t, ctrl } = await seededAndReconciled();
     await t.mutation(internal.collections.plan, { asOf: FIXTURE_AS_OF });
     const escalation = (await t.query(api.approvals.pending, {})).find((a) => a.action === "escalate_collection")!;
     expect(escalation.subjectLabel).toContain("INV-1008");
 
     expect(
-      await errorCode(t.mutation(api.approvals.decide, { approvalId: escalation._id, approvedBy: "controller", decision: "rejected", note: "" })),
+      await errorCode(ctrl.mutation(api.approvals.decide, { approvalId: escalation._id, decision: "rejected", note: "" })),
     ).toBe("INVALID_INPUT");
-    const r = await t.mutation(api.approvals.decide, {
+    const r = await ctrl.mutation(api.approvals.decide, {
       approvalId: escalation._id,
-      approvedBy: "controller",
       decision: "rejected",
       note: "Sunset is renegotiating; give them a week",
     });
@@ -361,7 +357,8 @@ describe("segregation of duties", () => {
 
 describe("booking on terms", () => {
   test("net15 advertiser gets a booking + invoice; prepay is refused", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
@@ -421,7 +418,8 @@ describe("booking on terms", () => {
   });
 
   test("x402 payment after hold expiry -> AR files a refund request; controller approves", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
@@ -448,7 +446,7 @@ describe("booking on terms", () => {
     // Idempotent: a second run doesn't file another.
     expect((await t.mutation(api.finance.runReconciliation, {})).approvalsRequested).toBe(0);
 
-    const r = await t.mutation(api.approvals.decide, { approvalId: refund._id, approvedBy: "controller", decision: "approved", note: "Refund buyer agent" });
+    const r = await ctrl.mutation(api.approvals.decide, { approvalId: refund._id, decision: "approved", note: "Refund buyer agent" });
     expect(r.executionResult).toContain("Refund of");
     if (pay.outcome !== "exception") throw new Error("unreachable");
     const payment = await t.run(async (ctx) => ctx.db.get(pay.paymentId));
@@ -459,7 +457,8 @@ describe("booking on terms", () => {
 
 describe("bank ingest", () => {
   test("idempotent per source + externalId", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const line = { source: "nessie" as const, externalId: "n-1", amountMinor: 1000, postedAt: FIXTURE_AS_OF, payerName: "X", memo: "" };
     const first = await t.mutation(internal.bank.ingest, { lines: [line, line] });
     expect(first).toMatchObject({ inserted: 1, duplicates: ["n-1"] });
@@ -580,7 +579,8 @@ describe("demo reset", () => {
   }
 
   test("reset after a full run restores the exact pre-run state; answer key passes again", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
     const before = await snapshot(t);
     expect(before.lines.every((l) => l.status === "unmatched")).toBe(true);
@@ -590,17 +590,16 @@ describe("demo reset", () => {
     await t.mutation(api.finance.runReconciliation, {});
     await t.mutation(internal.collections.plan, { asOf: FIXTURE_AS_OF });
     const refund = (await t.query(api.approvals.pending, {})).find((a) => a.action === "refund")!;
-    await t.mutation(api.approvals.decide, { approvalId: refund._id, approvedBy: "controller", decision: "approved", note: "ok" });
+    await ctrl.mutation(api.approvals.decide, { approvalId: refund._id, decision: "approved", note: "ok" });
     const unidentified = (await lineByExternalId(t, "fx-bank-007"))!;
     const match = await t.mutation(api.approvals.request, {
       action: "apply_manual_match",
       subjectId: unidentified._id,
       invoiceId: (await invoiceByNumber(t, "INV-1015"))._id,
       amountMinor: 20000,
-      requestedBy: "maria.ar",
       reason: "agency",
     });
-    await t.mutation(api.approvals.decide, { approvalId: match.approvalId, approvedBy: "controller", decision: "approved", note: "ok" });
+    await ctrl.mutation(api.approvals.decide, { approvalId: match.approvalId, decision: "approved", note: "ok" });
     const auditBefore = (await t.run(async (ctx) => ctx.db.query("auditEvents").collect())).length;
 
     const reset = await t.mutation(internal.seed.resetFinanceDemo, {});
@@ -627,7 +626,8 @@ describe("demo reset", () => {
   });
 
   test("reset leaves non-fixture payments, exceptions and approvals untouched", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
     await t.mutation(internal.seed.finance, {});
     const slots = await t.query(api.slots.listForBillboard, {
@@ -667,7 +667,8 @@ describe("demo reset", () => {
   });
 
   test("resetBookingDemo releases active holds but keeps bookings", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
@@ -695,7 +696,8 @@ describe("demo reset", () => {
   });
 
   test("addScenarioBankLine validates and reconciles live", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
     expect(
       await errorCode(t.mutation(internal.seed.addScenarioBankLine, { payerName: "", amountMinor: 100, memo: "" })),
@@ -718,7 +720,8 @@ describe("demo reset", () => {
 
 describe("AR -> collections hand-off", () => {
   test("runReconciliation schedules collections.plan and audits the hand-off", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
     await t.mutation(api.finance.runReconciliation, {});
     expect(await t.query(api.collections.tasks, {})).toHaveLength(0); // not yet run
@@ -736,7 +739,8 @@ describe("AR -> collections hand-off", () => {
   });
 
   test("sub-materiality note appears once", async () => {
-    const t = convexTest(schema, modules);
+    const t = await signedInOperator(convexTest(schema, modules));
+    const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
     await t.mutation(api.finance.runReconciliation, {});
     const line = (await lineByExternalId(t, "fx-bank-003"))!;

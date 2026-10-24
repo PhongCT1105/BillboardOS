@@ -6,6 +6,7 @@ import { recordAudit } from "./lib/audit";
 import { chooseTone, TONE_RANK, type HistoryItem } from "./lib/collections";
 import { createApproval, invoiceBalance } from "./lib/finance";
 import { usd } from "./lib/reconcile";
+import { requireOperator } from "./lib/operator";
 
 /** The collections seat. Plans follow-ups; never sends, never approves. */
 export const COLLECTIONS_AGENT = "agent:collections";
@@ -54,6 +55,7 @@ export const dueForFollowUp = query({
     }),
   ),
   handler: async (ctx, args) => {
+    await requireOperator(ctx);
     const asOf = args.asOf ?? Date.now();
     const rows = [];
     for (const inv of await overdueInvoices(ctx, asOf)) {
@@ -191,6 +193,7 @@ export const tasks = query({
     }),
   ),
   handler: async (ctx, args) => {
+    await requireOperator(ctx);
     const status = args.status;
     const rows = status
       ? await ctx.db
