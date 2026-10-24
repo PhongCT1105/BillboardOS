@@ -25,6 +25,7 @@ import type * as bookings from "../bookings.js";
 import type * as campaigns from "../campaigns.js";
 import type * as collections from "../collections.js";
 import type * as creatives from "../creatives.js";
+import type * as creao from "../creao.js";
 import type * as crons from "../crons.js";
 import type * as customerPortal from "../customerPortal.js";
 import type * as dashboard from "../dashboard.js";
@@ -109,6 +110,7 @@ declare const fullApi: ApiFromModules<{
   campaigns: typeof campaigns;
   collections: typeof collections;
   creatives: typeof creatives;
+  creao: typeof creao;
   crons: typeof crons;
   customerPortal: typeof customerPortal;
   dashboard: typeof dashboard;

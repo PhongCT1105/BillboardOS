@@ -11,10 +11,11 @@ Target: **Best One-Person Company**. Two separately saved agents hand off struct
 - [BillboardOS Revenue Agent](https://agent.creao.ai/apps/dc1b236c-1e3e-4db6-9134-7f406f6374d5): `dc1b236c-1e3e-4db6-9134-7f406f6374d5`.
 - Creation-session rehearsal: Sales selected the fictional DevTools and Coffee campaigns, rejected the unconnected enterprise, and its actual JSON was supplied to Revenue.
 - Two agent-scoped API keys were created with the owner's approval and stored only in ignored `.env`. The originally supplied key was unusable for these agents; the scoped keys work.
-- A real API chain has completed on explicitly simulated business data: two qualified campaigns → one revenue plan → two prepared offers, zero deliveries. Revenue's explanatory rules were then corrected; verification of the updated version is in progress.
+- A real API chain has completed on explicitly simulated business data: two qualified campaigns → one revenue plan → two prepared offers, zero deliveries. Revenue's corrected rules are verified.
 - [Successful Sales API run share](https://agent.creao.ai/share/53777b53b451c52b8adeb850770b3ec2), expires 2026-11-23. This is a conversation/run share link, not an agent install link.
 - The first-run script is a server-side API smoke test. It does not implement or claim live outreach, auctions, payment or screen playback.
-- Live seller tools and a Convex deployment connection still need to be configured. The existing customer agent API does not grant seller authority.
+- The operator console now includes a three-stage CREAO rehearsal, backed by Convex actions. It uses fictional fixture data and prepares offers only; it does not contact buyers or change inventory or payments.
+- The shared Convex deployment still needs the five `CREAO_*` values configured before the console rehearsal can run. The API keys belong in Convex environment variables, never in the clone or browser bundle. The existing customer agent API does not grant seller authority.
 - Devpost is intentionally deferred at the user's request. Selecting the CREAO track and supplying the required evidence remain necessary for submission.
 
 ## Account and saved agents
@@ -51,6 +52,14 @@ npm run creao:run -- --agent sales --run-id <run-id>
 ```
 
 Results are saved under ignored `.creao-runs/`. Use the completed Sales JSON as `salesResult` in a new request with the original `schemaVersion`, `traceId`, and `snapshot`, then call the Revenue Agent with `--agent revenue --input <request-file>`. Finally call Sales with `phase: "prepare_outreach"` and `revenuePlan` set to the Revenue result. No generated plan is automatically applied to live inventory by this script.
+
+## Run from the BillboardOS app
+
+The operator console has **Run CREAO rehearsal**. It calls Sales qualification, passes that actual result to Revenue, then passes the Revenue plan back to Sales to prepare offers. The sample snapshot is explicitly fictional; the UI reports zero delivered offers. No CREAO account or API key is needed on a teammate's machine. The team shares the public Convex URL, while Convex holds the CREAO keys server-side.
+
+Once the owner has configured the shared Convex deployment, a teammate can clone the repo, install dependencies, run `npm run dev`, sign into BillboardOS, and open the operator console. If the shared backend is not configured yet, the panel will report a configuration error until the owner deploys the backend and sets the CREAO environment values.
+
+One-time owner setup: deploy the Convex changes to the deployment used by the app, then set `CREAO_API_BASE_URL`, `CREAO_SALES_AGENT_ID`, `CREAO_SALES_API_KEY`, `CREAO_REVENUE_AGENT_ID`, and `CREAO_REVENUE_API_KEY` in that deployment's environment. The two `capi_` keys must be the CREAO agent-scoped keys. Keep these values out of the repository and frontend build.
 
 CREAO may generate a dashboard and prose even with a JSON-only instruction. The runner uses the explicitly named `sales-result.json` / `revenue-result.json` artifact as its machine contract; dashboard summary fields are not the full result. It verifies the CREAO artifact URL, sends authorization only to CREAO, follows the signed HTTPS storage redirect without credentials, and validates role/trace/snapshot identity. A transient read-only download may retry; starting a run never retries automatically. Blockers may be strings or records with an `id`.
 

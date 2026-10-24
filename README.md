@@ -99,7 +99,7 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Bank feed | **Simulated** fixture today; Capital One Nessie sandbox next |
 | Audience counts | **Real** on-device person detection (MediaPipe) sending aggregate counts only; labeled **simulated** fallback button |
 | Operator sign-in and approvals by identity | **Real** (Convex Auth, email + password) |
-| CREAO Sales + Revenue agents | **Saved on CREAO**, synthetic creation rehearsal; [API verification and live integration status](agents/creao/README.md) |
+| CREAO Sales + Revenue agents | **Saved on CREAO**; operator console has a simulated Sales → Revenue → Sales rehearsal through server-side Convex actions. Shared Convex CREAO credentials still need deployment configuration; [setup and status](agents/creao/README.md) |
 | CRS risk screening, Claude explanations | **Not built yet** |
 
 ## Key sponsor ambitions
