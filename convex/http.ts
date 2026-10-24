@@ -708,6 +708,36 @@ http.route({
     return json(200, { ok: true });
   }),
 });
+/**
+ * POST /company-agents/{advertiserId}/webhook: the webhook receiver of the
+ * company agents our server runs. Verifies the signature like any external
+ * receiver, then lets the agent act asynchronously.
+ */
+http.route({
+  pathPrefix: "/company-agents/",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const m = /^\/company-agents\/([^/]+)\/webhook\/?$/.exec(new URL(request.url).pathname);
+    if (!m) return json(404, { error: "not found" });
+    const body = await request.text();
+    if (body.length > 64 * 1024) return json(413, { error: "too large" });
+    const verified = await ctx.runQuery(internal.companyAgents.verifyWebhook, {
+      advertiserId: m[1],
+      timestamp: request.headers.get("X-BillboardOS-Timestamp") ?? "",
+      signature: request.headers.get("X-BillboardOS-Signature") ?? "",
+      body,
+    });
+    if (!verified.ok) return json(401, { error: verified.reason });
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return json(400, { error: "body is not JSON" });
+    }
+    await ctx.runMutation(internal.companyAgents.enqueue, { advertiserId: verified.advertiserId, payload });
+    return json(200, { ok: true });
+  }),
+});
 http.route({ pathPrefix: "/a2a/hosts/", method: "GET", handler: hostsGet });
 http.route({ pathPrefix: "/a2a/hosts/", method: "POST", handler: hostsPost });
 

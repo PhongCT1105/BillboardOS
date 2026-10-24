@@ -186,6 +186,47 @@ export async function award(
   return false;
 }
 
+/**
+ * The winner did not pay: release its hold, mark it defaulted, open a
+ * winner_default exception and award the next best reply (`award(…, exclude)`);
+ * with nobody left the moment fails and the host is free.
+ */
+async function defaultWinner(
+  ctx: MutationCtx,
+  moment: Doc<"moments">,
+  offer: Doc<"flashOffers">,
+  hold: Doc<"holds">,
+  why: { release: string; evidence: string; step: string },
+): Promise<void> {
+  if (hold.status === "active") await endHold(ctx, hold, "released", "system", why.release);
+  await ctx.db.patch(offer._id, { status: "defaulted" });
+  await ctx.db.insert("financeExceptions", {
+    workspaceId: moment.workspaceId,
+    kind: "winner_default",
+    status: "open",
+    holdId: hold._id,
+    billboardId: moment.billboardId,
+    advertiserId: offer.advertiserId,
+    expectedMinor: hold.amountMinor,
+    observedMinor: 0,
+    evidence: why.evidence,
+    nextAction: "Review the buyer agent's standing instructions or wallet; the spot went to the next best offer if any.",
+  });
+  await addMomentStep(ctx, moment, "defaulted", why.step, "Hold released; winner_default exception opened; offering the next best bid.");
+  await ctx.db.patch(moment._id, { winnerOfferId: undefined, holdId: undefined });
+  const offers = await offersOf(ctx, moment._id);
+  const excluded = new Set<string>([offer._id]);
+  for (const o of offers) if (o.status === "defaulted") excluded.add(o._id);
+  // Restore "lost" replies so they can be ranked again at their last bid.
+  for (const o of offers) if (o.status === "lost") await ctx.db.patch(o._id, { status: o.replyAmountMinor === o.priceMinor ? "accepted" : "countered" });
+  const awarded = await award(ctx, (await ctx.db.get(moment._id))!, excluded);
+  if (!awarded) {
+    await ctx.db.patch(moment._id, { status: "failed" });
+    await addMomentStep(ctx, moment, "failed", "No one left to award", "The spot went back on sale.");
+    await releaseWorkspace(ctx, moment.workspaceId);
+  }
+}
+
 /** The winner has 60 s to pay; otherwise release, open a winner_default exception, award the next best. */
 export const payDeadline = internalMutation({
   args: { momentId: v.id("moments"), offerId: v.id("flashOffers") },
@@ -196,33 +237,39 @@ export const payDeadline = internalMutation({
     if (!moment || !offer || moment.winnerOfferId !== offer._id || moment.status !== "awarded" || !offer.holdId) return null;
     const hold = await ctx.db.get(offer.holdId);
     if (!hold || hold.status === "converted") return null; // paid: nothing to do
-    if (hold.status === "active") await endHold(ctx, hold, "released", "system", "Live spot winner did not pay within 60 s");
-    await ctx.db.patch(offer._id, { status: "defaulted" });
-    await ctx.db.insert("financeExceptions", {
-      workspaceId: moment.workspaceId,
-      kind: "winner_default",
-      status: "open",
-      holdId: hold._id,
-      billboardId: moment.billboardId,
-      advertiserId: offer.advertiserId,
-      expectedMinor: hold.amountMinor,
-      observedMinor: 0,
+    await defaultWinner(ctx, moment, offer, hold, {
+      release: "Live spot winner did not pay within 60 s",
       evidence: `Live spot winner did not pay ${usd(hold.amountMinor)} within ${PAY_WINDOW_MS / 1000} s (moment ${moment._id}).`,
-      nextAction: "Review the buyer agent's standing instructions or wallet; the spot went to the next best offer if any.",
+      step: "Winner did not pay in time",
     });
-    await addMomentStep(ctx, moment, "defaulted", "Winner did not pay in time", "Hold released; winner_default exception opened; offering the next best bid.");
-    await ctx.db.patch(moment._id, { winnerOfferId: undefined, holdId: undefined });
-    const offers = await offersOf(ctx, moment._id);
-    const excluded = new Set<string>([offer._id]);
-    for (const o of offers) if (o.status === "defaulted") excluded.add(o._id);
-    // Restore "lost" replies so they can be ranked again at their last bid.
-    for (const o of offers) if (o.status === "lost") await ctx.db.patch(o._id, { status: o.replyAmountMinor === o.priceMinor ? "accepted" : "countered" });
-    const awarded = await award(ctx, (await ctx.db.get(moment._id))!, excluded);
-    if (!awarded) {
-      await ctx.db.patch(moment._id, { status: "failed" });
-      await addMomentStep(ctx, moment, "failed", "No one left to award", "The spot went back on sale.");
-      await releaseWorkspace(ctx, moment.workspaceId);
-    }
+    return null;
+  },
+});
+
+/**
+ * The winner's agent tried to pay and could not (no wallet, empty wallet, x402
+ * refused): no rehearsal, no waiting out the 60 s. The spot goes to the next
+ * best offer now, through the same path as a missed deadline.
+ */
+export const paymentFailed = internalMutation({
+  args: { holdId: v.id("holds"), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const moment = await ctx.db
+      .query("moments")
+      .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
+      .first();
+    if (!moment || moment.status !== "awarded" || !moment.winnerOfferId) return null;
+    const offer = await ctx.db.get(moment.winnerOfferId);
+    const hold = await ctx.db.get(args.holdId);
+    // Paid after all (or already moved on): nothing to do.
+    if (!offer || offer.holdId !== args.holdId || !hold || hold.status !== "active") return null;
+    const reason = args.reason.slice(0, 200);
+    await defaultWinner(ctx, moment, offer, hold, {
+      release: `Live spot winner's payment failed: ${reason}`,
+      evidence: `Live spot winner could not pay ${usd(hold.amountMinor)}: ${reason} (moment ${moment._id}).`,
+      step: "Winner could not pay",
+    });
     return null;
   },
 });

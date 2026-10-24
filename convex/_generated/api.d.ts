@@ -24,6 +24,8 @@ import type * as billboards from "../billboards.js";
 import type * as bookings from "../bookings.js";
 import type * as campaigns from "../campaigns.js";
 import type * as collections from "../collections.js";
+import type * as companyAgents from "../companyAgents.js";
+import type * as companyAgentsNode from "../companyAgentsNode.js";
 import type * as creatives from "../creatives.js";
 import type * as crons from "../crons.js";
 import type * as customerPortal from "../customerPortal.js";
@@ -112,6 +114,8 @@ declare const fullApi: ApiFromModules<{
   bookings: typeof bookings;
   campaigns: typeof campaigns;
   collections: typeof collections;
+  companyAgents: typeof companyAgents;
+  companyAgentsNode: typeof companyAgentsNode;
   creatives: typeof creatives;
   crons: typeof crons;
   customerPortal: typeof customerPortal;

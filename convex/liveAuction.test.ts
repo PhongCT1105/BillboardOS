@@ -1022,3 +1022,272 @@ describe("one re-offer chain per screen", () => {
     expect((await w.t.run(async (ctx) => ctx.db.get(w.led)))!.saleQueuedAt).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------- company agents (server-run)
+
+const AGENT_SETUP = { targetAudience: { startups: 1, software: 0.5 }, minRelevantViewers: 3, maxPerSpotMinor: 150, dailyBudgetMinor: 500 };
+
+/**
+ * liveWorld, but both companies bid through their server-run company agent,
+ * set up on the website (`companyAgents.setup`). The hand-issued keys are revoked.
+ */
+async function liveWorldWithAgents() {
+  const w = await liveWorld();
+  await w.revokeAll();
+  type Company = typeof w.launchKit;
+  for (const c of [w.launchKit, w.rivet]) {
+    await c.customer.mutation(api.companyAgents.setup, { campaignId: c.campaignId, ...AGENT_SETUP });
+  }
+  await w.flush(); // ensureWallet runs: no CDP keys here
+
+  async function agentRow(c: Company) {
+    return (await w.t.run(async (ctx) =>
+      ctx.db
+        .query("companyAgents")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", c.advertiserId))
+        .first(),
+    ))!;
+  }
+  /** The agent's plaintext key, as only our server can read it. */
+  async function agentKey(c: Company) {
+    const row = await agentRow(c);
+    return await decryptSecret(SECRET, row.keyCiphertext, row.keyIv);
+  }
+  async function setBalance(c: Company, balanceMinor: number) {
+    const row = await agentRow(c);
+    await w.t.run(async (ctx) => ctx.db.patch(row._id, { balanceMinor }));
+  }
+  /**
+   * Run scheduled functions and timers to completion, in time order: what is
+   * due now runs first (webhooks, agents' replies and bids), then the clock
+   * moves to the next scheduled function (join close, bidding close, pay deadline).
+   */
+  async function runAll(maxSteps = 60) {
+    for (let i = 0; i < maxSteps; i++) {
+      await w.flush();
+      const pending = (await w.t.run(async (ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter((s) => s.state.kind === "pending");
+      if (pending.length === 0) return;
+      const next = Math.min(...pending.map((s) => s.scheduledTime));
+      vi.advanceTimersByTime(Math.max(1, next - Date.now()));
+      await w.t.finishInProgressScheduledFunctions();
+    }
+    throw new Error("scheduled functions never settled");
+  }
+  return { ...w, agentRow, agentKey, setBalance, runAll };
+}
+
+describe("company agents", () => {
+  beforeEach(() => {
+    process.env.COMPANY_AGENT_DELAY_MS = "0";
+    delete process.env.CDP_API_KEY_ID;
+    delete process.env.CDP_API_KEY_SECRET;
+    delete process.env.CDP_WALLET_SECRET;
+  });
+  afterEach(() => {
+    delete process.env.COMPANY_AGENT_DELAY_MS;
+  });
+
+  test("setup issues an encrypted key with standing and our webhook, and sets the profile", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    const row = await w.agentRow(w.launchKit);
+    expect(row).toMatchObject({ enabled: true, campaignId: w.launchKit.campaignId, walletName: `co-${w.launchKit.advertiserId}` });
+    const key = (await w.t.run(async (ctx) => ctx.db.get(row.agentKeyId)))!;
+    expect(key.webhookUrl).toBe(`${SITE}/company-agents/${w.launchKit.advertiserId}/webhook`);
+    expect(key.webhookUrl!.endsWith(`/company-agents/${w.launchKit.advertiserId}/webhook`)).toBe(true);
+    expect(key.standing).toEqual({ maxPricePerSpotMinor: 150, minRelevantViewers: 3, dailyBudgetMinor: 500 });
+    expect([...key.scopes].sort()).toEqual(["bid", "hold", "pay", "quote"]);
+    expect(key.revokedAt).toBeUndefined();
+    const plaintext = await w.agentKey(w.launchKit);
+    expect(plaintext.startsWith("bos_agent_")).toBe(true);
+    expect(row.keyCiphertext).not.toContain(plaintext);
+    expect(row.keyCiphertext).not.toContain("bos_agent");
+    const campaign = (await w.t.run(async (ctx) => ctx.db.get(w.launchKit.campaignId)))!;
+    expect(campaign.targetAudience).toEqual(AGENT_SETUP.targetAudience);
+    // Without CDP keys the wallet can't be created; the agent says so.
+    expect(row.lastAction).toContain("no CDP keys");
+
+    // The company sees its agent, never the key.
+    const mine = await w.launchKit.customer.query(api.companyAgents.mine, {});
+    expect(mine).toMatchObject({
+      enabled: true,
+      campaignId: w.launchKit.campaignId,
+      targetAudience: AGENT_SETUP.targetAudience,
+      standing: { maxPricePerSpotMinor: 150, minRelevantViewers: 3, dailyBudgetMinor: 500 },
+      walletAddress: null,
+      balanceMinor: null,
+      spentTodayMinor: 0,
+    });
+    expect(JSON.stringify(mine)).not.toContain(plaintext);
+
+    // Setting up again revokes the previous key.
+    await w.launchKit.customer.mutation(api.companyAgents.setup, { campaignId: w.launchKit.campaignId, ...AGENT_SETUP, maxPerSpotMinor: 120 });
+    const again = await w.agentRow(w.launchKit);
+    expect(again._id).toBe(row._id);
+    expect(again.agentKeyId).not.toBe(row.agentKeyId);
+    expect((await w.t.run(async (ctx) => ctx.db.get(row.agentKeyId)))!.revokedAt).toBeDefined();
+
+    // Only the campaign's own company can set it up; bad limits are refused.
+    await expect(w.rivet.customer.mutation(api.companyAgents.setup, { campaignId: w.launchKit.campaignId, ...AGENT_SETUP })).rejects.toThrow();
+    await expect(w.launchKit.customer.mutation(api.companyAgents.setup, { campaignId: w.launchKit.campaignId, ...AGENT_SETUP, maxPerSpotMinor: 0 })).rejects.toThrow();
+    await expect(
+      w.launchKit.customer.mutation(api.companyAgents.setup, { campaignId: w.launchKit.campaignId, ...AGENT_SETUP, targetAudience: { "Not A Tag": 1 } }),
+    ).rejects.toThrow();
+  });
+
+  test("the company webhook rejects a bad signature", async () => {
+    const w = await liveWorldWithAgents();
+    const res = await w.t.fetch(`/company-agents/${w.launchKit.advertiserId}/webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-BillboardOS-Timestamp": String(Date.now()), "X-BillboardOS-Signature": "0".repeat(64) },
+      body: JSON.stringify({ type: "flash_lost" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("two company agents run a real auction end to end, then payment without CDP keys is blocked, never paid", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 500);
+    await w.setBalance(w.rivet, 500);
+    await w.camera(w.led, 10);
+    await w.runAll();
+
+    const [m] = await w.momentsOf(w.led);
+    const bids = (await w.bidsOf(m._id)).filter((b) => b.kind === "bid");
+    expect(bids.length).toBeGreaterThanOrEqual(2);
+    for (const c of [w.launchKit, w.rivet]) {
+      const mine = bids.filter((b) => b.advertiserId === c.advertiserId);
+      expect(mine.length).toBeGreaterThanOrEqual(1);
+      expect(mine.length).toBeLessThanOrEqual(5);
+      expect(mine.every((b) => b.amountMinor <= 150)).toBe(true);
+    }
+    // Each bid beat the one before it.
+    for (let i = 1; i < bids.length; i++) expect(bids[i].amountMinor).toBeGreaterThan(bids[i - 1].amountMinor);
+
+    const done = await w.momentDoc(m._id);
+    expect(done.paymentBlocked).toBeDefined();
+    expect(done.paymentBlocked).toContain("CDP");
+    expect(done.steps.some((s) => s.key === "settled")).toBe(false);
+    expect(done.paymentTx).toBeUndefined();
+    expect(await w.t.run(async (ctx) => ctx.db.query("payments").take(5))).toHaveLength(0);
+    // The winner couldn't pay, then the runner-up couldn't either: the moment failed and the host is free.
+    expect(done.status).toBe("failed");
+    expect((await w.offersOf(m._id)).map((o) => o.status).sort()).toEqual(["defaulted", "defaulted"]);
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBeNull();
+
+    // Each company's feed tells the story without naming the rival.
+    const feed = await w.rivet.customer.query(api.companyAgents.feed, {});
+    const kinds = new Set(feed.map((e) => e.kind));
+    for (const k of ["announce", "bid", "rival_bid", "won", "blocked"] as const) expect(kinds.has(k)).toBe(true);
+    expect(kinds.has("paid")).toBe(false);
+    expect(feed.filter((e) => e.kind === "rival_bid").every((e) => e.text.includes("Another company"))).toBe(true);
+    expect(JSON.stringify(feed)).not.toContain("LaunchKit");
+  });
+
+  test("an agent never bids above its wallet balance", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 50);
+    await w.setBalance(w.rivet, 500);
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [m] = await w.momentsOf(w.led);
+    expect(m.priceMinor).toBeGreaterThan(50); // the opening price is above LaunchKit's balance
+    const lkOffer = (await w.offersOf(m._id)).find((o) => o.advertiserId === w.launchKit.advertiserId)!;
+    await w.runAll();
+    // It joined with a counter within its balance, and never accepted the opening price.
+    const replies = (await w.t.run(async (ctx) => ctx.db.query("auditEvents").take(500))).filter((a) => a.type === "moment.reply" && a.subjectId === lkOffer._id);
+    expect(replies.length).toBeGreaterThanOrEqual(1);
+    expect(replies[0].reason).toMatch(/^countered \$0\.(\d\d)/);
+    expect(Number(/^countered \$0\.(\d\d)/.exec(replies[0].reason)![1])).toBeLessThanOrEqual(50);
+    expect(replies.some((a) => /^accepted/.test(a.reason))).toBe(false);
+    // No bid, and nothing it was asked to pay, above its balance.
+    const lkBids = (await w.bidsOf(m._id)).filter((b) => b.advertiserId === w.launchKit.advertiserId);
+    expect(lkBids.every((b) => b.amountMinor <= 50)).toBe(true);
+    const lkHolds = await w.t.run(async (ctx) =>
+      (await ctx.db.query("holds").take(50)).filter((h) => h.agentKeyId === lkOffer.agentKeyId),
+    );
+    expect(lkHolds.every((h) => h.amountMinor <= 50)).toBe(true);
+  });
+
+  test("in an auction, an agent stops raising at its wallet balance", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 120);
+    await w.setBalance(w.rivet, 500);
+    await w.camera(w.led, 10);
+    await w.runAll();
+    const [m] = await w.momentsOf(w.led);
+    expect(m.priceMinor).toBeLessThanOrEqual(120); // both join: a live auction
+    const bids = (await w.bidsOf(m._id)).filter((b) => b.kind === "bid");
+    const lk = bids.filter((b) => b.advertiserId === w.launchKit.advertiserId);
+    const rv = bids.filter((b) => b.advertiserId === w.rivet.advertiserId);
+    expect(lk.length).toBeGreaterThanOrEqual(1);
+    expect(lk.every((b) => b.amountMinor <= 120)).toBe(true);
+    // Rivet, with more money, outbids it at the end.
+    expect(Math.max(...rv.map((b) => b.amountMinor))).toBeGreaterThan(Math.max(...lk.map((b) => b.amountMinor)));
+  });
+
+  test("a lone company agent negotiates from its last offer, never above its cap", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 60); // under the opening price: it counters
+    await w.setBalance(w.rivet, 0); // can't afford anything: it passes
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [m] = await w.momentsOf(w.led);
+    expect((await w.momentDoc(m._id)).steps.some((s) => s.key === "negotiation_started")).toBe(true);
+    const lk = (await w.offersOf(m._id)).find((o) => o.advertiserId === w.launchKit.advertiserId)!._id;
+    // The counter webhook carries the company's own last offer.
+    const counter = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: lk, event: "negotiation_counter" });
+    const lastBuyerOffer = (await w.bidsOf(m._id)).filter((b) => b.kind === "buyer_offer").at(-1)!;
+    expect(counter.ok && counter.payload.yourLastOfferMinor).toBe(lastBuyerOffer.amountMinor);
+    await w.runAll();
+    const offers = (await w.bidsOf(m._id)).filter((b) => b.kind === "buyer_offer");
+    expect(offers.length).toBeGreaterThanOrEqual(2); // it answered the host's counter
+    expect(offers.every((b) => b.advertiserId === w.launchKit.advertiserId && b.amountMinor <= 60)).toBe(true);
+    for (let i = 1; i < offers.length; i++) expect(offers[i].amountMinor).toBeGreaterThan(offers[i - 1].amountMinor);
+    const holds = await w.t.run(async (ctx) => ctx.db.query("holds").take(20));
+    expect(holds.every((h) => h.amountMinor <= 60)).toBe(true);
+  });
+
+  test("turning an agent off mid-auction refuses its later bids", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 500);
+    await w.setBalance(w.rivet, 500);
+    const oldKey = await w.agentKey(w.rivet);
+    await w.camera(w.led, 10);
+    await w.flush();
+    vi.advanceTimersByTime(2_000);
+    await w.flush();
+    const [m] = await w.momentsOf(w.led);
+    const live = await w.momentDoc(m._id);
+    expect(live.status).toBe("bidding");
+
+    await w.rivet.customer.mutation(api.companyAgents.setEnabled, { enabled: false });
+    const rv = (await w.offersOf(m._id)).find((o) => o.advertiserId === w.rivet.advertiserId)!._id;
+    const res = await w.t.fetch(`/api/agent/offers/${rv}/bid`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${oldKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ amountMinor: (live.currentMinor ?? live.priceMinor) + 50 }),
+    });
+    expect(res.status).toBe(401);
+    expect(await w.rivet.customer.query(api.companyAgents.mine, {})).toMatchObject({ enabled: false });
+
+    // Turning it back on issues a fresh key.
+    await w.rivet.customer.mutation(api.companyAgents.setEnabled, { enabled: true });
+    const fresh = await w.agentKey(w.rivet);
+    expect(fresh).not.toBe(oldKey);
+    expect((await w.rivet.customer.query(api.companyAgents.mine, {}))!.enabled).toBe(true);
+  });
+
+  test("top up is limited to 5 per day", async () => {
+    const w = await liveWorldWithAgents();
+    for (let i = 0; i < 5; i++) await w.launchKit.customer.mutation(api.companyAgents.requestTopUp, {});
+    await expect(w.launchKit.customer.mutation(api.companyAgents.requestTopUp, {})).rejects.toThrow(/RATE_LIMITED|5 top-ups/);
+    // Rivet has its own allowance.
+    await w.rivet.customer.mutation(api.companyAgents.requestTopUp, {});
+  });
+});

@@ -24,6 +24,7 @@ const flashEvent = v.union(
   v.literal("flash_lost"),
 );
 const TIMEOUT_MS = 5_000;
+const MAX_BIDS_SCANNED = 100;
 
 function siteUrl(): string {
   return (process.env.CONVEX_SITE_URL ?? "https://billboardos.invalid").replace(/\/$/, "");
@@ -102,9 +103,17 @@ export const loadForDelivery = internalQuery({
       }
     } else if (args.event === "negotiation_counter") {
       const round = moment.negotiationRound ?? 1;
+      // The company's own latest offer in this negotiation (its agent meets the host from there).
+      const bids = await ctx.db
+        .query("momentBids")
+        .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
+        .order("desc")
+        .take(MAX_BIDS_SCANNED);
+      const yourLast = bids.find((b) => b.offerId === offer._id && b.kind === "buyer_offer");
       payload = {
         type: "negotiation_counter",
         ...common,
+        yourLastOfferMinor: yourLast?.amountMinor ?? offer.replyAmountMinor ?? null,
         sellerMinor: moment.sellerMinor ?? moment.priceMinor,
         round,
         roundsLeft: Math.max(0, NEGOTIATION_MAX_ROUNDS - round),
