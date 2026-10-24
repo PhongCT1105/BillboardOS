@@ -43,7 +43,6 @@ import type * as lib_audit from "../lib/audit.js";
 import type * as lib_collections from "../lib/collections.js";
 import type * as lib_companyAgent from "../lib/companyAgent.js";
 import type * as lib_constants from "../lib/constants.js";
-import type * as lib_demoCreatives from "../lib/demoCreatives.js";
 import type * as lib_demoCrypto from "../lib/demoCrypto.js";
 import type * as lib_finance from "../lib/finance.js";
 import type * as lib_inventory from "../lib/inventory.js";
@@ -131,7 +130,6 @@ declare const fullApi: ApiFromModules<{
   "lib/collections": typeof lib_collections;
   "lib/companyAgent": typeof lib_companyAgent;
   "lib/constants": typeof lib_constants;
-  "lib/demoCreatives": typeof lib_demoCreatives;
   "lib/demoCrypto": typeof lib_demoCrypto;
   "lib/finance": typeof lib_finance;
   "lib/inventory": typeof lib_inventory;

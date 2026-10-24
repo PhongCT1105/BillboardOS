@@ -569,6 +569,66 @@ describe("announce", () => {
   });
 });
 
+describe("host controls", () => {
+  test("host sets the published minimum and starting CPM", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    await w.host.mutation(api.billboards.setLivePricing, { billboardId: w.led, minimumMinor: 30, cpmMinor: 800 });
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [m] = await w.momentsOf(w.led);
+    expect(m.floorMinor).toBe(30);
+    expect(m.priceWhy).toContain("$8.00 per 1,000 views");
+    const audits = await w.t.run(async (ctx) => ctx.db.query("auditEvents").order("desc").take(20));
+    expect(audits.some((a) => a.type === "billboard.live_pricing_changed" && a.subjectId === w.led)).toBe(true);
+  });
+
+  test("setLivePricing validates its inputs and is for workspace members only", async () => {
+    const w = await liveWorld();
+    const set = (minimumMinor: number, cpmMinor: number) => w.host.mutation(api.billboards.setLivePricing, { billboardId: w.led, minimumMinor, cpmMinor });
+    await expect(set(0, 800)).rejects.toThrow(/INVALID_INPUT/);
+    await expect(set(301, 800)).rejects.toThrow(/INVALID_INPUT/);
+    await expect(set(30.5, 800)).rejects.toThrow(/INVALID_INPUT/);
+    await expect(set(30, 49)).rejects.toThrow(/INVALID_INPUT/);
+    await expect(set(30, 100_001)).rejects.toThrow(/INVALID_INPUT/);
+    await expect(
+      w.launchKit.customer.mutation(api.billboards.setLivePricing, { billboardId: w.led, minimumMinor: 30, cpmMinor: 800 }),
+    ).rejects.toThrow(/NOT_WORKSPACE_MEMBER/);
+  });
+
+  test("host enters the real event", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const fit = (why: string | undefined) => Number(/× (\d\.\d+) fit/.exec(why ?? "")![1]);
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [before] = await w.momentsOf(w.led);
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(before._id, { status: "failed" });
+      await ctx.db.patch(before.slotId, { state: "booked" });
+    });
+    const now = Date.now();
+    const { eventId } = await w.host.mutation(api.events.create, {
+      billboardId: w.led,
+      name: "Startup demo day",
+      startsAt: now - 10 * MINUTE,
+      endsAt: now + 60 * MINUTE,
+      audienceTags: { startups: 1 },
+    });
+    const ev = await w.t.run(async (ctx) => ctx.db.get(eventId));
+    expect(ev?.source).toBe("host");
+    await w.camera(w.led, 10);
+    await w.flush();
+    const all = await w.momentsOf(w.led);
+    const after = all[all.length - 1];
+    expect(after._id).not.toBe(before._id);
+    expect(fit(after.priceWhy)).toBeGreaterThan(fit(before.priceWhy));
+    await expect(
+      w.launchKit.customer.mutation(api.events.create, { billboardId: w.led, name: "x", startsAt: now, endsAt: now + MINUTE }),
+    ).rejects.toThrow(/NOT_WORKSPACE_MEMBER/);
+  });
+});
+
 describe("live auction lifecycle", () => {
   test("two companies: auction rises in 5¢ steps, highest bid wins and gets a hold", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5); // no jitter

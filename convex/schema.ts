@@ -240,6 +240,7 @@ export const auditEventType = v.union(
   v.literal("demo.reset"),
   v.literal("inventory.generated"),
   v.literal("billboard.baseline_changed"),
+  v.literal("billboard.live_pricing_changed"),
   v.literal("billboard.audience_tags_changed"),
   v.literal("event.recorded"),
   v.literal("valuation.assessed"),
@@ -631,7 +632,7 @@ export const collectionTaskFields = {
   resolution: v.optional(v.string()),
 };
 
-export const eventSource = v.union(v.literal("seed"), v.literal("operator"), v.literal("claude"));
+export const eventSource = v.union(v.literal("seed"), v.literal("operator"), v.literal("claude"), v.literal("host"));
 
 export const eventFields = {
   /** Owning host workspace (ADR 0004). Optional until backfilled. */
