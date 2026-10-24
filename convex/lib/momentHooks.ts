@@ -49,8 +49,10 @@ const MAX_SCREENS_SCANNED = 200;
 
 /**
  * The host is free again (its live moment ended): the online screen that
- * queued first leaves the queue and sells now (detect with trigger "queue").
- * Every path that ends a live moment calls this, so the queue never stalls.
+ * queued first sells now (detect with trigger "queue"). It keeps its
+ * `saleQueuedAt` until it actually announces (detect clears it then), so no
+ * other screen can jump the queue in between. Every path that ends a live
+ * moment calls this, so the queue never stalls.
  */
 export async function releaseWorkspace(ctx: MutationCtx, workspaceId: Id<"workspaces">): Promise<void> {
   const screens = await ctx.db
@@ -63,7 +65,6 @@ export async function releaseWorkspace(ctx: MutationCtx, workspaceId: Id<"worksp
     if (!next || b.saleQueuedAt < next.saleQueuedAt!) next = b;
   }
   if (!next) return;
-  await ctx.db.patch(next._id, { saleQueuedAt: undefined });
   await ctx.scheduler.runAfter(0, internal.moments.detectFor, { billboardId: next._id, trigger: "queue" });
 }
 

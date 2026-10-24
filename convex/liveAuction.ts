@@ -150,6 +150,13 @@ export async function award(
       const message = error instanceof ConvexError ? String((error.data as { message?: string }).message) : "hold failed";
       await addMomentStep(ctx, moment, "failed", "Could not hold the spot", message);
       await ctx.db.patch(moment._id, { status: "failed" });
+      // Nobody gets this spot: every company still in the running hears it lost.
+      for (const o of offers) {
+        if (o.status === "accepted" || o.status === "countered") {
+          await ctx.db.patch(o._id, { status: "lost" });
+          await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId: o._id, event: "flash_lost" });
+        }
+      }
       await releaseWorkspace(ctx, moment.workspaceId);
       return true; // nothing else can win this slot either
     }
@@ -476,7 +483,11 @@ export const placeBid = internalMutation({
   },
 });
 
-/** Bidding's (possibly extended) close: the leader wins at its bid; no bids means no takers. */
+/**
+ * Bidding's (possibly extended) close: the leader wins at its bid. With no
+ * bids (R12), the earliest company that accepted the opening price gets it at
+ * that price: everyone who joined committed to it, and a sold screen beats an idle one.
+ */
 export const closeBidding = internalMutation({
   args: { momentId: v.id("moments") },
   returns: v.null(),
@@ -484,7 +495,13 @@ export const closeBidding = internalMutation({
     const moment = await ctx.db.get(args.momentId);
     if (!moment || moment.status !== "bidding" || Date.now() < (moment.biddingClosesAt ?? 0)) return null;
     if (!moment.leaderOfferId) {
-      await endNoTakers(ctx, moment._id, "Auction closed with no bids", "Companies joined but nobody bid.");
+      const first = (await offersOf(ctx, moment._id))
+        .filter((o) => o.status === "accepted")
+        .sort((a, b) => (a.repliedAt ?? Infinity) - (b.repliedAt ?? Infinity))[0];
+      await addMomentStep(ctx, moment, "bidding_closed", "Bidding closed with no bids", `Sold to the earliest company that joined, at the ${usd(moment.priceMinor)} opening price.`);
+      if (!first || !(await award(ctx, (await ctx.db.get(moment._id))!, new Set(), first._id))) {
+        await endNoTakers(ctx, moment._id, "Auction closed with no bids", "Nobody who joined could be awarded.");
+      }
       return null;
     }
     await addMomentStep(ctx, moment, "bidding_closed", `Bidding closed at ${usd(moment.currentMinor ?? moment.priceMinor)}`);

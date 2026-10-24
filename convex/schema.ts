@@ -347,6 +347,8 @@ export const billboardFields = {
   cpmMinor: v.optional(v.number()),
   /** When the host queued this screen for a live sale. */
   saleQueuedAt: v.optional(v.number()),
+  /** When this screen's pending re-offer (detectFor "reoffer") is due: one re-offer chain per screen. */
+  reofferDueAt: v.optional(v.number()),
 };
 
 export const slotFields = {

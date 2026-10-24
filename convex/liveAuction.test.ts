@@ -702,6 +702,24 @@ describe("live auction lifecycle", () => {
     expect(hold.amountMinor).toBe(s2);
   });
 
+  test("a negotiation counter at or above the host's price is an accept at the host's price", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.announce();
+    await w.reply(w.launchKit, lk, "counter", 40);
+    await w.reply(w.rivet, rv, "pass");
+    const s1 = (await w.momentDoc(m._id)).sellerMinor!;
+    const res = await w.reply(w.launchKit, lk, "counter", s1 + 30);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ offerId: lk, status: "won", amountMinor: s1 });
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("awarded");
+    expect((await w.t.run(async (ctx) => ctx.db.get(done.holdId!)))!.amountMinor).toBe(s1);
+    const audits = await w.t.run(async (ctx) => ctx.db.query("auditEvents").order("desc").take(30));
+    const agreed = `negotiation accept $${(s1 / 100).toFixed(2)}`;
+    expect(audits.some((a) => a.type === "moment.reply" && a.reason.startsWith(agreed))).toBe(true);
+  });
+
   test("final negotiation round below the minimum: no takers, and the host is free", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const w = await liveWorld();
@@ -779,8 +797,10 @@ describe("live auction lifecycle", () => {
 
     await w.reply(w.launchKit, lk, "pass");
     await w.reply(w.rivet, rv, "pass");
-    await w.flush();
     expect((await w.momentDoc(m._id)).status).toBe("no_takers");
+    // R13: dequeued, but it keeps its place until it actually announces.
+    expect((await w.t.run(async (ctx) => ctx.db.get(phone)))!.saleQueuedAt).toBeDefined();
+    await w.flush();
     const phoneMoments = await w.momentsOf(phone);
     expect(phoneMoments).toHaveLength(1);
     expect(phoneMoments[0]).toMatchObject({ trigger: "queue", status: "offering" });
@@ -855,19 +875,44 @@ describe("live auction lifecycle", () => {
     expect(phoneMoments[0].trigger).toBe("queue");
   });
 
-  test("an auction nobody bids in ends with no takers and a re-offer", async () => {
+  test("an auction nobody bids in is sold to the earliest joiner at the opening price (R12)", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const w = await liveWorld();
-    const { m } = await w.auction();
+    const { m, lk, rv } = await w.auction(); // LaunchKit accepted first
     await w.advance(m.biddingClosesAt! - Date.now() + 1);
-    expect((await w.momentDoc(m._id)).status).toBe("no_takers");
-    expect((await w.pendingDetects()).some((s) => s.args[0].trigger === "reoffer")).toBe(true);
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("awarded");
+    expect(done.winnerOfferId).toBe(lk);
+    const hold = (await w.t.run(async (ctx) => ctx.db.get(done.holdId!)))!;
+    expect(hold.amountMinor).toBe(m.priceMinor);
+    expect((await w.offersOf(m._id)).find((o) => o._id === rv)!.status).toBe("lost");
+    expect(await w.bidsOf(m._id)).toHaveLength(0);
+    expect((await w.pendingDetects()).some((s) => s.args[0].trigger === "reoffer")).toBe(false);
+  });
+
+  test("the spot can't be held: the moment fails, every joiner hears it lost, and the host is free", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.announce();
+    await w.t.run(async (ctx) => ctx.db.patch(m.slotId, { state: "booked" }));
+    await w.reply(w.rivet, rv, "counter", 60);
+    await w.reply(w.launchKit, lk, "accept"); // one taker: sale, but the hold fails
+    const done = await w.momentDoc(m._id);
+    expect(done.status).toBe("failed");
+    const offers = await w.offersOf(m._id);
+    expect(offers.map((o) => o.status)).toEqual(["lost", "lost"]);
+    await w.flush();
+    const lost = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url, init]) => String(url).startsWith("https://agent.test/") && (init?.headers as Record<string, string>)["X-BillboardOS-Event"] === "flash_lost");
+    expect(lost.map(([url]) => String(url)).sort()).toEqual(["https://agent.test/launchkit", "https://agent.test/rivet"]);
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBeNull();
   });
 
   test("webhooks: offer carries the price story; auction events reach every participant", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const w = await liveWorld();
-    const { m, lk } = await w.auction();
+    const { m, lk, rv } = await w.auction();
     const offer = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: lk, event: "flash_offer" });
     expect(offer.ok && offer.payload).toMatchObject({
       type: "flash_offer",
@@ -889,6 +934,16 @@ describe("live auction lifecycle", () => {
     await w.bid(w.launchKit, lk, m.priceMinor);
     const mine = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: lk, event: "auction_update" });
     expect(mine.ok && mine.payload).toMatchObject({ type: "auction_update", currentMinor: m.priceMinor, youLead: true, bidsLeft: 4, lastBidBy: "you" });
+    // The rival learns the price, never who bid.
+    const rival = await w.t.query(internal.momentDelivery.loadForDelivery, { offerId: rv, event: "auction_update" });
+    expect(rival.ok && rival.payload).toMatchObject({ type: "auction_update", currentMinor: m.priceMinor, youLead: false, bidsLeft: 5, lastBidBy: "another company" });
+    const rivalText = JSON.stringify(rival.ok && rival.payload);
+    expect(rivalText).not.toContain("LaunchKit");
+    expect(rivalText).not.toContain(w.launchKit.advertiserId);
+    expect(rivalText).not.toContain(lk);
+    // A bid needs an amount.
+    const noAmount = await w.agent(w.rivet, `offers/${rv}/bid`, {});
+    expect(noAmount.status).toBe(400);
     const fetchMock = vi.mocked(fetch);
     await w.flush();
     const events = fetchMock.mock.calls
@@ -896,5 +951,74 @@ describe("live auction lifecycle", () => {
       .map(([, init]) => (init?.headers as Record<string, string>)["X-BillboardOS-Event"]);
     expect(events.filter((e) => e === "auction_started")).toHaveLength(2);
     expect(events.filter((e) => e === "auction_update")).toHaveLength(2);
+  });
+});
+
+describe("one re-offer chain per screen", () => {
+  const reoffersFor = async (w: Awaited<ReturnType<typeof liveWorld>>, billboardId: Id<"billboards">) =>
+    (await w.pendingDetects()).filter((s) => s.args[0].billboardId === billboardId && s.args[0].trigger === "reoffer");
+
+  test("a re-priced spot whose live moment ends with no takers keeps one chain", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    // 10 people: ~5 relevant, under both reach targets; 20 people: ~10, enough.
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(w.launchKit.agentKeyId, { standing: { ...STANDING, minRelevantViewers: 8 } });
+      await ctx.db.patch(w.rivet.agentKeyId, { standing: { ...STANDING, minRelevantViewers: 8 } });
+    });
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [first] = await w.momentsOf(w.led);
+    expect(first.status).toBe("no_takers");
+    expect(await reoffersFor(w, w.led)).toHaveLength(1);
+
+    vi.advanceTimersByTime(3_000);
+    const { m, lk, rv } = await w.announce(w.led, 20);
+    expect(m).toMatchObject({ status: "offering", trigger: "arrivals", reofferRound: 0 });
+    await w.reply(w.launchKit, lk, "pass");
+    await w.reply(w.rivet, rv, "pass");
+    expect((await w.momentDoc(m._id)).status).toBe("no_takers");
+    expect(await reoffersFor(w, w.led)).toHaveLength(1);
+
+    // The one chain steps down once.
+    await w.advance(REOFFER_DELAY_MS);
+    const all = await w.momentsOf(w.led);
+    expect(all).toHaveLength(3);
+    expect(all[2]).toMatchObject({ trigger: "reoffer", reofferRound: 1 });
+    expect(await reoffersFor(w, w.led)).toHaveLength(0); // it found takers: offering, no chain
+  });
+
+  test("a queued screen holding with a re-offer still pending doesn't start another", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const phone = await w.addScreen("Phone");
+    await w.revokeAll();
+    await w.camera(w.led, 10);
+    await w.flush();
+    const [waiting] = await w.momentsOf(w.led);
+    expect(waiting.status).toBe("no_takers");
+    expect(await reoffersFor(w, w.led)).toHaveLength(1);
+
+    // The phone's winner is paying (host busy); the LED's camera reports the same crowd and queues.
+    const busyId = await w.t.run(async (ctx) => {
+      const { _id, _creationTime, ...rest } = waiting;
+      void _id;
+      void _creationTime;
+      return await ctx.db.insert("moments", { ...rest, billboardId: phone, status: "awarded" });
+    });
+    vi.advanceTimersByTime(2_000);
+    await w.camera(w.led, 10);
+    await w.flush();
+    expect((await w.t.run(async (ctx) => ctx.db.get(w.led)))!.saleQueuedAt).toBeDefined();
+
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(busyId, { status: "paid" });
+      await releaseWorkspace(ctx, w.workspaceId);
+    });
+    await w.flush();
+    expect(await w.momentsOf(w.led)).toHaveLength(1); // holding
+    expect(await reoffersFor(w, w.led)).toHaveLength(1);
+    // It passed its turn: out of the queue.
+    expect((await w.t.run(async (ctx) => ctx.db.get(w.led)))!.saleQueuedAt).toBeUndefined();
   });
 });

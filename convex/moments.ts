@@ -235,14 +235,24 @@ async function findTargets(
 
 type DetectResult = { momentId: Id<"moments"> | null; reason: string };
 
+/** A pending re-offer this far past its due time never ran (it failed): schedule a fresh one. */
+const REOFFER_STALE_MS = 10_000;
+
 /**
  * Nobody bought this moment's spot: announce it again after a pause, about
  * 15% lower (the next re-offer round), unless it is already at its minimum,
- * where it holds as a standing offer. Returns whether a re-offer was scheduled.
+ * where it holds as a standing offer. One chain per screen: when a re-offer
+ * is already pending (`reofferDueAt`), it is left in charge. Returns whether
+ * a re-offer is coming.
  */
 export async function scheduleReoffer(ctx: MutationCtx, moment: Doc<"moments">): Promise<boolean> {
   if (moment.priceMinor <= moment.floorMinor) return false;
-  await ctx.scheduler.runAfter(REOFFER_DELAY_MS, internal.moments.detectFor, { billboardId: moment.billboardId, trigger: "reoffer" });
+  const now = Date.now();
+  const billboard = await ctx.db.get(moment.billboardId);
+  if (billboard?.reofferDueAt !== undefined && billboard.reofferDueAt + REOFFER_STALE_MS > now) return true;
+  const dueAt = now + REOFFER_DELAY_MS;
+  await ctx.db.patch(moment.billboardId, { reofferDueAt: dueAt });
+  await ctx.scheduler.runAt(dueAt, internal.moments.detectFor, { billboardId: moment.billboardId, trigger: "reoffer" });
   return true;
 }
 
@@ -464,9 +474,15 @@ export const detectFor = internalMutation({
   args: { billboardId: v.id("billboards"), trigger: momentTrigger },
   returns: v.object({ momentId: v.union(v.id("moments"), v.null()), reason: v.string() }),
   handler: async (ctx, args) => {
+    if (args.trigger === "reoffer") {
+      // The pending re-offer is running now: the screen has no chain until this run schedules one.
+      const screen = await ctx.db.get(args.billboardId);
+      if (screen?.reofferDueAt !== undefined) await ctx.db.patch(args.billboardId, { reofferDueAt: undefined });
+    }
     const result = await detectCore(ctx, args.billboardId, args.trigger);
     if (args.trigger === "queue" && result.momentId === null && !HOST_BUSY_REASONS.has(result.reason)) {
-      // A re-offer that came due while the host was busy queued instead: restart its chain.
+      // A re-offer that came due while the host was busy queued instead: restart its chain
+      // (scheduleReoffer leaves a still-pending one in charge).
       if (result.reason === "holding") {
         const waiting = await ctx.db
           .query("moments")
@@ -475,8 +491,9 @@ export const detectFor = internalMutation({
           .first();
         if (waiting) await scheduleReoffer(ctx, waiting);
       }
-      // This screen doesn't sell after all: it passes its turn on (the host is still free).
+      // This screen doesn't sell after all: it leaves the queue and passes its turn on (the host is still free).
       const billboard = await ctx.db.get(args.billboardId);
+      if (billboard?.saleQueuedAt !== undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: undefined });
       if (billboard?.workspaceId) await releaseWorkspace(ctx, billboard.workspaceId);
     }
     return result;
@@ -533,19 +550,25 @@ export const reply = internalMutation({
       const respondBy = moment.startedAt + NEGOTIATION_TIME_CAP_MS;
       if (moment.negotiationOfferId !== offer._id || now >= respondBy) fail("OFFER_CLOSED", "The negotiation is not open to you");
       const sellerMinor = moment.sellerMinor ?? moment.priceMinor;
+      let decision = args.decision;
       let amount: number | null = null;
-      if (args.decision !== "pass") {
-        amount = args.decision === "accept" ? sellerMinor : (args.amountMinor ?? NaN);
-        await checkAmount(Number.isSafeInteger(amount) ? Math.min(amount, sellerMinor) : amount);
+      if (decision !== "pass") {
+        amount = decision === "accept" ? sellerMinor : (args.amountMinor ?? NaN);
+        if (Number.isSafeInteger(amount) && amount >= sellerMinor) {
+          // Countering at or above the host's price is an accept at the host's price.
+          decision = "accept";
+          amount = sellerMinor;
+        }
+        await checkAmount(amount);
       }
-      await negotiationReply(ctx, moment, offer, args.decision, amount ?? undefined, reasoning);
+      await negotiationReply(ctx, moment, offer, decision, amount ?? undefined, reasoning);
       await recordAudit(ctx, {
         workspaceId: moment.workspaceId,
         traceId: `moment:${moment._id}`,
         actor: agent.actor,
         type: "moment.reply",
         subjectId: offer._id,
-        reason: `negotiation ${args.decision}${amount !== null ? ` ${usd(amount)}` : ""}${reasoning ? `: ${reasoning}` : ""}`.slice(0, 1000),
+        reason: `negotiation ${decision}${amount !== null ? ` ${usd(amount)}` : ""}${reasoning ? `: ${reasoning}` : ""}`.slice(0, 1000),
       });
       const after = (await ctx.db.get(offer._id))!;
       return { offerId: offer._id, status: after.status, amountMinor: amount, windowClosesAt: respondBy };
