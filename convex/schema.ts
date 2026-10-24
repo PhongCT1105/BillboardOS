@@ -204,6 +204,7 @@ export const auditEventType = v.union(
   v.literal("bank.duplicate_ignored"),
   v.literal("reconciliation.applied"),
   v.literal("reconciliation.needs_review"),
+  v.literal("reconciliation.handoff"),
   v.literal("approval.requested"),
   v.literal("approval.approved"),
   v.literal("approval.rejected"),

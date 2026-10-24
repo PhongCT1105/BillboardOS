@@ -366,7 +366,7 @@ function allocate<B extends string, A extends string, I extends string>(
           note: `Short by ${usd(balance)} on ${inv.number}, below ${usd(MATERIALITY_MINOR)} materiality: accepted by policy.`,
         });
       }
-      d.explanation.push(`Short by ${usd(short)}, under ${usd(MATERIALITY_MINOR)} materiality: auto-accepted.`);
+      d.explanation.push(...d.adjustments.map((a) => a.note));
     } else {
       d.outcome = "partially_applied";
       d.exceptions.push({

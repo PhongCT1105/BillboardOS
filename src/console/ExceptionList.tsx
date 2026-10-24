@@ -27,7 +27,11 @@ export function ExceptionList({ exceptions }: { exceptions: Doc<"financeExceptio
             const diff = ex.observedMinor - ex.expectedMinor;
             return (
               <li key={ex._id} className="fade-in rounded-lg border border-danger/50 bg-panel p-4">
-                <p className="font-medium text-danger">{KIND_LABEL[ex.kind]}</p>
+                <p className="font-medium text-danger">
+                  {ex.kind === "duplicate_payment" && ex.bankTransactionId
+                    ? "Same bank payment appears twice"
+                    : KIND_LABEL[ex.kind]}
+                </p>
                 <dl className="mt-3 grid grid-cols-3 gap-4 text-sm">
                   <Figure label="Expected" value={money(ex.expectedMinor)} />
                   <Figure label="Observed" value={money(ex.observedMinor)} />

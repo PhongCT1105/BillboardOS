@@ -715,3 +715,32 @@ describe("demo reset", () => {
     expect(line).toMatchObject({ status: "matched", rule: "payer_exact_amount" });
   });
 });
+
+describe("AR -> collections hand-off", () => {
+  test("runReconciliation schedules collections.plan and audits the hand-off", async () => {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.seed.finance, {});
+    await t.mutation(api.finance.runReconciliation, {});
+    expect(await t.query(api.collections.tasks, {})).toHaveLength(0); // not yet run
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const tasks = await t.query(api.collections.tasks, {});
+    expect(tasks.map((x) => x.invoiceNumber).sort()).toEqual(Object.keys(COLLECTION_ANSWERS).sort());
+    const handoff = (await t.query(api.audit.recent, {})).find((e) => e.type === "reconciliation.handoff")!;
+    expect(handoff.actor).toBe("agent:ar");
+    expect(handoff.reason).toContain("collections re-planned");
+
+    // Nothing left to reconcile -> no second hand-off.
+    await t.mutation(api.finance.runReconciliation, {});
+    const handoffs = (await t.query(api.audit.recent, {})).filter((e) => e.type === "reconciliation.handoff");
+    expect(handoffs).toHaveLength(1);
+  });
+
+  test("sub-materiality note appears once", async () => {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.seed.finance, {});
+    await t.mutation(api.finance.runReconciliation, {});
+    const line = (await lineByExternalId(t, "fx-bank-003"))!;
+    expect(line.note?.match(/materiality/g)).toHaveLength(1);
+    expect(line.note).toContain("Short by $0.50 on INV-1014, below $1.00 materiality: accepted by policy.");
+  });
+});

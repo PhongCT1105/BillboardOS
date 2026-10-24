@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation, type MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { bankTransactionStatus, reconcileRule } from "./schema";
 import { recordAudit } from "./lib/audit";
@@ -189,10 +190,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
     }
 
     const appliedMinor = decision.applications.reduce((s, a) => s + a.amountMinor, 0);
-    const notes = [
-      ...decision.explanation,
-      ...decision.adjustments.map((a) => a.note),
-    ].join(" ");
+    const notes = decision.explanation.join(" ");
     await ctx.db.patch(line._id, {
       status: decision.outcome,
       appliedMinor,
@@ -266,6 +264,19 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
       status: decision.outcome,
       rule: decision.rule,
       explanation: decision.explanation,
+    });
+  }
+
+  // Hand-off: the collections seat re-plans right away on the updated balances.
+  if (summary.processed > 0) {
+    await ctx.scheduler.runAfter(0, internal.collections.plan, {});
+    await recordAudit(ctx, {
+      traceId: "handoff:ar->collections",
+      actor: AR_AGENT,
+      type: "reconciliation.handoff",
+      subjectId: "collections",
+      reason: `AR reconciliation finished (${summary.matched} matched, ${summary.partiallyApplied} partially applied, ${summary.needsReview} for review); collections re-planned.`,
+      data: { processed: summary.processed, triggeredBy },
     });
   }
 
