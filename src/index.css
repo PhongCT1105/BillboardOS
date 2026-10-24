@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+/* Dark-only by design: the console and player run on booth screens. */
+@theme {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+
+  --color-ink: #0d0e10;
+  --color-panel: #15171a;
+  --color-raised: #1d2024;
+  --color-line: #2a2d32;
+  --color-fg: #ecebe8;
+  --color-muted: #a3a5a8;
+  --color-faint: #6f7276;
+  --color-accent: #ff6b35;
+  --color-accent-ink: #1a0d06;
+  --color-danger: #f26464;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-ink text-fg font-sans antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Held slots: diagonal stripes in the accent so they read differently from booked. */
+.stripes {
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--color-accent) 55%, transparent) 0 6px,
+    transparent 6px 12px
+  );
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .fade-in {
+    animation: fade-in 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

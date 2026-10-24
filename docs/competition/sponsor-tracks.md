@@ -12,7 +12,7 @@
 | Factory — Best Use of Droid SDK | **Use Droid SDK (TS/Python) in the running product**; trigger, bounded access and visible work; not a coding-only or chatbot add-on | $2,000 cash, credits and swag |
 | Fetch.ai — Best Use of Fetch.ai | Guide refers to sponsor event page for detailed criteria | 1st $1,500; 2nd $1,000; 3rd $500 |
 | Armadin — Best Security Hack | Criteria listed as coming soon | Apple headphones (description tentative) |
-| Coinbase — Best Use of x402 | Guide references an external track guide; obtain that guide and check the **two individual x402 tracks** | $500 USDC + recruiter call per team member per track; up to $4,000 total |
+| Coinbase — Best Use of x402 | Two tracks, **Payment Agents** and **Trading Agents**; choose one primary track (see [Coinbase page](../sponsors/coinbase-x402.md)) | $500 USDC + recruiter call per eligible team member, one winning team per track |
 | CREAO — Best AI-First Disruptor | Consult linked CREAO event page for details | $5,000 total across CREAO tracks; Launchpad benefits |
 | CREAO — Best One-Person Company | Same sponsor page | Shared prize pool + Launchpad benefits |
 | CREAO — Best Team Empowerment | Same sponsor page | Shared prize pool + Launchpad benefits |

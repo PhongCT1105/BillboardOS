@@ -27,6 +27,17 @@ nav:
       - Original guide extracted text: competition/official-guide-text.md
       - Track strategy: competition/track-strategy.md
       - Source register: competition/sources.md
+  - Sponsors:
+      - sponsors/index.md
+      - Hyphenate: sponsors/hyphenate.md
+      - Coinbase x402: sponsors/coinbase-x402.md
+      - CREAO: sponsors/creao.md
+      - CRS: sponsors/crs.md
+      - Convex: sponsors/convex.md
+      - Capital One Nessie: sponsors/capital-one-nessie.md
+      - Anthropic: sponsors/anthropic.md
+      - Microsoft: sponsors/microsoft.md
+      - Fetch.ai: sponsors/fetch-ai.md
   - Product:
       - Product vision: product/vision.md
       - MVP requirements: product/requirements.md
@@ -36,10 +47,14 @@ nav:
       - Payments & risk: architecture/payments-and-risk.md
       - Data model: architecture/data-model.md
   - Development:
+      - Kickoff checklist: development/kickoff-checklist.md
       - Getting started: development/getting-started.md
       - Roadmap: development/roadmap.md
   - Demo: demo/judging.md
   - Notes:
       - Original ideation: notes/ideation.md
       - Open questions: notes/open-questions.md
-  - Decisions: decisions/0001-scope.md
+  - Decisions:
+      - 0001 Scope: decisions/0001-scope.md
+      - 0002 Sponsor-native stack: decisions/0002-sponsor-native-stack.md
+      - 0003 Pricing harness and bidding: decisions/0003-pricing-harness-and-bidding.md

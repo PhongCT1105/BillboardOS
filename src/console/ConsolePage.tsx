@@ -1,0 +1,103 @@
+import { useState } from "react";
+import { useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
+import { useNow } from "../lib/hooks";
+import { KpiStrip } from "./KpiStrip";
+import { SlotBoard } from "./SlotBoard";
+import { ExceptionList } from "./ExceptionList";
+import { CreativeQueue } from "./CreativeQueue";
+import { ActivityFeed } from "./ActivityFeed";
+import { LiveAuctions } from "../auctions/LiveAuctions";
+
+const QUARTER_HOUR = 15 * 60 * 1000;
+
+export function ConsolePage() {
+  const billboards = useQuery(api.billboards.list);
+  const [picked, setPicked] = useState<Id<"billboards"> | null>(null);
+  const billboardId = picked ?? billboards?.[0]?._id ?? null;
+
+  if (billboards === undefined) return <PageSkeleton />;
+  if (billboards.length === 0) {
+    return (
+      <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
+        <h1 className="text-xl font-semibold">No billboards yet</h1>
+        <p className="mt-2 max-w-[60ch] text-muted">
+          Seed the demo network with <code className="font-mono text-fg">npm run seed</code>, then reload.
+        </p>
+      </main>
+    );
+  }
+
+  return (
+    <main className="mx-auto max-w-[1400px] px-4 pb-16 md:px-6">
+      <div className="flex flex-wrap items-end justify-between gap-4 pt-8 pb-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Operator console</h1>
+          <p className="mt-1 text-sm text-muted">Live inventory, money and agent activity for your network.</p>
+        </div>
+        {billboards.length > 1 && (
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-muted">Billboard</span>
+            <select
+              className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
+              value={billboardId ?? ""}
+              onChange={(e) => setPicked(e.target.value as Id<"billboards">)}
+            >
+              {billboards.map((b) => (
+                <option key={b._id} value={b._id}>
+                  {b.name}, {b.city}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+      {billboardId && <ConsoleBody billboardId={billboardId} />}
+    </main>
+  );
+}
+
+function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
+  const now = useNow(60_000);
+  const from = Math.floor(now / QUARTER_HOUR) * QUARTER_HOUR - QUARTER_HOUR;
+  const to = from + 12 * 60 * 60 * 1000;
+
+  const summary = useQuery(api.dashboard.summary);
+  const slots = useQuery(api.slots.listForBillboard, { billboardId, from, to });
+  const audience = useQuery(api.audience.recentForBillboard, { billboardId });
+  const exceptions = useQuery(api.finance.openExceptions);
+  const pending = useQuery(api.creatives.pendingReview);
+  const activity = useQuery(api.audit.recent);
+
+  const row = summary?.billboards.find((b) => b.billboardId === billboardId);
+
+  return (
+    <div className="flex flex-col gap-10">
+      <KpiStrip summary={row} audience={audience} />
+      <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="flex flex-col gap-10">
+          <LiveAuctions billboardId={billboardId} />
+          <SlotBoard slots={slots} />
+          <ExceptionList exceptions={exceptions} />
+          <CreativeQueue pending={pending} />
+        </div>
+        <ActivityFeed events={activity} />
+      </div>
+    </div>
+  );
+}
+
+function PageSkeleton() {
+  return (
+    <main className="mx-auto max-w-[1400px] px-4 pt-8 md:px-6">
+      <div className="h-7 w-56 animate-pulse rounded bg-panel" />
+      <div className="mt-8 grid grid-cols-2 gap-6 md:grid-cols-5">
+        {Array.from({ length: 5 }, (_, i) => (
+          <div key={i} className="h-16 animate-pulse rounded bg-panel" />
+        ))}
+      </div>
+      <div className="mt-10 h-64 animate-pulse rounded bg-panel" />
+    </main>
+  );
+}

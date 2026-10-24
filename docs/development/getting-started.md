@@ -49,17 +49,18 @@ Don't create 10 services for a 2-day hackathon; this is a monorepo namespace sug
 - Critical integration PRs should contain a short Loom/screen recording or reproducible steps and actual test output.
 - Record consequential choices under `docs/decisions/`.
 
-## Suggested .env names when app code begins
+## Environment variables
+
+Copy the template and fill it in:
 
 ```bash
-DATABASE_URL=
-LLM_API_KEY=
-X402_NETWORK=
-X402_PAYMENT_ASSET=
-X402_FACILITATOR_URL=
-X402_RECEIVER_ADDRESS=
-CRS_SANDBOX_API_KEY=
-CAMERA_DEVICE_ID=
+cp .env.example .env
 ```
 
-These are **proposed configuration keys** only; adapt to the actual sponsor SDK and never check in filled values.
+Each variable in `.env.example` is tagged with where it's read:
+
+- `[local]`: the Express x402 server, buyer agent, edge counter or scripts read it from `.env`.
+- `[convex]`: Convex functions read it. **Convex doesn't read `.env`**; push each one with `npx convex env set NAME value`.
+- `[web]`: exposed to the browser through the `VITE_` prefix. Never put a secret there.
+
+`npx convex dev` writes `CONVEX_DEPLOYMENT` and `VITE_CONVEX_URL` to `.env.local` for you. Use testnet values only (Base Sepolia, CRS sandbox, Nessie).

@@ -11,3 +11,11 @@ __pycache__/
 site/
 .DS_Store
 *.log
+
+# Local agent state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+*.tsbuildinfo
+
+# Copied from node_modules by postinstall
+public/mediapipe/

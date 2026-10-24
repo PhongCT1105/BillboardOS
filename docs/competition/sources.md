@@ -9,6 +9,11 @@ We explicitly distinguish **official competition materials** from **team ideatio
 | Two annotated JPEGs | Team handwritten brainstorming | Partially interpreted in ideation | Preserve originals locally and review before converting ambiguous handwriting into commitments |
 | `New Recording 9.m4a` | Team audio | **Not transcribed** | No decisions attributed to the recording |
 | `CalHacks_Autonomous_Billboard_Unified_v2.pdf` | Previous assistant-generated proposal | Design reference, not official | Seven architecture/workflow diagrams; concepts may change |
+| `docs/original/13.0 Hacker Guide_Calhack.pdf` | Official guide PDF | Added locally, not yet committed | Original of the extracted text |
+| `docs/original/CalHacks_Hyphenate_Track.pdf` | Hyphenate sponsor | Added locally, not yet committed | Summarized in [Hyphenate](../sponsors/hyphenate.md) |
+| `docs/original/Idea.pdf` | Team design spec v2.0 | Added locally, not yet committed | Not official; design reference |
+| `docs/original/Coinbase CalHacks Challenge 2026.pdf` | Coinbase sponsor | Added locally, not yet committed | Summarized in [Coinbase](../sponsors/coinbase-x402.md) |
+| `docs/original/creao/*.png` | Screenshots of the CREAO Cal Hacks page (Home tab), 2026-10-24 | Added locally, not yet committed | Transcribed in [CREAO](../sponsors/creao.md) |
 | This documentation hub | BillboardOS team draft | Version 0 | Source-aware working specification |
 
 ## Original source preservation
