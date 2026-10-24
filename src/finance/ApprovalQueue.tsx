@@ -32,7 +32,7 @@ export function ApprovalQueue({ approvals }: { approvals: Approval[] | undefined
 function ApprovalItem({ approval }: { approval: Approval }) {
   const decide = useMutation(api.approvals.decide);
   // The approver is whoever is signed in; the server enforces this too.
-  const me = useQuery(api.operators.me);
+  const me = useQuery(api.accounts.me);
   const ownRequest = me?.email != null && approval.requestedBy === `operator:${me.email}`;
   const [rejecting, setRejecting] = useState(false);
   const [note, setNote] = useState("");

@@ -2,6 +2,18 @@ import { useState, type FormEvent } from "react";
 import { useAuthActions } from "@convex-dev/auth/react";
 
 type Flow = "signIn" | "signUp";
+export type AccountType = "host" | "customer";
+
+/** The side chosen at sign-up, applied on the first signed-in render (see RoleChooser). */
+export const PENDING_ROLE_KEY = "billboardos:pendingAccountType";
+export function readPendingRole(): AccountType | null {
+  try {
+    const v = localStorage.getItem(PENDING_ROLE_KEY);
+    return v === "host" || v === "customer" ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Map Convex Auth's terse errors to something an operator can act on. */
 function authErrorMessage(err: unknown, flow: Flow): string {
@@ -25,6 +37,7 @@ export function SignInPage() {
   const [flow, setFlow] = useState<Flow>("signIn");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [role, setRole] = useState<AccountType>("customer");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,6 +50,13 @@ export function SignInPage() {
     }
     setBusy(true);
     try {
+      if (flow === "signUp") {
+        try {
+          localStorage.setItem(PENDING_ROLE_KEY, role);
+        } catch {
+          // Private mode: the role chooser asks again after sign-up.
+        }
+      }
       await signIn("password", { email: email.trim(), password, flow });
     } catch (err) {
       setError(authErrorMessage(err, flow));
@@ -50,15 +70,46 @@ export function SignInPage() {
     <main className="mx-auto flex max-w-[1400px] px-4 pt-16 pb-24 md:px-6">
       <section className="fade-in w-full max-w-sm" aria-labelledby="signin-heading">
         <h1 id="signin-heading" className="text-2xl font-semibold tracking-tight">
-          {signingUp ? "Create operator account" : "Operator sign in"}
+          {signingUp ? "Create your account" : "Sign in to BillboardOS"}
         </h1>
         <p className="mt-2 text-sm text-muted">
           {signingUp
-            ? "The first account on a new deployment becomes the operator. Later accounts need an operator to grant access."
-            : "The console, finance desk and sensor are for operators. Booking and the screen stay public."}
+            ? "Hosts run screens and get paid. Customers book ad time for their campaigns."
+            : "Hosts see their screens and money; customers see their own campaigns and bookings."}
         </p>
 
         <form onSubmit={submit} className="mt-8 flex flex-col gap-5" noValidate>
+          {signingUp && (
+            <fieldset className="flex flex-col gap-2 text-sm">
+              <legend className="mb-2 text-muted">I want to</legend>
+              <div className="grid grid-cols-2 gap-2">
+                {(
+                  [
+                    ["customer", "Book ad time", "Run campaigns on screens"],
+                    ["host", "Host screens", "Sell time on my displays"],
+                  ] as const
+                ).map(([value, title, hint]) => (
+                  <label
+                    key={value}
+                    className={`flex cursor-pointer flex-col gap-0.5 rounded-md border px-3 py-2 transition-colors ${
+                      role === value ? "border-accent bg-accent/10" : "border-line bg-panel hover:border-muted"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="role"
+                      value={value}
+                      checked={role === value}
+                      onChange={() => setRole(value)}
+                      className="sr-only"
+                    />
+                    <span className="font-medium text-fg">{title}</span>
+                    <span className="text-xs text-muted">{hint}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          )}
           <label className="flex flex-col gap-2 text-sm">
             <span className="text-muted">Email</span>
             <input
@@ -116,21 +167,6 @@ export function SignInPage() {
           >
             {signingUp ? "Sign in" : "Create an account"}
           </button>
-        </p>
-      </section>
-    </main>
-  );
-}
-
-/** Signed in, but this account has not been granted operator access. */
-export function NotOperatorPage({ email }: { email: string | null }) {
-  return (
-    <main className="mx-auto max-w-[1400px] px-4 pt-16 md:px-6">
-      <section className="fade-in max-w-md">
-        <h1 className="text-2xl font-semibold tracking-tight">Waiting for operator access</h1>
-        <p className="mt-2 text-sm text-muted">
-          {email ?? "This account"} is signed in but is not an operator yet. Ask an existing operator to grant access to
-          this email, then reload.
         </p>
       </section>
     </main>

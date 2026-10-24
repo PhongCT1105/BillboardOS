@@ -9,14 +9,15 @@ import { Receivables } from "./Receivables";
 import { ApprovalQueue } from "./ApprovalQueue";
 import { CollectionTasks } from "./CollectionTasks";
 import { CompanyValuations } from "./CompanyValuations";
+import { DataSales } from "./DataSales";
 
 type RunSummary = FunctionReturnType<typeof api.finance.runReconciliation>;
 
 export function FinancePage() {
-  const bankFeed = useQuery(api.finance.bankFeed);
+  const bankFeed = useQuery(api.finance.bankFeed, {});
   const receivables = useQuery(api.finance.receivables, {});
-  const exceptions = useQuery(api.finance.openExceptions);
-  const approvals = useQuery(api.approvals.pending);
+  const exceptions = useQuery(api.finance.openExceptions, {});
+  const approvals = useQuery(api.approvals.pending, {});
   const tasks = useQuery(api.collections.tasks, {});
   const runReconciliation = useMutation(api.finance.runReconciliation);
   const [summary, setSummary] = useState<RunSummary | null>(null);
@@ -72,6 +73,7 @@ export function FinancePage() {
           <BankFeed lines={bankFeed} />
           <ExceptionList exceptions={exceptions} />
           <Receivables invoices={receivables} />
+          <DataSales />
           <CompanyValuations />
         </div>
         <div className="flex flex-col gap-10 lg:sticky lg:top-6 lg:self-start">

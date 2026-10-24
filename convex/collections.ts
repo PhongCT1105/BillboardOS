@@ -6,20 +6,22 @@ import { recordAudit } from "./lib/audit";
 import { chooseTone, TONE_RANK, type HistoryItem } from "./lib/collections";
 import { createApproval, invoiceBalance } from "./lib/finance";
 import { usd } from "./lib/reconcile";
-import { requireOperator } from "./lib/operator";
+import { resolveWorkspace } from "./lib/tenancy";
 
 /** The collections seat. Plans follow-ups; never sends, never approves. */
 export const COLLECTIONS_AGENT = "agent:collections";
 const MAX_OVERDUE_PER_STATUS = 100;
 const MAX_HISTORY = 50;
 
-async function overdueInvoices(ctx: QueryCtx, asOf: number): Promise<Doc<"invoices">[]> {
+async function overdueInvoices(ctx: QueryCtx, workspaceId: Id<"workspaces">, asOf: number): Promise<Doc<"invoices">[]> {
   const out: Doc<"invoices">[] = [];
   for (const status of ["open", "partially_paid"] as const) {
     out.push(
       ...(await ctx.db
         .query("invoices")
-        .withIndex("by_status_and_dueAt", (q) => q.eq("status", status).lt("dueAt", asOf))
+        .withIndex("by_workspace_and_status_and_dueAt", (q) =>
+          q.eq("workspaceId", workspaceId).eq("status", status).lt("dueAt", asOf),
+        )
         .take(MAX_OVERDUE_PER_STATUS)),
     );
   }
@@ -31,14 +33,15 @@ async function historyFor(ctx: QueryCtx, inv: Doc<"invoices">): Promise<HistoryI
     .query("invoices")
     .withIndex("by_advertiser", (q) => q.eq("advertiserId", inv.advertiserId))
     .take(MAX_HISTORY);
+  // History with THIS host only: another host's invoices are not ours to cite.
   return rows
-    .filter((r) => r._id !== inv._id)
+    .filter((r) => r._id !== inv._id && r.workspaceId === inv.workspaceId)
     .map((r) => ({ number: r.number, dueAt: r.dueAt, paidAt: r.paidAt ?? null }));
 }
 
 /** Overdue invoices with the tone the collections seat would use (read-only preview). */
 export const dueForFollowUp = query({
-  args: { asOf: v.optional(v.number()) },
+  args: { asOf: v.optional(v.number()), workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       invoiceId: v.id("invoices"),
@@ -55,10 +58,10 @@ export const dueForFollowUp = query({
     }),
   ),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const asOf = args.asOf ?? Date.now();
     const rows = [];
-    for (const inv of await overdueInvoices(ctx, asOf)) {
+    for (const inv of await overdueInvoices(ctx, me.workspaceId, asOf)) {
       const choice = chooseTone({
         invoiceNumber: inv.number,
         dueAt: inv.dueAt,
@@ -94,7 +97,7 @@ export const dueForFollowUp = query({
  * task; escalations become a controller approval request, never an action.
  */
 export const plan = internalMutation({
-  args: { asOf: v.optional(v.number()) },
+  args: { asOf: v.optional(v.number()), workspaceId: v.optional(v.id("workspaces")) },
   returns: v.object({
     examined: v.number(),
     tasksCreated: v.number(),
@@ -104,7 +107,11 @@ export const plan = internalMutation({
     const asOf = args.asOf ?? Date.now();
     let tasksCreated = 0;
     let escalationsRequested = 0;
-    const invoices = await overdueInvoices(ctx, asOf);
+    const workspaceIds = args.workspaceId
+      ? [args.workspaceId]
+      : (await ctx.db.query("workspaces").take(20)).map((w) => w._id);
+    const invoices: Doc<"invoices">[] = [];
+    for (const id of workspaceIds) invoices.push(...(await overdueInvoices(ctx, id, asOf)));
     for (const inv of invoices) {
       const choice = chooseTone({
         invoiceNumber: inv.number,
@@ -129,6 +136,7 @@ export const plan = internalMutation({
 
       const balanceMinor = invoiceBalance(inv);
       const taskId: Id<"collectionTasks"> = await ctx.db.insert("collectionTasks", {
+        workspaceId: inv.workspaceId,
         invoiceId: inv._id,
         advertiserId: inv.advertiserId,
         tone,
@@ -141,6 +149,7 @@ export const plan = internalMutation({
       tasksCreated++;
       const traceId = `invoice:${inv.number}`;
       await recordAudit(ctx, {
+        workspaceId: inv.workspaceId,
         traceId,
         actor: COLLECTIONS_AGENT,
         type: "collection.planned",
@@ -152,6 +161,7 @@ export const plan = internalMutation({
         const r = await createApproval(
           ctx,
           {
+            workspaceId: inv.workspaceId,
             action: "escalate_collection",
             subjectKind: "invoice",
             subjectId: inv._id,
@@ -172,7 +182,7 @@ export const plan = internalMutation({
 
 /** Collection tasks, newest first (max 50), optionally by status. */
 export const tasks = query({
-  args: { status: v.optional(collectionTaskStatus) },
+  args: { status: v.optional(collectionTaskStatus), workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       _id: v.id("collectionTasks"),
@@ -193,15 +203,19 @@ export const tasks = query({
     }),
   ),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const status = args.status;
     const rows = status
       ? await ctx.db
           .query("collectionTasks")
-          .withIndex("by_status", (q) => q.eq("status", status))
+          .withIndex("by_workspace_and_status", (q) => q.eq("workspaceId", me.workspaceId).eq("status", status))
           .order("desc")
           .take(50)
-      : await ctx.db.query("collectionTasks").order("desc").take(50);
+      : await ctx.db
+          .query("collectionTasks")
+          .withIndex("by_workspace", (q) => q.eq("workspaceId", me.workspaceId))
+          .order("desc")
+          .take(50);
     const out = [];
     for (const t of rows) {
       const inv = await ctx.db.get(t.invoiceId);

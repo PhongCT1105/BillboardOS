@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, type TestClient } from "./test.setup";
+import { modules, signedInOperator, type TestClient, joinCompanies } from "./test.setup";
 import { HOLD_TTL_MS, QUOTE_TTL_MS } from "./lib/constants";
 
 // 09:07 PDT; first seeded slot starts 09:15 PDT (hour factor 1.0, base $40).
@@ -25,6 +25,7 @@ afterEach(() => {
 async function setup() {
   const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
+  await joinCompanies(t);
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
     from: START,
@@ -57,6 +58,7 @@ describe("seed", () => {
     expect(slots[0].startAt).toBe(Date.UTC(2026, 9, 25, 16, 15));
     expect(slots.every((s) => s.state === "available")).toBe(true);
     const again = await t.mutation(internal.seed.demo, {});
+    await joinCompanies(t);
     expect(again.created).toBe(false);
     expect(again.billboardId).toBe(seed.billboardId);
     expect(await allRows(t, "slots")).toHaveLength(48);

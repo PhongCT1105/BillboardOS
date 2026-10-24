@@ -1,5 +1,6 @@
 import type { MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
+import { scheduleMatch } from "../watch";
 
 export const SLOT_MS = 15 * 60 * 1000;
 /** Keep this much future inventory available on every billboard. */
@@ -17,6 +18,7 @@ export async function ensureUpcomingSlots(
   billboardId: Id<"billboards">,
   now: number,
 ): Promise<number> {
+  const billboard = await ctx.db.get(billboardId);
   const latest = await ctx.db
     .query("slots")
     .withIndex("by_billboard_and_startAt", (q) => q.eq("billboardId", billboardId))
@@ -31,6 +33,7 @@ export async function ensureUpcomingSlots(
   while (startAt < horizon && created < MAX_NEW_SLOTS) {
     await ctx.db.insert("slots", {
       billboardId,
+      workspaceId: billboard?.workspaceId,
       startAt,
       endAt: startAt + SLOT_MS,
       state: "available",
@@ -38,5 +41,7 @@ export async function ensureUpcomingSlots(
     startAt += SLOT_MS;
     created++;
   }
+  // New inventory: let watch rules see it (no-op when nobody is watching).
+  if (created > 0) await scheduleMatch(ctx, { billboardIds: [billboardId], reason: "slots generated" });
   return created;
 }

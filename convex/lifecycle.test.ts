@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, type TestClient } from "./test.setup";
+import { modules, signedInOperator, type TestClient, joinCompanies } from "./test.setup";
 
 // 09:07 PDT; first seeded slot is 16:15-16:30Z.
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -23,6 +23,7 @@ type T = TestClient;
 async function setup() {
   const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
+  await joinCompanies(t);
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
     from: START,
@@ -55,6 +56,12 @@ async function bookWithManualPayment(
 }
 
 async function uploadCreative(t: T, campaignId: Id<"campaigns">) {
+  // ADR 0004: a host reviews creatives of campaigns that quoted its screens.
+  const slot = await t.run(async (ctx) => {
+    const all = await ctx.db.query("slots").take(100);
+    return all.filter((s) => s.state === "available").sort((a, b) => b.startAt - a.startAt)[0];
+  });
+  await t.mutation(api.quotes.create, { campaignId, slotIds: [slot._id] });
   const storageId = await t.run(async (ctx) =>
     ctx.storage.store(new Blob(["fake-png-bytes"], { type: "image/png" })),
   );
@@ -155,7 +162,8 @@ describe("creatives", () => {
 
     const events = await t.query(api.audit.recent, {});
     expect(events.map((e) => e.type)).toEqual(
-      expect.arrayContaining(["creative.attached", "creative.approved", "booking.scheduled"]),
+      // creative.attached is a customer-side event (not in the host's activity log).
+      expect.arrayContaining(["creative.approved", "booking.scheduled"]),
     );
 
     // Approved creative is locked; reviewing again is refused.
@@ -358,6 +366,7 @@ describe("rolling inventory", () => {
     }
     // Seed re-run is still idempotent with the rolling helper.
     const again = await t.mutation(internal.seed.demo, {});
+    await joinCompanies(t);
     expect(again.slotsCreated).toBe(0);
   });
 });

@@ -4,7 +4,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags, brandTier, companyAssessmentFields } from "./schema";
 import { recordAudit } from "./lib/audit";
-import { requireOperator } from "./lib/operator";
+import { resolveWorkspace } from "./lib/tenancy";
 import {
   OVERRIDE_TTL_MS,
   REQUEST_DEBOUNCE_MS,
@@ -90,17 +90,28 @@ export async function gatherCompanyInputs(
 }
 
 /** Latest assessment for a company and whether it is still fresh. */
+/**
+ * The assessment that applies to a company's quotes in `workspaceId`: that
+ * workspace's active operator override if any, else the latest platform-level
+ * assessment (Claude or heuristic). `fresh` = not expired.
+ */
 export async function currentAssessment(
   db: QueryCtx["db"],
   advertiserId: Id<"advertisers">,
   now: number,
+  workspaceId?: Id<"workspaces">,
 ): Promise<{ assessment: Doc<"companyAssessments"> | null; fresh: boolean }> {
-  const latest = await db
+  const recent = await db
     .query("companyAssessments")
     .withIndex("by_advertiser_and_assessedAt", (q) => q.eq("advertiserId", advertiserId))
     .order("desc")
-    .first();
-  return { assessment: latest, fresh: latest !== null && latest.expiresAt > now };
+    .take(30);
+  if (workspaceId) {
+    const override = recent.find((r) => r.method === "override" && r.workspaceId === workspaceId && r.expiresAt > now);
+    if (override) return { assessment: override, fresh: true };
+  }
+  const platform = recent.find((r) => r.method !== "override") ?? null;
+  return { assessment: platform, fresh: platform !== null && platform.expiresAt > now };
 }
 
 /**
@@ -152,20 +163,17 @@ export const gatherInputs = internalQuery({
   returns: v.object({
     inputs: companyInputs,
     inputsSummary: v.string(),
-    hasActiveOverride: v.boolean(),
   }),
   handler: async (ctx, args) => {
     const inputs = await gatherCompanyInputs(ctx.db, args.advertiserId);
-    const { assessment } = await currentAssessment(ctx.db, args.advertiserId, Date.now());
-    return {
-      inputs,
-      inputsSummary: summarizeInputs(inputs),
-      hasActiveOverride: assessment?.method === "override" && assessment.expiresAt > Date.now(),
-    };
+    return { inputs, inputsSummary: summarizeInputs(inputs) };
   },
 });
 
-/** Store an analyst result (clamped again here). An active operator override wins unless forced. */
+/**
+ * Store a platform-level analyst result (clamped again here). Workspace
+ * overrides are separate rows and keep winning for their workspace's quotes.
+ */
 export const saveAssessment = internalMutation({
   args: {
     advertiserId: v.id("advertisers"),
@@ -182,8 +190,6 @@ export const saveAssessment = internalMutation({
   returns: v.union(v.id("companyAssessments"), v.null()),
   handler: async (ctx, args) => {
     const now = Date.now();
-    const { assessment } = await currentAssessment(ctx.db, args.advertiserId, now);
-    if (!args.force && assessment?.method === "override" && assessment.expiresAt > now) return null;
     const multiplier = clampMultiplier(args.multiplier);
     const id = await ctx.db.insert("companyAssessments", {
       advertiserId: args.advertiserId,
@@ -234,10 +240,16 @@ export const recordFailure = internalMutation({
 
 /** Operator pins a company's multiplier (clamped, audited, 30 days or until reassessed). */
 export const override = mutation({
-  args: { advertiserId: v.id("advertisers"), multiplier: v.number(), reason: v.string() },
+  args: {
+    advertiserId: v.id("advertisers"),
+    multiplier: v.number(),
+    reason: v.string(),
+    workspaceId: v.optional(v.id("workspaces")),
+  },
   returns: v.object({ assessmentId: v.id("companyAssessments"), multiplier: v.number() }),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
+    // Overrides are per workspace: they change this host's quotes only.
+    const operator = await resolveWorkspace(ctx, args.workspaceId);
     if (!Number.isFinite(args.multiplier) || args.multiplier < VALUATION_MIN || args.multiplier > VALUATION_MAX) {
       throw new ConvexError({
         code: "INVALID_INPUT",
@@ -248,10 +260,14 @@ export const override = mutation({
     if (reason.length === 0) throw new ConvexError({ code: "INVALID_INPUT", message: "A reason is required" });
     const advertiser = await ctx.db.get(args.advertiserId);
     if (!advertiser) throw new ConvexError({ code: "NOT_FOUND", message: "Advertiser not found" });
+    if (!(await visibleCompanies(ctx.db, operator.workspaceId)).includes(args.advertiserId)) {
+      throw new ConvexError({ code: "NOT_FOUND", message: "No relationship with this company in your workspace" });
+    }
     const now = Date.now();
-    const previous = await currentAssessment(ctx.db, args.advertiserId, now);
+    const previous = await currentAssessment(ctx.db, args.advertiserId, now, operator.workspaceId);
     const multiplier = clampMultiplier(args.multiplier);
     const assessmentId = await ctx.db.insert("companyAssessments", {
+      workspaceId: operator.workspaceId,
       advertiserId: args.advertiserId,
       multiplier,
       brandTier: previous.assessment?.brandTier ?? "unknown",
@@ -267,6 +283,7 @@ export const override = mutation({
       overriddenBy: operator.actor,
     });
     await recordAudit(ctx, {
+      workspaceId: operator.workspaceId,
       traceId: `valuation:${args.advertiserId}`,
       actor: operator.actor,
       type: "valuation.overridden",
@@ -278,16 +295,49 @@ export const override = mutation({
   },
 });
 
-/** Operator re-runs the analyst now (clears an override once the new result lands). */
+/** Any host member re-runs the platform analyst now (workspace overrides stay until they expire). */
 export const reassess = mutation({
-  args: { advertiserId: v.id("advertisers") },
+  args: { advertiserId: v.id("advertisers"), workspaceId: v.optional(v.id("workspaces")) },
   returns: v.null(),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    await resolveWorkspace(ctx, args.workspaceId);
     await requestAssessment(ctx, args.advertiserId, "operator re-assessment", true);
     return null;
   },
 });
+
+/**
+ * Companies this workspace has a relationship with: they quoted (and so may
+ * have held or booked) its screens, or joined one of its auctions. Hosts only
+ * see valuations for these; assessments themselves stay platform-level.
+ */
+async function visibleCompanies(db: QueryCtx["db"], workspaceId: Id<"workspaces">): Promise<Id<"advertisers">[]> {
+  const campaignIds = new Set<Id<"campaigns">>();
+  const quotes = await db
+    .query("quotes")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .order("desc")
+    .take(500);
+  for (const q of quotes) campaignIds.add(q.campaignId);
+  const auctions = await db
+    .query("auctions")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .order("desc")
+    .take(100);
+  for (const a of auctions) {
+    const parts = await db
+      .query("auctionParticipants")
+      .withIndex("by_auction", (q) => q.eq("auctionId", a._id))
+      .take(50);
+    for (const p of parts) campaignIds.add(p.campaignId);
+  }
+  const companies = new Set<Id<"advertisers">>();
+  for (const id of campaignIds) {
+    const c = await db.get(id);
+    if (c) companies.add(c.advertiserId);
+  }
+  return [...companies].slice(0, 50);
+}
 
 const assessmentView = v.object({
   _id: v.id("companyAssessments"),
@@ -296,9 +346,9 @@ const assessmentView = v.object({
   fresh: v.boolean(),
 });
 
-/** Operator view: every advertiser with its current assessment (max 50). */
+/** Host view: companies that have quoted or bid on this workspace's screens, with the assessment that applies here (max 50). */
 export const list = query({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       advertiserId: v.id("advertisers"),
@@ -307,13 +357,14 @@ export const list = query({
       assessment: v.union(assessmentView, v.null()),
     }),
   ),
-  handler: async (ctx) => {
-    await requireOperator(ctx);
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const now = Date.now();
-    const advertisers = await ctx.db.query("advertisers").take(50);
     const rows = [];
-    for (const a of advertisers) {
-      const { assessment, fresh } = await currentAssessment(ctx.db, a._id, now);
+    for (const advertiserId of await visibleCompanies(ctx.db, me.workspaceId)) {
+      const a = await ctx.db.get(advertiserId);
+      if (!a) continue;
+      const { assessment, fresh } = await currentAssessment(ctx.db, a._id, now, me.workspaceId);
       rows.push({
         advertiserId: a._id,
         displayName: a.displayName,
@@ -327,17 +378,24 @@ export const list = query({
 
 /** Operator view: the last 10 assessments for one company, newest first. */
 export const history = query({
-  args: { advertiserId: v.id("advertisers") },
+  args: { advertiserId: v.id("advertisers"), workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(assessmentView),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    if (!(await visibleCompanies(ctx.db, me.workspaceId)).includes(args.advertiserId)) {
+      throw new ConvexError({ code: "NOT_FOUND", message: "No relationship with this company in your workspace" });
+    }
     const now = Date.now();
     const rows = await ctx.db
       .query("companyAssessments")
       .withIndex("by_advertiser_and_assessedAt", (q) => q.eq("advertiserId", args.advertiserId))
       .order("desc")
-      .take(10);
-    return rows.map((r) => ({ ...r, fresh: r.expiresAt > now }));
+      .take(30);
+    // Platform assessments plus THIS workspace's overrides; other hosts' overrides stay private.
+    return rows
+      .filter((r) => r.method !== "override" || r.workspaceId === me.workspaceId)
+      .slice(0, 10)
+      .map((r) => ({ ...r, fresh: r.expiresAt > now }));
   },
 });
 

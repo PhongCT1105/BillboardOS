@@ -8,23 +8,26 @@ import { SlotBoard } from "./SlotBoard";
 import { ExceptionList } from "./ExceptionList";
 import { CreativeQueue } from "./CreativeQueue";
 import { ActivityFeed } from "./ActivityFeed";
+import { AddScreenForm } from "../auth/Onboarding";
 import { LiveAuctions } from "../auctions/LiveAuctions";
+import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
 export function ConsolePage() {
-  const billboards = useQuery(api.billboards.list);
+  const billboards = useQuery(api.billboards.mine, {});
   const [picked, setPicked] = useState<Id<"billboards"> | null>(null);
   const billboardId = picked ?? billboards?.[0]?._id ?? null;
 
   if (billboards === undefined) return <PageSkeleton />;
   if (billboards.length === 0) {
     return (
-      <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
-        <h1 className="text-xl font-semibold">No billboards yet</h1>
-        <p className="mt-2 max-w-[60ch] text-muted">
-          Seed the demo network with <code className="font-mono text-fg">npm run seed</code>, then reload.
-        </p>
+      <main className="mx-auto flex max-w-[1400px] flex-col gap-6 px-4 py-16 md:px-6">
+        <div>
+          <h1 className="text-xl font-semibold">No screens yet</h1>
+          <p className="mt-2 max-w-[60ch] text-muted">Add your first screen; 12 hours of 15-minute slots go on sale right away.</p>
+        </div>
+        <AddScreenForm />
       </main>
     );
   }
@@ -63,12 +66,14 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
   const from = Math.floor(now / QUARTER_HOUR) * QUARTER_HOUR - QUARTER_HOUR;
   const to = from + 12 * 60 * 60 * 1000;
 
-  const summary = useQuery(api.dashboard.summary);
+  const summary = useQuery(api.dashboard.summary, {});
   const slots = useQuery(api.slots.listForBillboard, { billboardId, from, to });
   const audience = useQuery(api.audience.recentForBillboard, { billboardId });
-  const exceptions = useQuery(api.finance.openExceptions);
-  const pending = useQuery(api.creatives.pendingReview);
-  const activity = useQuery(api.audit.recent);
+  const exceptions = useQuery(api.finance.openExceptions, {});
+  const pending = useQuery(api.creatives.pendingReview, {});
+  const activity = useQuery(api.audit.recent, {});
+  const negotiations = useQuery(api.negotiations.forWorkspace, {});
+  const dataSales = useQuery(api.a2a.dataSalesForWorkspace, {});
 
   const row = summary?.billboards.find((b) => b.billboardId === billboardId);
 
@@ -81,6 +86,20 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
           <SlotBoard slots={slots} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />
+          <section aria-labelledby="negotiations-heading" className="flex flex-col gap-4">
+            <div>
+              <h2 id="negotiations-heading" className="text-lg font-semibold">
+                Seller agent
+              </h2>
+              <p className="mt-1 text-sm text-muted">Buyer agents negotiating with your seller agent, and data they bought, paid over x402.</p>
+            </div>
+            <NegotiationTimeline
+              items={negotiations}
+              sales={dataSales?.recent}
+              perspective="host"
+              empty="No agent conversations yet. Buyer agents find your seller agent at /a2a/hosts/<workspace>/agent.json on the x402 server."
+            />
+          </section>
         </div>
         <ActivityFeed events={activity} />
       </div>

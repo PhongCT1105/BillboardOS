@@ -18,6 +18,7 @@ export async function recordSaleHistory(
     if (!slot) continue;
     await ctx.db.insert("priceHistory", {
       billboardId: billboard._id,
+      workspaceId: billboard.workspaceId,
       slotId,
       slotStartAt: slot.startAt,
       hourBand: hourBand(slot.startAt, billboard.utcOffsetMinutes),

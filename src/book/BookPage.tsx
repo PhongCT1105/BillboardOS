@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { countdown, errorMessage, money, timeOfDay } from "../lib/format";
-import { useNow } from "../lib/hooks";
+import { useHashParams, useNow } from "../lib/hooks";
 import { BidPanel } from "../auctions/BidPanel";
 
 type Quote = FunctionReturnType<typeof api.quotes.create>;
@@ -16,17 +16,42 @@ const MAX_SLOTS = 4;
 export function BookPage() {
   const campaigns = useQuery(api.campaigns.list, {});
   const billboards = useQuery(api.billboards.list);
-  const [campaignId, setCampaignId] = useState<Id<"campaigns"> | null>(null);
+  // Deep link from an alert: #/book?billboard=..&campaign=..&slots=a,b
+  const params = useHashParams();
+  const [campaignId, setCampaignId] = useState<Id<"campaigns"> | null>(() => (params.get("campaign") as Id<"campaigns"> | null) ?? null);
+  const [billboardId, setBillboardId] = useState<Id<"billboards"> | null>(() => (params.get("billboard") as Id<"billboards"> | null) ?? null);
+  const [initialSlots] = useState<Id<"slots">[]>(() =>
+    (params.get("slots") ?? "")
+      .split(",")
+      .filter(Boolean)
+      .slice(0, MAX_SLOTS) as Id<"slots">[],
+  );
+  const [creating, setCreating] = useState(false);
   const activeCampaign = campaigns?.find((c) => c._id === campaignId) ?? campaigns?.[0];
-  const billboard = billboards?.[0];
+  const billboard = billboards?.find((b) => b._id === billboardId) ?? billboards?.[0];
 
   if (campaigns === undefined || billboards === undefined) {
     return <main className="mx-auto max-w-[1100px] px-4 pt-8 md:px-6"><div className="h-64 animate-pulse rounded bg-panel" /></main>;
   }
-  if (!activeCampaign || !billboard) {
+  if (!billboard) {
     return (
       <main className="mx-auto max-w-[1100px] px-4 py-16 md:px-6">
-        <p className="text-muted">No campaigns or billboards yet. Run <code className="font-mono text-fg">npm run seed</code>.</p>
+        <p className="text-muted">No screens are on the marketplace yet.</p>
+      </main>
+    );
+  }
+  if (!activeCampaign || creating) {
+    return (
+      <main className="mx-auto max-w-[1100px] px-4 pt-8 pb-16 md:px-6">
+        <h1 className="text-2xl font-semibold tracking-tight">{activeCampaign ? "New campaign" : "Start your first campaign"}</h1>
+        <p className="mt-1 text-sm text-muted">Quotes, holds and bookings belong to a campaign. Only your company sees it.</p>
+        <NewCampaignForm
+          onCreated={(id) => {
+            setCampaignId(id);
+            setCreating(false);
+          }}
+          onCancel={activeCampaign ? () => setCreating(false) : undefined}
+        />
       </main>
     );
   }
@@ -34,32 +59,120 @@ export function BookPage() {
   return (
     <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-16 md:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">Book {billboard.name}</h1>
-      <p className="mt-1 text-sm text-muted">Pick up to four 15-minute slots. Prices move with live foot traffic.</p>
-      <label className="mt-6 flex max-w-sm flex-col gap-2 text-sm">
-        <span className="text-muted">Campaign</span>
-        <select
-          className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
-          value={activeCampaign._id}
-          onChange={(e) => setCampaignId(e.target.value as Id<"campaigns">)}
-        >
-          {campaigns.map((c) => (
-            <option key={c._id} value={c._id}>
-              {c.advertiserName}: {c.brief.slice(0, 48)}
-            </option>
-          ))}
-        </select>
-      </label>
+      <p className="mt-1 text-sm text-muted">
+        {billboard.locationLabel}. Pick up to four 15-minute slots. Prices move with live foot traffic.
+      </p>
+      <div className="mt-6 flex flex-wrap items-end gap-4">
+        <label className="flex min-w-[260px] flex-col gap-2 text-sm">
+          <span className="text-muted">Screen</span>
+          <select
+            className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
+            value={billboard._id}
+            onChange={(e) => setBillboardId(e.target.value as Id<"billboards">)}
+          >
+            {billboards.map((b) => (
+              <option key={b._id} value={b._id}>
+                {b.name}, {b.city}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex min-w-[260px] flex-col gap-2 text-sm">
+          <span className="text-muted">Campaign</span>
+          <select
+            className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
+            value={activeCampaign._id}
+            onChange={(e) => setCampaignId(e.target.value as Id<"campaigns">)}
+          >
+            {campaigns.map((c) => (
+              <option key={c._id} value={c._id}>
+                {c.advertiserName}: {c.brief.slice(0, 48)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" onClick={() => setCreating(true)} className="rounded-md border border-line px-3 py-2 text-sm text-muted hover:text-fg">
+          New campaign
+        </button>
+      </div>
       <BookingFlow
-        key={activeCampaign._id}
+        key={`${activeCampaign._id}:${billboard._id}`}
         campaignId={activeCampaign._id}
         billboardId={billboard._id}
+        initialSlots={billboard._id === billboardId ? initialSlots : []}
         aside={<CreativeUpload campaign={activeCampaign} />}
       />
     </main>
   );
 }
 
-function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"billboards">; aside: React.ReactNode }) {
+function NewCampaignForm(props: { onCreated: (id: Id<"campaigns">) => void; onCancel?: () => void }) {
+  const create = useMutation(api.campaigns.create);
+  const [brief, setBrief] = useState("");
+  const [budget, setBudget] = useState("300");
+  const [city, setCity] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const id = await create({
+        brief,
+        budgetMinor: Math.round(Number.parseFloat(budget) * 100),
+        targetCity: city.trim() || undefined,
+      });
+      props.onCreated(id);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form onSubmit={submit} className="mt-6 flex max-w-xl flex-col gap-4">
+      <label className="flex flex-col gap-2 text-sm">
+        <span className="text-muted">What are you promoting, and to whom?</span>
+        <textarea
+          required
+          rows={3}
+          value={brief}
+          onChange={(e) => setBrief(e.target.value)}
+          className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
+        />
+      </label>
+      <div className="grid grid-cols-2 gap-4">
+        <label className="flex flex-col gap-2 text-sm">
+          <span className="text-muted">Budget (USD)</span>
+          <input inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} className="rounded-md border border-line bg-panel px-3 py-2 font-mono text-fg" />
+        </label>
+        <label className="flex flex-col gap-2 text-sm">
+          <span className="text-muted">Target city (optional)</span>
+          <input value={city} onChange={(e) => setCity(e.target.value)} className="rounded-md border border-line bg-panel px-3 py-2 text-fg" />
+        </label>
+      </div>
+      {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      <div className="flex gap-2">
+        <button type="submit" disabled={busy || !brief.trim()} className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink active:scale-[0.98] disabled:opacity-50">
+          Create campaign
+        </button>
+        {props.onCancel && (
+          <button type="button" onClick={props.onCancel} className="px-3 py-2 text-sm text-muted hover:text-fg">
+            Cancel
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}
+
+function BookingFlow(props: {
+  campaignId: Id<"campaigns">;
+  billboardId: Id<"billboards">;
+  initialSlots: Id<"slots">[];
+  aside: React.ReactNode;
+}) {
   const minuteNow = useNow(60_000);
   const from = Math.floor(minuteNow / QUARTER_HOUR) * QUARTER_HOUR;
   const slots = useQuery(api.slots.listForBillboard, {
@@ -77,7 +190,8 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
     [auctions],
   );
   const [auctionSlot, setAuctionSlot] = useState<Id<"slots"> | null>(null);
-  const [selected, setSelected] = useState<Id<"slots">[]>([]);
+  const [selected, setSelected] = useState<Id<"slots">[]>(props.initialSlots);
+  const [preselectNote, setPreselectNote] = useState<string | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [hold, setHold] = useState<Hold | null>(null);
   const [holdKey, setHoldKey] = useState<string | null>(null);
@@ -86,6 +200,32 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
   const now = useNow(1000);
 
   const available = useMemo(() => (slots ?? []).filter((s) => s.state === "available" && s.startAt > minuteNow), [slots, minuteNow]);
+
+  // Slots preselected from an alert: drop any that sold meanwhile; auctioned ones go to the bid panel.
+  const reconciled = useRef(props.initialSlots.length === 0);
+  useEffect(() => {
+    if (reconciled.current || slots === undefined || auctions === undefined) return;
+    reconciled.current = true;
+    const open = new Set(available.map((s) => s._id));
+    const still = props.initialSlots.filter((id) => open.has(id));
+    const hot = still.find((id) => auctionSlotIds.has(id));
+    if (hot) {
+      setSelected([]);
+      setAuctionSlot(hot);
+    } else {
+      setSelected(still);
+    }
+    const gone = props.initialSlots.length - still.length;
+    setPreselectNote(
+      still.length === 0
+        ? "The slots from your alert are no longer available. Pick others below."
+        : gone > 0
+          ? `${gone} slot${gone === 1 ? " from your alert has" : "s from your alert have"} sold since; the rest are selected.`
+          : hot
+            ? "This slot is in a live auction: bid below."
+            : "Slots from your alert are selected. Get a quote to lock today's price.",
+    );
+  }, [slots, auctions, available, auctionSlotIds, props.initialSlots]);
 
   function toggle(id: Id<"slots">) {
     setQuote(null);
@@ -232,6 +372,7 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
             </span>
           </div>
         )}
+        {preselectNote && !hold && !quote && <p role="status" className="text-sm text-muted">{preselectNote}</p>}
         {error && <p role="alert" className="text-sm text-danger">{error}</p>}
         {holdPanel}
         {quotePanel}

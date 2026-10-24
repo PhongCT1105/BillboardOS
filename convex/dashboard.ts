@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { query } from "./_generated/server";
-import { requireOperator } from "./lib/operator";
+import { resolveWorkspace } from "./lib/tenancy";
 
 const LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000;
@@ -24,7 +24,7 @@ const slotCounts = v.object({
  * via verified payments). All reads are bounded; `truncated` flags a cap hit.
  */
 export const summary = query({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.object({
     generatedAt: v.number(),
     billboards: v.array(
@@ -45,10 +45,13 @@ export const summary = query({
       openExceptions: v.number(),
     }),
   }),
-  handler: async (ctx) => {
-    await requireOperator(ctx);
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const now = Date.now();
-    const billboards = await ctx.db.query("billboards").take(MAX_BILLBOARDS);
+    const billboards = await ctx.db
+      .query("billboards")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", me.workspaceId))
+      .take(MAX_BILLBOARDS);
 
     const rows = [];
     for (const billboard of billboards) {

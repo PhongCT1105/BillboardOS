@@ -2,7 +2,7 @@ import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { modules, signedInOperator } from "./test.setup";
+import { modules, signedInOperator, joinCompanies } from "./test.setup";
 import { combineStages, effectiveMultiplier, priceQuote } from "./lib/pricing";
 import { eventStage, marketStage, scarcityStage } from "./lib/stages";
 import { matchScore } from "./lib/match";
@@ -22,6 +22,7 @@ afterEach(() => {
 async function setup() {
   const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
+  await joinCompanies(t);
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
     from: START,

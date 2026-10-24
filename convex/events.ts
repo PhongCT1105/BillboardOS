@@ -39,8 +39,10 @@ export async function upsertEvent(
     const problem = validateTags(input.audienceTags);
     if (problem) throw new ConvexError({ code: "INVALID_INPUT", message: problem });
   }
+  const billboard = await ctx.db.get(input.billboardId);
   const fields = {
     ...input,
+    workspaceId: billboard?.workspaceId,
     name,
     upliftMultiplier: Math.min(EVENT_UPLIFT_MAX, Math.max(1, input.upliftMultiplier)),
     confidence: Math.min(1, Math.max(0, input.confidence)),
@@ -57,6 +59,7 @@ export async function upsertEvent(
   }
   const eventId = await ctx.db.insert("events", fields);
   await recordAudit(ctx, {
+    workspaceId: billboard?.workspaceId,
     traceId: `billboard:${input.billboardId}`,
     actor,
     type: "event.recorded",

@@ -5,6 +5,7 @@ import { recordAudit } from "./lib/audit";
 import { NET15_MS, nextInvoiceNumber } from "./lib/finance";
 import { usd } from "./lib/reconcile";
 import { scheduleBooking } from "./lib/scheduling";
+import { requireCampaignAccess } from "./lib/tenancy";
 import { recordSaleHistory } from "./lib/marketHistory";
 import { markAuctionSettled } from "./auctions";
 
@@ -31,6 +32,10 @@ export const confirmOnTerms = mutation({
   handler: async (ctx, args) => {
     const hold = await ctx.db.get(args.holdId);
     if (!hold) throw new ConvexError({ code: "NOT_FOUND", message: "Hold not found" });
+    const holdQuote = await ctx.db.get(hold.quoteId);
+    if (!holdQuote) throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
+    // Only the company that holds the slot can book it on its own terms.
+    await requireCampaignAccess(ctx, holdQuote.campaignId);
     if (hold.idempotencyKey !== args.idempotencyKey) {
       throw new ConvexError({ code: "FORBIDDEN", message: "Not the holder of this hold" });
     }
@@ -86,6 +91,7 @@ export const confirmOnTerms = mutation({
     }
 
     const bookingId = await ctx.db.insert("bookings", {
+      workspaceId: hold.workspaceId,
       holdId: hold._id,
       quoteId: hold.quoteId,
       campaignId: campaign._id,
@@ -99,6 +105,7 @@ export const confirmOnTerms = mutation({
     const number = await nextInvoiceNumber(ctx);
     const dueAt = now + NET15_MS;
     const invoiceId = await ctx.db.insert("invoices", {
+      workspaceId: hold.workspaceId,
       number,
       advertiserId: advertiser._id,
       campaignId: campaign._id,
@@ -122,6 +129,7 @@ export const confirmOnTerms = mutation({
     await ctx.db.patch(quote._id, { status: "accepted" });
 
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor: "system",
       type: "booking.confirmed",
@@ -130,6 +138,7 @@ export const confirmOnTerms = mutation({
       data: { holdId: hold._id, quoteId: quote._id, slotIds: hold.slotIds, invoiceId },
     });
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor: "system",
       type: "invoice.issued",

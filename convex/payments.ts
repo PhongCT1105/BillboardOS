@@ -7,7 +7,7 @@ import { ACCEPTED_PAYMENT_ASSETS, MAX_KEY_LENGTH } from "./lib/constants";
 import { scheduleBooking } from "./lib/scheduling";
 import { recordSaleHistory } from "./lib/marketHistory";
 import { markAuctionSettled } from "./auctions";
-import { requireOperator } from "./lib/operator";
+import { requireWorkspaceMember } from "./lib/tenancy";
 
 /**
  * Result of reporting a verified payment. Discriminated on `outcome`:
@@ -132,6 +132,7 @@ async function applyVerifiedPayment(
     const result = await outcomeOf(ctx, prior);
     const hold = await ctx.db.get(prior.holdId);
     await recordAudit(ctx, {
+      workspaceId: prior.workspaceId,
       traceId: hold?.traceId ?? `payment:${prior._id}`,
       actor,
       type: "payment.replayed",
@@ -187,6 +188,7 @@ async function applyVerifiedPayment(
   }
 
   const paymentId: Id<"payments"> = await ctx.db.insert("payments", {
+    workspaceId: hold.workspaceId,
     holdId: hold._id,
     provider: args.provider,
     externalRef: args.externalRef,
@@ -207,6 +209,7 @@ async function applyVerifiedPayment(
 
   if (exception) {
     const financeExceptionId = await ctx.db.insert("financeExceptions", {
+      workspaceId: hold.workspaceId,
       kind: exception.kind,
       status: "open",
       holdId: hold._id,
@@ -219,6 +222,7 @@ async function applyVerifiedPayment(
     });
     await ctx.db.patch(paymentId, { financeExceptionId });
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor,
       type: "payment.exception",
@@ -227,6 +231,7 @@ async function applyVerifiedPayment(
       data: paymentData,
     });
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor: "system",
       type: "finance.exception_opened",
@@ -247,6 +252,7 @@ async function applyVerifiedPayment(
   const quote = await ctx.db.get(hold.quoteId);
   if (!quote) throw new Error(`Quote ${hold.quoteId} missing for hold ${hold._id}`);
   const bookingId = await ctx.db.insert("bookings", {
+    workspaceId: hold.workspaceId,
     holdId: hold._id,
     quoteId: hold.quoteId,
     campaignId: quote.campaignId,
@@ -266,6 +272,7 @@ async function applyVerifiedPayment(
   await ctx.db.patch(hold.quoteId, { status: "accepted" });
 
   await recordAudit(ctx, {
+    workspaceId: hold.workspaceId,
     traceId: hold.traceId,
     actor,
     type: "payment.confirmed",
@@ -274,6 +281,7 @@ async function applyVerifiedPayment(
     data: paymentData,
   });
   await recordAudit(ctx, {
+    workspaceId: hold.workspaceId,
     traceId: hold.traceId,
     actor: "system",
     type: "booking.confirmed",
@@ -339,12 +347,13 @@ export const recordManual = mutation({
   args: { holdId: v.id("holds"), note: v.string() },
   returns: recordVerifiedResult,
   handler: async (ctx, args): Promise<RecordVerifiedResult> => {
-    const operator = await requireOperator(ctx);
     const note = args.note.trim().slice(0, 500);
     const hold = await ctx.db.get(args.holdId);
     if (!hold) {
       return { outcome: "rejected", code: "HOLD_NOT_FOUND", message: "Hold not found" };
     }
+    // Only a member of the workspace that owns the screen records cash for it.
+    const operator = await requireWorkspaceMember(ctx, hold.workspaceId);
     const result = await applyVerifiedPayment(
       ctx,
       {

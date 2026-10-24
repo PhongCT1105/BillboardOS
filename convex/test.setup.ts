@@ -3,7 +3,7 @@
 // to its deterministic heuristic when no key is set.
 delete process.env.ANTHROPIC_API_KEY;
 import type { TestConvexForDataModel } from "convex-test";
-import type { DataModel } from "./_generated/dataModel";
+import type { DataModel, Id } from "./_generated/dataModel";
 
 // Module map for convex-test (everything Convex would deploy, plus codegen).
 export const modules = import.meta.glob([
@@ -17,25 +17,93 @@ export const modules = import.meta.glob([
 /** A convex-test client, with or without an identity. */
 export type TestClient = TestConvexForDataModel<DataModel>;
 
+const userOf = new WeakMap<object, Id<"users">>();
+
+/** The user id behind a client created by these helpers. */
+export function userIdOf(client: TestClient): Id<"users"> {
+  const id = userOf.get(client);
+  if (!id) throw new Error("client was not created by a test.setup helper");
+  return id;
+}
+
+function signIn(t: TestClient, userId: Id<"users">, email: string): TestClient {
+  // Convex Auth's getAuthUserId reads the user id from `subject` ("<userId>|<sessionId>").
+  const client = t.withIdentity({ subject: `${userId}|test-session`, email });
+  userOf.set(client, userId);
+  return client;
+}
+
 /**
- * Create a Convex Auth user + operator grant and return a client signed in as
- * them. Convex Auth's getAuthUserId reads the user id from `subject`
- * ("<userId>|<sessionId>").
+ * A host account that is a member of `workspaceName` (default "Moscone Media",
+ * the seeded demo workspace; created here if seeds haven't run yet). The
+ * first member becomes owner, later ones operators.
  */
 export async function signedInOperator(
   t: TestClient,
   email = "ops@billboardos.test",
+  workspaceName = "Moscone Media",
 ): Promise<TestClient> {
   const userId = await t.run(async (ctx) => {
     const id = await ctx.db.insert("users", { email });
-    await ctx.db.insert("operators", { userId: id, email, grantedBy: "test" });
+    let workspace = await ctx.db
+      .query("workspaces")
+      .withIndex("by_name", (q) => q.eq("name", workspaceName))
+      .first();
+    if (!workspace) {
+      const wsId = await ctx.db.insert("workspaces", { name: workspaceName, city: "San Francisco" });
+      workspace = (await ctx.db.get(wsId))!;
+    }
+    const existing = await ctx.db
+      .query("workspaceMembers")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", workspace._id))
+      .first();
+    await ctx.db.insert("workspaceMembers", {
+      workspaceId: workspace._id,
+      userId: id,
+      email,
+      role: existing ? "operator" : "owner",
+    });
+    await ctx.db.insert("profiles", { userId: id, accountType: "host", activeWorkspaceId: workspace._id });
     return id;
   });
-  return t.withIdentity({ subject: `${userId}|test-session`, email });
+  return signIn(t, userId, email);
 }
 
-/** A signed-in account that is NOT an operator. */
+/** Let an existing test client also act for customer companies (all of them by default). */
+export async function joinCompanies(client: TestClient, advertiserIds?: Id<"advertisers">[]): Promise<void> {
+  const userId = userIdOf(client);
+  await client.run(async (ctx) => {
+    const user = await ctx.db.get(userId);
+    const ids = advertiserIds ?? (await ctx.db.query("advertisers").take(100)).map((a) => a._id);
+    for (const advertiserId of ids) {
+      const existing = await ctx.db
+        .query("advertiserMembers")
+        .withIndex("by_advertiser_and_user", (q) => q.eq("advertiserId", advertiserId).eq("userId", userId))
+        .unique();
+      if (!existing) {
+        await ctx.db.insert("advertiserMembers", { advertiserId, userId, email: user?.email ?? "?", role: "member" });
+      }
+    }
+  });
+}
+
+/** A customer account acting for exactly one company. */
+export async function signedInCustomer(
+  t: TestClient,
+  advertiserId: Id<"advertisers">,
+  email = "buyer@customer.test",
+): Promise<TestClient> {
+  const userId = await t.run(async (ctx) => {
+    const id = await ctx.db.insert("users", { email });
+    await ctx.db.insert("profiles", { userId: id, accountType: "customer" });
+    await ctx.db.insert("advertiserMembers", { advertiserId, userId: id, email, role: "owner" });
+    return id;
+  });
+  return signIn(t, userId, email);
+}
+
+/** A signed-in account with no workspace and no company. */
 export async function signedInUser(t: TestClient, email = "someone@billboardos.test"): Promise<TestClient> {
   const userId = await t.run(async (ctx) => ctx.db.insert("users", { email }));
-  return t.withIdentity({ subject: `${userId}|test-session`, email });
+  return signIn(t, userId, email);
 }
