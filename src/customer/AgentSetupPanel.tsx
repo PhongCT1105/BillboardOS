@@ -7,6 +7,8 @@ import { words } from "../lib/format";
 import { AgentFeed } from "./AgentFeed";
 import { Card, ErrorLine, Field, Section, Skeleton, inputCls, parseUsd, primaryBtn, secondaryBtn, useAction } from "./ui";
 
+const TOP_UP_MINOR = 200;
+const MAX_REACH = 10000;
 const usdText = (minor: number) => (minor / 100).toFixed(2);
 const usdc = (minor: number) => `${(minor / 100).toFixed(2)} USDC`;
 const shortAddr = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
@@ -59,6 +61,8 @@ export function AgentSetupPanel() {
   if (campaigns === undefined || agent === undefined) return <Skeleton h="h-96" />;
 
   const campaign = campaigns.find((c) => c._id === campaignId);
+  const campaignValid = campaign !== undefined;
+  const staleCampaign = !!agent && !campaignValid;
   const walletMissing = !agent?.walletAddress;
   const noKeys = !!agent?.lastAction && /no cdp keys/i.test(agent.lastAction);
 
@@ -66,10 +70,12 @@ export function AgentSetupPanel() {
     e.preventDefault();
     const maxPerSpotMinor = parseUsd(maxSpot);
     const dailyBudgetMinor = parseUsd(daily);
-    const minRelevantViewers = Number.parseInt(reach, 10);
-    if (!campaignId) return save.setError("Pick the campaign whose ad the agent should run");
+    const reachText = reach.trim();
+    const minRelevantViewers = /^\d+$/.test(reachText) ? Number(reachText) : NaN;
+    if (!campaignValid) return save.setError("Pick the campaign whose ad the agent should run");
     if (picked.length === 0) return save.setError("Pick at least one kind of customer");
-    if (!Number.isFinite(minRelevantViewers) || minRelevantViewers < 1) return save.setError("Reach target must be at least 1 person");
+    if (!Number.isFinite(minRelevantViewers) || minRelevantViewers < 1 || minRelevantViewers > MAX_REACH)
+      return save.setError(`Reach target must be a whole number from 1 to ${MAX_REACH}`);
     if (maxPerSpotMinor === null) return save.setError("Max per spot must be a positive dollar amount");
     if (dailyBudgetMinor === null) return save.setError("Daily budget must be a positive dollar amount");
     if (maxPerSpotMinor > dailyBudgetMinor) return save.setError("Max per spot can't be more than the daily budget");
@@ -82,7 +88,7 @@ export function AgentSetupPanel() {
   async function doTopUp() {
     setTopUpNote(null);
     const ok = await top.run(() => topUp({}));
-    if (ok !== undefined) setTopUpNote("Requested 2.00 test USDC. It lands in a few seconds.");
+    if (ok !== undefined) setTopUpNote(`Requested ${usdc(TOP_UP_MINOR)} (test). It lands in a few seconds.`);
   }
 
   return (
@@ -102,7 +108,8 @@ export function AgentSetupPanel() {
               ) : (
                 <>
                   <Field label="Campaign">
-                    <select value={campaignId} onChange={(e) => setCampaignId(e.target.value)} className={inputCls}>
+                    <select value={campaignValid ? campaignId : ""} onChange={(e) => setCampaignId(e.target.value)} className={inputCls}>
+                      {!campaignValid && <option value="" disabled>Select a campaign…</option>}
                       {campaigns.map((c) => (
                         <option key={c._id} value={c._id}>
                           {c.brief.length > 60 ? `${c.brief.slice(0, 60)}…` : c.brief}
@@ -110,6 +117,11 @@ export function AgentSetupPanel() {
                       ))}
                     </select>
                   </Field>
+                  {staleCampaign && (
+                    <p role="alert" className="text-xs text-amber-300">
+                      Your agent's campaign is no longer active, pick another.
+                    </p>
+                  )}
                   {campaign && (
                     <p className={`text-xs ${campaign.creativeStatus === "approved" ? "text-emerald-300" : "text-amber-300"}`}>
                       {campaign.creativeStatus === "approved"
@@ -189,7 +201,7 @@ export function AgentSetupPanel() {
             <ErrorLine error={save.error} />
             <div className="flex flex-wrap gap-2">
               <button type="submit" disabled={save.busy || campaigns.length === 0} className={primaryBtn}>
-                {save.busy ? "Saving…" : agent ? "Save and restart agent" : "Save and turn agent on"}
+                {save.busy ? "Saving…" : agent?.enabled ? "Save and restart agent" : "Save and turn agent on"}
               </button>
               {agent && (
                 <button
@@ -202,6 +214,13 @@ export function AgentSetupPanel() {
                 </button>
               )}
             </div>
+            <p className="text-xs text-faint">
+              {agent?.enabled
+                ? "Saving applies your changes and restarts the agent with a fresh key."
+                : agent
+                  ? "The agent is off. Saving applies your changes and turns it on."
+                  : "Saving creates your agent and its wallet, and turns it on."}
+            </p>
             <ErrorLine error={toggle.error} />
           </form>
         </Card>

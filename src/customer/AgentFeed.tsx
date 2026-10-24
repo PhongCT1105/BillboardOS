@@ -65,7 +65,7 @@ export function AgentFeed() {
       ) : (
         <ol className="flex max-h-[640px] flex-col gap-2 overflow-y-auto text-sm">
           {feed.map((e, i) => (
-            <li key={`${e.at}-${i}`} className={`border-l-[3px] py-1 pr-2 pl-3 ${KIND_STYLE[e.kind]}`}>
+            <li key={`${e.at}-${e.kind}-${e.amountMinor ?? ""}-${i}`} className={`border-l-[3px] py-1 pr-2 pl-3 ${KIND_STYLE[e.kind]}`}>
               <div className="tabular font-mono text-[11px] text-faint">{clock(e.at)}</div>
               <div className="text-fg">
                 {e.text}
