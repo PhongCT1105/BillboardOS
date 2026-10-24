@@ -4,8 +4,8 @@ We explicitly distinguish **official competition materials** from **team ideatio
 
 | Artifact | Origin | Status | Notes |
 |---|---|---|---|
-| `13.0 Hacker Guide.pdf` | Cal Hacks official guide provided by teammate | Available in original chat/upload; **not yet tracked in GitHub** | Authoritative for guide-stated rules and track descriptions; 27 PDF pages |
-| `pasted.txt` | User-provided idea brief | Summarized in [ideation](../notes/ideation.md) | Six capabilities and candidate sponsors |
+| `13.0 Hacker Guide.pdf` | Cal Hacks official guide provided by teammate | Original PDF not tracked; [complete extracted text](official-guide-text.md) tracked | Authoritative for guide-stated rules and track descriptions; 27 PDF pages |
+| `pasted.txt` | User-provided idea brief | [Original text](../../references/original/pasted.txt) tracked; summarized in [ideation](../notes/ideation.md) | Six capabilities and candidate sponsors |
 | Two annotated JPEGs | Team handwritten brainstorming | Partially interpreted in ideation | Preserve originals locally and review before converting ambiguous handwriting into commitments |
 | `New Recording 9.m4a` | Team audio | **Not transcribed** | No decisions attributed to the recording |
 | `CalHacks_Autonomous_Billboard_Unified_v2.pdf` | Previous assistant-generated proposal | Design reference, not official | Seven architecture/workflow diagrams; concepts may change |
@@ -13,7 +13,7 @@ We explicitly distinguish **official competition materials** from **team ideatio
 
 ## Original source preservation
 
-Place verified originals under `references/original/` locally (see `references/original/README.md`). The binary source uploads were not committed via the GitHub text-file connector. **Do not silently replace the official source with a paraphrase.** Compare against the current official live site where rules or prizes have changed.
+Place verified originals under `references/original/` locally (see `references/original/README.md`). The original PDF, JPEGs, audio, and previous generated PDF have not been committed via the GitHub text-file connector. The official guide's *extracted text* and the original `pasted.txt` are committed. **Do not silently replace the official source with a paraphrase.** Compare against the current official live site where rules or prizes have changed.
 
 ## Attribution standard
 
