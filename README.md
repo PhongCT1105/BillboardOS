@@ -46,12 +46,13 @@ cp .env.example .env            # fill in keys; see the comments in the file
 
 npx convex login                # once
 npm run dev:convex              # Convex dev deployment (writes .env.local)
-npx convex run seed:demo        # billboard, slots, advertisers, campaign
+npm run seed                    # billboard, slots, advertisers, campaigns, conference event, Nvidia campaign
 npx convex run seed:finance     # invoices + bank feed with planted errors
 
 npm run dev                     # web app at http://localhost:5173
 npm run server                  # x402 payment server at http://localhost:4021
 npm run buyer -- --hold-only    # advertiser buying agent (pays when CDP wallet is funded)
+npm run auction:demo -- --no-pay  # two buyer agents compete in a live auction for a hot slot
 
 npm test                        # convex-test suite
 
@@ -80,7 +81,9 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Component | Status |
 |---|---|
 | Slot inventory, quotes, exclusive holds, hold expiry, bookings | **Real** (Convex transactions, 69 tests) |
-| Deterministic pricing with reserve floor | **Real** |
+| Staged pricing (crowd, time, event, scarcity, market history) with floor and ceiling | **Real**; the conference event is **seeded** |
+| Company-specific pricing | **Real** guardrails; assessment by **Claude with web search** when `ANTHROPIC_API_KEY` is set on Convex, otherwise a labeled **heuristic** |
+| Ascending auctions, proxy bidding, soft close, winner default | **Real** (Convex, 100 tests); the two competing buyer agents are **scripted** demo agents |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
 | Manual payment button in the console | **Simulated** fallback, labeled "MANUAL (simulated)" in the audit log |
