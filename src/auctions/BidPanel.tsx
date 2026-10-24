@@ -3,8 +3,9 @@ import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { countdown, errorMessage, money } from "../lib/format";
+import { errorMessage, money } from "../lib/format";
 import { useNow } from "../lib/hooks";
+import { PaymentCard } from "../book/checkout";
 import { AuctionCard } from "./AuctionCard";
 
 /** Bidder keys live in this browser only: the campaign's proof that it is the one bidding. */
@@ -25,12 +26,23 @@ function storeKey(auctionId: string, campaignId: string, key: string) {
 
 const dollarsToMinor = (s: string) => Math.round(Number.parseFloat(s) * 100);
 
-/** Booking page: bid on an auctioned slot with the selected campaign. */
-export function BidPanel({ slotId, campaignId }: { slotId: Id<"slots">; campaignId: Id<"campaigns"> }) {
+/** Booking page: bid on an auctioned slot with the selected campaign, then pay for it if it wins. */
+export function BidPanel({
+  slotId,
+  campaignId,
+  onTerms = false,
+}: {
+  slotId: Id<"slots">;
+  campaignId: Id<"campaigns">;
+  /** The campaign's advertiser books on net-15 terms (invoice instead of payment). */
+  onTerms?: boolean;
+}) {
   const auction = useQuery(api.auctions.forSlot, { slotId });
   const join = useMutation(api.auctions.join);
   const bid = useMutation(api.auctions.bid);
   const setAutoBid = useMutation(api.auctions.setAutoBid);
+  const confirmOnTerms = useMutation(api.bookings.confirmOnTerms);
+  const now = useNow(1000);
   const [key, setKey] = useState<string | null>(null);
   const [amount, setAmount] = useState("");
   const [maxAmount, setMaxAmount] = useState("");
@@ -82,6 +94,19 @@ export function BidPanel({ slotId, campaignId }: { slotId: Id<"slots">; campaign
     });
 
   const open = auction.status === "open";
+  // The winner (or the runner-up after a default) pays its hold here, before it runs out.
+  const award =
+    mine &&
+    mine.outcome === "won" &&
+    mine.status === "closed" &&
+    mine.holdId &&
+    mine.holdKey &&
+    mine.holdExpiresAt !== null &&
+    mine.amountMinor !== null &&
+    now < mine.holdExpiresAt
+      ? { holdId: mine.holdId, holdKey: mine.holdKey, expiresAt: mine.holdExpiresAt, amountMinor: mine.amountMinor }
+      : null;
+
   return (
     <div className="flex flex-col gap-4">
       <AuctionCard auction={auction} />
@@ -96,6 +121,15 @@ export function BidPanel({ slotId, campaignId }: { slotId: Id<"slots">; campaign
         </button>
       )}
       {mine && <MyStatus mine={mine} />}
+      {award && (
+        <PaymentCard
+          hold={award}
+          now={now}
+          onTerms={onTerms}
+          busy={busy}
+          onBookOnTerms={() => run(() => confirmOnTerms({ holdId: award.holdId, idempotencyKey: award.holdKey }))}
+        />
+      )}
       {open && key && (
         <div className="flex flex-col gap-4 rounded-lg border border-line bg-panel p-4">
           <div className="flex flex-wrap items-end gap-2">
@@ -155,12 +189,14 @@ export function BidPanel({ slotId, campaignId }: { slotId: Id<"slots">; campaign
 type Mine = FunctionReturnType<typeof api.auctions.myStatus>;
 
 function MyStatus({ mine }: { mine: Mine }) {
-  const now = useNow(1000);
   const text: Record<Mine["outcome"], string> = {
     leading: "You're leading.",
     outbid: "You've been outbid.",
     not_bidding: "You've joined but haven't bid yet.",
-    won: "You won. The slots are held for you at the winning price.",
+    won:
+      mine.status === "settled"
+        ? "You won, and the slot is booked."
+        : "You won. The slot is held for you at the winning price; pay below to book it.",
     lost: "Another bidder won.",
     defaulted: "Your hold lapsed unpaid; the slot went to the next bidder.",
     failed: "The auction ended without a sale.",
@@ -171,12 +207,6 @@ function MyStatus({ mine }: { mine: Mine }) {
         {mine.bidderLabel}: {text[mine.outcome]}
       </p>
       {mine.myMaxMinor > 0 && <p className="mt-1 text-muted">Your maximum: {money(mine.myMaxMinor)} (only you see this)</p>}
-      {mine.outcome === "won" && mine.holdExpiresAt && mine.amountMinor !== null && (
-        <p className="mt-1 text-muted">
-          Pay {money(mine.amountMinor)} within {countdown(mine.holdExpiresAt, now)} (hold {mine.holdId}). Agents pay over x402;
-          the operator can record a manual payment from the console.
-        </p>
-      )}
     </div>
   );
 }

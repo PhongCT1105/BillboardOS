@@ -3,11 +3,18 @@ import {
   internalMutation,
   internalQuery,
   mutation,
+  query,
   type MutationCtx,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { currency, holdStatus } from "./schema";
+import {
+  currency,
+  financeExceptionKind,
+  financeExceptionStatus,
+  holdStatus,
+  paymentProvider,
+} from "./schema";
 import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH } from "./lib/constants";
 import { assertBoundedString } from "./lib/validators";
@@ -341,6 +348,57 @@ export const expire = internalMutation({
     }
     await endHold(ctx, hold, "expired", "system", "Hold TTL elapsed without verified payment");
     return null;
+  },
+});
+
+const MAX_RECEIPT_PAYMENTS = 10;
+
+/**
+ * The holder's view of payments reported against its hold: each one's
+ * outcome (booked, or held for operator review). The caller proves it holds
+ * the hold with the idempotencyKey it was created with; anyone else gets null.
+ */
+export const receipt = query({
+  args: { holdId: v.id("holds"), idempotencyKey: v.string() },
+  returns: v.union(
+    v.null(),
+    v.object({
+      holdStatus,
+      payments: v.array(
+        v.object({
+          provider: paymentProvider,
+          externalRef: v.string(),
+          network: v.union(v.string(), v.null()),
+          amountMinor: v.number(),
+          bookingId: v.union(v.id("bookings"), v.null()),
+          exception: v.union(
+            v.null(),
+            v.object({ kind: financeExceptionKind, status: financeExceptionStatus }),
+          ),
+        }),
+      ),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const hold = await ctx.db.get(args.holdId);
+    if (!hold || hold.idempotencyKey !== args.idempotencyKey) return null;
+    const payments = await ctx.db
+      .query("payments")
+      .withIndex("by_hold", (q) => q.eq("holdId", hold._id))
+      .take(MAX_RECEIPT_PAYMENTS);
+    const rows = [];
+    for (const p of payments) {
+      const exception = p.financeExceptionId ? await ctx.db.get(p.financeExceptionId) : null;
+      rows.push({
+        provider: p.provider,
+        externalRef: p.externalRef,
+        network: p.network ?? null,
+        amountMinor: p.amountMinor,
+        bookingId: p.bookingId ?? null,
+        exception: exception ? { kind: exception.kind, status: exception.status } : null,
+      });
+    }
+    return { holdStatus: hold.status, payments: rows };
   },
 });
 

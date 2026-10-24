@@ -841,12 +841,19 @@ async function viewOf(ctx: QueryCtx, auction: Doc<"auctions">) {
   };
 }
 
-/** Open auctions plus those that ended in the last 15 minutes (max 20 each), newest-ending last. */
+/**
+ * Open auctions plus those that ended in the last 15 minutes (max 20 each),
+ * newest-ending last. The caller passes `now` (floored to the minute keeps
+ * the subscription stable); queries never read the clock.
+ */
 export const live = query({
-  args: { billboardId: v.optional(v.id("billboards")) },
+  args: { billboardId: v.optional(v.id("billboards")), now: v.number() },
   returns: v.array(auctionView),
   handler: async (ctx, args) => {
-    const now = Date.now();
+    if (!Number.isFinite(args.now)) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "now must be a timestamp (ms)" });
+    }
+    const now = args.now;
     const rows: Doc<"auctions">[] = [];
     rows.push(
       ...(await ctx.db

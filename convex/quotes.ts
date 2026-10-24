@@ -1,5 +1,5 @@
 import { ConvexError, v, type Infer } from "convex/values";
-import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currency, pricingConfidence, slotPriceBreakdown } from "./schema";
@@ -296,5 +296,51 @@ export const expire = internalMutation({
       reason: "Quote reached expiresAt without a booking",
     });
     return null;
+  },
+});
+
+const ESTIMATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const MAX_ESTIMATE_SLOTS = 96;
+
+/**
+ * Screen-price estimates for a billboard's open slots starting in [from, to],
+ * before any company valuation (only a real quote applies that). Read-only;
+ * the caller passes `now` (the booking page floors it to the minute).
+ */
+export const estimates = query({
+  args: {
+    billboardId: v.id("billboards"),
+    from: v.number(),
+    to: v.number(),
+    now: v.number(),
+    /** The asking campaign: its own open quotes don't count as competing interest. */
+    campaignId: v.optional(v.id("campaigns")),
+  },
+  returns: v.array(v.object({ slotId: v.id("slots"), amountMinor: v.number() })),
+  handler: async (ctx, args) => {
+    if (
+      ![args.from, args.to, args.now].every(Number.isFinite) ||
+      args.to < args.from ||
+      args.to - args.from > ESTIMATE_WINDOW_MS
+    ) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "Require finite from <= to within 24 hours, and a finite now",
+      });
+    }
+    const billboard = await ctx.db.get(args.billboardId);
+    if (!billboard) return [];
+    const slots = await ctx.db
+      .query("slots")
+      .withIndex("by_billboard_and_startAt", (q) =>
+        q.eq("billboardId", args.billboardId).gte("startAt", args.from).lte("startAt", args.to),
+      )
+      .take(MAX_ESTIMATE_SLOTS);
+    const open = slots.filter((s) => s.state === "available" && s.startAt > args.now);
+    if (open.length === 0) return [];
+    const { price } = await computeScreenPrice(ctx.db, billboard, open, args.now, {
+      excludeCampaignId: args.campaignId,
+    });
+    return price.slotPrices.map((p, i) => ({ slotId: open[i]._id, amountMinor: p.amountMinor }));
   },
 });

@@ -283,7 +283,7 @@ describe("customer isolation", () => {
 
     expect((await anon.query(api.billboards.list, {})).length).toBe(2);
     expect((await anon.query(api.billboards.recommend, { targetAudience: { software: 1 } })).length).toBe(2);
-    await expect(anon.query(api.auctions.live, {})).resolves.toBeDefined();
+    await expect(anon.query(api.auctions.live, { now: Date.now() })).resolves.toBeDefined();
     await expect(anon.query(api.player.nowPlaying, { billboardId: m.billboardB, atMinute: START })).resolves.toBeDefined();
   });
 });
