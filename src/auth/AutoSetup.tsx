@@ -7,7 +7,7 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { errorMessage } from "../lib/format";
 import { CreateCompany, CreateWorkspace, RoleChooser } from "./Onboarding";
 import { PENDING_ROLE_KEY, readPendingRole, type AccountType } from "./SignInPage";
-import { detectPlace, randomCompanyName, randomHostName, randomScreenName } from "./place";
+import { STARTER_AUDIENCE, detectPlace, randomCompanyName, randomHostName, randomScreenName } from "./place";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 type Step = { label: string; done: boolean };
@@ -44,6 +44,7 @@ function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone:
   const setAccountType = useMutation(api.accounts.setAccountType);
   const createWorkspace = useMutation(api.workspaces.create);
   const createScreen = useMutation(api.billboards.create);
+  const setAudience = useMutation(api.billboards.setAudienceTags);
   const createCompany = useMutation(api.accounts.createCompany);
   const createCampaign = useMutation(api.campaigns.create);
   const generateUploadUrl = useMutation(api.creatives.generateUploadUrl);
@@ -98,6 +99,7 @@ function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone:
               }
             }
             if (!screenId) throw new Error("Could not pick a free screen name; add one from the console.");
+            await setAudience({ billboardId: screenId, audienceTags: STARTER_AUDIENCE });
             tick(2, `Screen on ${place.locationLabel}`);
           }
         } else if (me.companies.length === 0) {

@@ -60,3 +60,9 @@ export function randomCompanyName(): string {
 export function randomScreenName(city: string): string {
   return `${city} street screen ${suffix()}`;
 }
+
+/**
+ * A starting guess at who walks past a downtown screen, so the seller agent can match company agents
+ * from the first minute. Same tag vocabulary as campaigns; the host refines it on the screen's settings.
+ */
+export const STARTER_AUDIENCE: Record<string, number> = { software: 0.4, startups: 0.3, tourists: 0.3 };
