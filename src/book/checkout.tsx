@@ -6,7 +6,11 @@ import { countdown, money } from "../lib/format";
 
 /** Shared by the booking page and auction winners: everything needed to pay a hold. */
 
-export const X402_SERVER = ((import.meta.env.VITE_X402_SERVER_URL as string | undefined) || "http://localhost:4021").replace(/\/$/, "");
+/** Convex serves the x402 purchase route on the deployment's site URL (`npx convex dev` writes it to .env.local). */
+const SITE_URL = (
+  (import.meta.env.VITE_CONVEX_SITE_URL as string | undefined) ||
+  (import.meta.env.VITE_CONVEX_URL as string).replace(/\.cloud\/?$/, ".site")
+).replace(/\/$/, "");
 const NETWORK_NAMES: Record<string, string> = { "eip155:84532": "Base Sepolia", "eip155:8453": "Base" };
 
 export function networkName(network: string): string {
@@ -21,28 +25,6 @@ export function explorerTxUrl(network: string | undefined, tx: string): string |
   return null;
 }
 
-type X402Status = { state: "checking" } | { state: "offline" } | { state: "online"; network: string; payTo: string | null };
-
-/** The x402 payment server's network and receiving address, read from its /health route. */
-function useX402Server(): X402Status {
-  const [status, setStatus] = useState<X402Status>({ state: "checking" });
-  useEffect(() => {
-    let live = true;
-    fetch(`${X402_SERVER}/health`)
-      .then((res) => (res.ok ? (res.json() as Promise<{ network?: string; payTo?: string }>) : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((body) => {
-        if (live) setStatus({ state: "online", network: body.network ?? "unknown", payTo: body.payTo ?? null });
-      })
-      .catch(() => {
-        if (live) setStatus({ state: "offline" });
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
-  return status;
-}
-
 export type PayableHold = { holdId: Id<"holds">; amountMinor: number; expiresAt: number };
 
 export function PaymentCard(props: {
@@ -55,7 +37,6 @@ export function PaymentCard(props: {
   onRelease?: () => void;
 }) {
   const { hold, now } = props;
-  const server = useX402Server();
   const left = Math.max(0, hold.expiresAt - now);
 
   return (
@@ -86,23 +67,8 @@ export function PaymentCard(props: {
       </div>
 
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2.5 text-[13px]">
-        <dt className="text-muted">Network</dt>
-        <dd>
-          {server.state === "online" ? (
-            <span className="flex flex-wrap items-center gap-2">
-              {networkName(server.network)}
-              {server.network === "eip155:84532" && (
-                <span className="rounded-full border border-info/40 px-2 py-0.5 text-[11px] font-semibold tracking-wide text-info uppercase">Test funds</span>
-              )}
-            </span>
-          ) : server.state === "offline" ? (
-            <span className="text-danger">Payment server offline</span>
-          ) : (
-            <span className="text-muted">Checking</span>
-          )}
-        </dd>
-        <dt className="text-muted">Pay to</dt>
-        <dd className="font-mono break-all">{server.state === "online" && server.payTo ? server.payTo : "Not available"}</dd>
+        <dt className="text-muted">Paid in</dt>
+        <dd>USDC</dd>
         <dt className="text-muted">Checkout</dt>
         <dd>x402, verified by Coinbase</dd>
       </dl>
@@ -115,15 +81,10 @@ export function PaymentCard(props: {
       <div className="flex flex-col gap-2.5 border-t border-line pt-[18px]">
         <h3 className="text-sm font-semibold">Pay with x402</h3>
         <p className="text-[13px] leading-relaxed text-muted">
-          Send this request from an x402 wallet or buying agent. It answers with a 402 and the price; sign and send it again to pay. Money
-          moves only after Coinbase verifies the payment and the hold is checked once more.
+          Send this request from an x402 wallet or buying agent. It answers with a 402 naming the price, network and receiving address; sign
+          and send it again to pay. Money moves only after Coinbase verifies the payment and the hold is checked once more.
         </p>
-        <CopyField value={`POST ${X402_SERVER}/purchases/${hold.holdId}`} label="Copy payment request" />
-        {server.state === "offline" && (
-          <p className="text-[13px] text-danger">
-            Start it with <code className="font-mono">npm run server</code>.
-          </p>
-        )}
+        <CopyField value={`POST ${SITE_URL}/purchases/${hold.holdId}`} label="Copy payment request" />
       </div>
 
       {props.onTerms && (

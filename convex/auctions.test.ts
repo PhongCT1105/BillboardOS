@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, type TestClient } from "./test.setup";
+import { modules, signedInOperator, type TestClient, joinCompanies } from "./test.setup";
 import { increment, minNextBid, resolveProxy, extendForSoftClose } from "./lib/auction";
 
 // 09:07 PDT. slots[8] airs 11:15 local (2h out): base $40, no stage moves it -> reserve $40.00.
@@ -33,6 +33,7 @@ async function world() {
   const anon = convexTest(schema, modules);
   const op = await signedInOperator(anon);
   const seed = await op.mutation(internal.seed.demo, {});
+  await joinCompanies(op);
   const slots = await anon.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
     from: START,
@@ -40,7 +41,7 @@ async function world() {
   });
   // Campaign A: Golden Gate Coffee ($300 budget). Campaign B: Bay Robotics ($1,000 budget).
   const campaignA = seed.campaignId;
-  const campaignB = await anon.mutation(api.campaigns.create, {
+  const campaignB = await op.mutation(api.campaigns.create, {
     advertiserId: seed.advertiserIds[1],
     brief: "Robot demo day",
     budgetMinor: 100_000,
@@ -53,9 +54,9 @@ async function openOn(op: TestClient, slotId: Id<"slots">) {
   return auctionId;
 }
 
-async function joinBoth(anon: TestClient, auctionId: Id<"auctions">, campaignA: Id<"campaigns">, campaignB: Id<"campaigns">) {
-  const a = await anon.mutation(api.auctions.join, { auctionId, campaignId: campaignA });
-  const b = await anon.mutation(api.auctions.join, { auctionId, campaignId: campaignB });
+async function joinBoth(op: TestClient, auctionId: Id<"auctions">, campaignA: Id<"campaigns">, campaignB: Id<"campaigns">) {
+  const a = await op.mutation(api.auctions.join, { auctionId, campaignId: campaignA });
+  const b = await op.mutation(api.auctions.join, { auctionId, campaignId: campaignB });
   const A = { auctionId, campaignId: campaignA, bidderKey: a.bidderKey };
   const B = { auctionId, campaignId: campaignB, bidderKey: b.bidderKey };
   return { a, b, A, B };
@@ -104,20 +105,20 @@ describe("auctions", () => {
     const view0 = await anon.query(api.auctions.forSlot, { slotId: slots[8]._id });
     expect(view0).toMatchObject({ status: "open", reserveMinor: 4000, currentMinor: 4000, leaderLabel: null, minNextBidMinor: 4000 });
 
-    const { a, b, A, B } = await joinBoth(anon, auctionId, campaignA, campaignB);
+    const { a, b, A, B } = await joinBoth(op, auctionId, campaignA, campaignB);
     expect([a.bidderLabel, b.bidderLabel]).toEqual(["Bidder A", "Bidder B"]);
 
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...A, amountMinor: 3900 }))).toBe("BID_TOO_LOW");
-    let r = await anon.mutation(api.auctions.bid, { ...A, amountMinor: 5200 });
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...A, amountMinor: 3900 }))).toBe("BID_TOO_LOW");
+    let r = await op.mutation(api.auctions.bid, { ...A, amountMinor: 5200 });
     expect(r).toMatchObject({ leading: true, currentMinor: 5200, minNextBidMinor: 5460 });
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...A, amountMinor: 6000 }))).toBe("ALREADY_LEADING");
-    await anon.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 7000 });
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...A, amountMinor: 6000 }))).toBe("ALREADY_LEADING");
+    await op.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 7000 });
 
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...B, amountMinor: 5400 }))).toBe("BID_TOO_LOW");
-    r = await anon.mutation(api.auctions.bid, { ...B, amountMinor: 5500 });
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...B, amountMinor: 5400 }))).toBe("BID_TOO_LOW");
+    r = await op.mutation(api.auctions.bid, { ...B, amountMinor: 5500 });
     // A's proxy answers: 5500 + 5% = 5775.
     expect(r).toMatchObject({ leading: false, leaderLabel: "Bidder A", currentMinor: 5775 });
-    r = await anon.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
+    r = await op.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
     expect(r).toMatchObject({ leading: true, leaderLabel: "Bidder B", currentMinor: 7350 });
 
     const view = (await anon.query(api.auctions.live, { now: Date.now() }))[0];
@@ -130,69 +131,69 @@ describe("auctions", () => {
     ]);
     // Private maxima never leave the server through public views.
     expect(JSON.stringify(await anon.query(api.auctions.live, { now: Date.now() }))).not.toContain("9500");
-    const mine = await anon.query(api.auctions.myStatus, B);
+    const mine = await op.query(api.auctions.myStatus, B);
     expect(mine).toMatchObject({ outcome: "leading", myMaxMinor: 9500 });
-    const theirs = await anon.query(api.auctions.myStatus, A);
+    const theirs = await op.query(api.auctions.myStatus, A);
     expect(theirs).toMatchObject({ outcome: "outbid", myMaxMinor: 7000 });
 
     // Leader can't lower its max below the current price.
-    expect(await errorCode(anon.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 7000 }))).toBe("AUTO_BID_TOO_LOW");
+    expect(await errorCode(op.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 7000 }))).toBe("AUTO_BID_TOO_LOW");
   });
 
   test("bidder keys: a buyer can't bid as another campaign", async () => {
     const { anon, op, seed, slots, campaignA, campaignB } = await world();
     const auctionId = await openOn(op, slots[8]._id);
-    const { A, B } = await joinBoth(anon, auctionId, campaignA, campaignB);
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...A, bidderKey: B.bidderKey, amountMinor: 5000 }))).toBe("FORBIDDEN");
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...A, bidderKey: "nope", amountMinor: 5000 }))).toBe("FORBIDDEN");
+    const { A, B } = await joinBoth(op, auctionId, campaignA, campaignB);
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...A, bidderKey: B.bidderKey, amountMinor: 5000 }))).toBe("FORBIDDEN");
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...A, bidderKey: "nope", amountMinor: 5000 }))).toBe("FORBIDDEN");
     // Re-joining without the original key is refused; with it, idempotent.
-    expect(await errorCode(anon.mutation(api.auctions.join, { auctionId, campaignId: campaignA }))).toBe("ALREADY_JOINED");
+    expect(await errorCode(op.mutation(api.auctions.join, { auctionId, campaignId: campaignA }))).toBe("ALREADY_JOINED");
     const key = "client-supplied-key-123456";
-    const campaignC = await anon.mutation(api.campaigns.create, {
+    const campaignC = await op.mutation(api.campaigns.create, {
       advertiserId: seed.advertiserIds[1],
       brief: "third bidder",
       budgetMinor: 50_000,
     });
-    const j1 = await anon.mutation(api.auctions.join, { auctionId, campaignId: campaignC, clientKey: key });
-    const j2 = await anon.mutation(api.auctions.join, { auctionId, campaignId: campaignC, clientKey: key });
+    const j1 = await op.mutation(api.auctions.join, { auctionId, campaignId: campaignC, clientKey: key });
+    const j2 = await op.mutation(api.auctions.join, { auctionId, campaignId: campaignC, clientKey: key });
     expect(j2.participantId).toBe(j1.participantId);
   });
 
   test("budget cap applies to bids, auto-bids and joining", async () => {
     const { anon, op, slots, campaignA, campaignB } = await world();
     const auctionId = await openOn(op, slots[8]._id);
-    const { A } = await joinBoth(anon, auctionId, campaignA, campaignB);
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...A, amountMinor: 30_001 }))).toBe("BUDGET_EXCEEDED");
-    expect(await errorCode(anon.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 40_000 }))).toBe("BUDGET_EXCEEDED");
-    await anon.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 30_000 });
+    const { A } = await joinBoth(op, auctionId, campaignA, campaignB);
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...A, amountMinor: 30_001 }))).toBe("BUDGET_EXCEEDED");
+    expect(await errorCode(op.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 40_000 }))).toBe("BUDGET_EXCEEDED");
+    await op.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 30_000 });
 
-    const poor = await anon.mutation(api.campaigns.create, {
-      advertiserId: (await anon.query(api.advertisers.list, {}))[0]._id,
+    const poor = await op.mutation(api.campaigns.create, {
+      advertiserId: (await op.query(api.advertisers.list, {}))[0]._id,
       brief: "tiny",
       budgetMinor: 1000,
     });
-    expect(await errorCode(anon.mutation(api.auctions.join, { auctionId, campaignId: poor }))).toBe("BUDGET_EXCEEDED");
+    expect(await errorCode(op.mutation(api.auctions.join, { auctionId, campaignId: poor }))).toBe("BUDGET_EXCEEDED");
   });
 
   test("ties: equal maxima -> the earlier one leads at that amount", async () => {
     const { anon, op, slots, campaignA, campaignB } = await world();
     const auctionId = await openOn(op, slots[8]._id);
-    const { A, B } = await joinBoth(anon, auctionId, campaignA, campaignB);
-    await anon.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 6000 });
+    const { A, B } = await joinBoth(op, auctionId, campaignA, campaignB);
+    await op.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 6000 });
     vi.advanceTimersByTime(1000);
-    const r = await anon.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 6000 });
+    const r = await op.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 6000 });
     expect(r).toMatchObject({ leading: false, leaderLabel: "Bidder A", currentMinor: 6000 });
   });
 
   test("soft close: a late bid extends 30 s, capped at the hard end; bids after close are refused", async () => {
     const { anon, op, slots, campaignA, campaignB } = await world();
     const auctionId = await openOn(op, slots[8]._id);
-    const { A, B } = await joinBoth(anon, auctionId, campaignA, campaignB);
+    const { A, B } = await joinBoth(op, auctionId, campaignA, campaignB);
     const opened = (await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!;
     expect(opened.hardEndsAt - opened.endsAt).toBe(3 * MIN);
 
     vi.setSystemTime(opened.endsAt - 10_000);
-    const r = await anon.mutation(api.auctions.bid, { ...A, amountMinor: 4000 });
+    const r = await op.mutation(api.auctions.bid, { ...A, amountMinor: 4000 });
     expect(r.endsAt).toBe(opened.endsAt + 20_000);
 
     // Keep bidding in the final seconds until the hard cap stops extensions.
@@ -202,25 +203,25 @@ describe("auctions", () => {
       vi.setSystemTime(endsAt - 5_000);
       const who = turn % 2 === 0 ? B : A;
       const view = (await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!;
-      endsAt = (await anon.mutation(api.auctions.bid, { ...who, amountMinor: view.minNextBidMinor })).endsAt;
+      endsAt = (await op.mutation(api.auctions.bid, { ...who, amountMinor: view.minNextBidMinor })).endsAt;
       turn++;
     }
     expect(endsAt).toBe(opened.hardEndsAt);
     vi.setSystemTime(opened.hardEndsAt + 1);
     const view = (await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!;
-    expect(await errorCode(anon.mutation(api.auctions.bid, { ...A, amountMinor: view.minNextBidMinor * 2 }))).toBe("AUCTION_CLOSED");
+    expect(await errorCode(op.mutation(api.auctions.bid, { ...A, amountMinor: view.minNextBidMinor * 2 }))).toBe("AUCTION_CLOSED");
     expect(view.extensions).toBeGreaterThan(1);
   });
 
   test("posted price is blocked while the auction is open", async () => {
     const { anon, op, seed, slots } = await world();
-    const early = await anon.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] });
+    const early = await op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] });
     await openOn(op, slots[8]._id);
-    expect(await errorCode(anon.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] }))).toBe(
+    expect(await errorCode(op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] }))).toBe(
       "AUCTION_OPEN",
     );
     expect(
-      await errorCode(anon.mutation(api.holds.create, { quoteId: early.quoteId, idempotencyKey: "early", actor: "buyer" })),
+      await errorCode(op.mutation(api.holds.create, { quoteId: early.quoteId, idempotencyKey: "early", actor: "buyer" })),
     ).toBe("AUCTION_OPEN");
   });
 
@@ -231,24 +232,24 @@ describe("auctions", () => {
     vi.setSystemTime(auction.endsAt + 1);
     await op.mutation(internal.auctions.close, { auctionId });
     expect((await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!.status).toBe("failed");
-    await expect(anon.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] })).resolves.toBeDefined();
+    await expect(op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] })).resolves.toBeDefined();
   });
 
   test("close -> winner hold at the winning bid -> paid -> settled", async () => {
     const { anon, op, slots, campaignA, campaignB } = await world();
     const auctionId = await openOn(op, slots[8]._id);
-    const { A, B } = await joinBoth(anon, auctionId, campaignA, campaignB);
-    await anon.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 7000 });
-    await anon.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
+    const { A, B } = await joinBoth(op, auctionId, campaignA, campaignB);
+    await op.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 7000 });
+    await op.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
     const before = (await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!;
     vi.setSystemTime(before.endsAt + 1);
     await op.mutation(internal.auctions.close, { auctionId });
 
-    const won = await anon.query(api.auctions.myStatus, B);
+    const won = await op.query(api.auctions.myStatus, B);
     expect(won).toMatchObject({ outcome: "won", amountMinor: 7350 });
     expect(won.holdId).not.toBeNull();
     expect(won.holdKey).toMatch(/^ah_/);
-    expect(await anon.query(api.auctions.myStatus, A)).toMatchObject({ outcome: "lost", holdId: null, holdKey: null });
+    expect(await op.query(api.auctions.myStatus, A)).toMatchObject({ outcome: "lost", holdId: null, holdKey: null });
     const hold = await anon.run(async (ctx) => ctx.db.get(won.holdId!));
     expect(hold).toMatchObject({ amountMinor: 7350, status: "active", auctionId });
     const slot = await anon.run(async (ctx) => ctx.db.get(slots[8]._id));
@@ -273,14 +274,14 @@ describe("auctions", () => {
   test("winner doesn't pay -> winner_default exception, runner-up offered at their last bid", async () => {
     const { anon, op, slots, campaignA, campaignB } = await world();
     const auctionId = await openOn(op, slots[8]._id);
-    const { A, B } = await joinBoth(anon, auctionId, campaignA, campaignB);
-    await anon.mutation(api.auctions.bid, { ...A, amountMinor: 5200 });
-    await anon.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 7000 });
-    await anon.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
+    const { A, B } = await joinBoth(op, auctionId, campaignA, campaignB);
+    await op.mutation(api.auctions.bid, { ...A, amountMinor: 5200 });
+    await op.mutation(api.auctions.setAutoBid, { ...A, maxMinor: 7000 });
+    await op.mutation(api.auctions.setAutoBid, { ...B, maxMinor: 9500 });
     const before = (await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!;
     vi.setSystemTime(before.endsAt + 1);
     await op.mutation(internal.auctions.close, { auctionId });
-    const won = await anon.query(api.auctions.myStatus, B);
+    const won = await op.query(api.auctions.myStatus, B);
 
     // B's hold lapses: holds.expire hands off to the auction.
     const hold = (await anon.run(async (ctx) => ctx.db.get(won.holdId!)))!;
@@ -290,8 +291,8 @@ describe("auctions", () => {
     expect(scheduled.some((s) => s.name.includes("handleWinnerDefault") && s.state.kind === "pending")).toBe(true);
     await op.mutation(internal.auctions.handleWinnerDefault, { auctionId, holdId: hold._id });
 
-    expect(await anon.query(api.auctions.myStatus, B)).toMatchObject({ outcome: "defaulted" });
-    const offer = await anon.query(api.auctions.myStatus, A);
+    expect(await op.query(api.auctions.myStatus, B)).toMatchObject({ outcome: "defaulted" });
+    const offer = await op.query(api.auctions.myStatus, A);
     expect(offer).toMatchObject({ outcome: "won", amountMinor: 7000 });
     const offerHold = (await anon.run(async (ctx) => ctx.db.get(offer.holdId!)))!;
     expect(offerHold).toMatchObject({ amountMinor: 7000, status: "active", auctionId });
@@ -303,16 +304,16 @@ describe("auctions", () => {
     expect(trail.map((e) => e.type)).toEqual(expect.arrayContaining(["auction.winner_default", "auction.runner_up_offered"]));
 
     // Runner-up can also release (decline) -> no one left -> failed.
-    await anon.mutation(api.holds.release, { holdId: offerHold._id, idempotencyKey: offer.holdKey! });
+    await op.mutation(api.holds.release, { holdId: offerHold._id, idempotencyKey: offer.holdKey! });
     await op.mutation(internal.auctions.handleWinnerDefault, { auctionId, holdId: offerHold._id });
     expect((await anon.query(api.auctions.forSlot, { slotId: slots[8]._id }))!.status).toBe("failed");
   });
 
   test("seller agent opens an auction when two buyers quote the same slot", async () => {
-    const { anon, seed, slots, campaignB } = await world();
-    await anon.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[10]._id] });
+    const { anon, seed, slots, campaignB, op } = await world();
+    await op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[10]._id] });
     expect(await anon.query(api.auctions.forSlot, { slotId: slots[10]._id })).toBeNull();
-    await anon.mutation(api.quotes.create, { campaignId: campaignB, slotIds: [slots[10]._id] });
+    await op.mutation(api.quotes.create, { campaignId: campaignB, slotIds: [slots[10]._id] });
     await anon.finishInProgressScheduledFunctions();
     vi.advanceTimersByTime(1);
     await anon.finishInProgressScheduledFunctions();
@@ -320,13 +321,13 @@ describe("auctions", () => {
     expect(view).toMatchObject({ status: "open" });
     expect(view!.openReason).toContain("2 buyers are competing");
     // From now on the posted price is closed for that slot.
-    expect(await errorCode(anon.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[10]._id] }))).toBe(
+    expect(await errorCode(op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[10]._id] }))).toBe(
       "AUCTION_OPEN",
     );
   });
 
   test("operator-only opening", async () => {
-    const { anon, slots } = await world();
+    const { anon, slots, op } = await world();
     expect(await errorCode(anon.mutation(api.auctions.open, { slotIds: [slots[8]._id] }))).toBe("UNAUTHENTICATED");
   });
 });

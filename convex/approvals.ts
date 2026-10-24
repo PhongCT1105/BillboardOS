@@ -10,7 +10,7 @@ import {
   settleInvoice,
 } from "./lib/finance";
 import { usd } from "./lib/reconcile";
-import { requireOperator } from "./lib/operator";
+import { requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
 
 /**
  * Controls (segregation of duties). Agents request through internal paths
@@ -114,13 +114,27 @@ export const request = mutation({
   },
   returns: v.object({ approvalId: v.id("approvals"), status: approvalStatus, replayed: v.boolean() }),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
     const subject = await loadSubject(ctx, args.subjectId);
     if (!subject) throw new ConvexError({ code: "NOT_FOUND", message: "Subject not found" });
+    // The subject decides the workspace; the requester must be a member of it.
+    const operator = await requireWorkspaceMember(ctx, subject.doc.workspaceId);
+    if (args.invoiceId) {
+      const inv = await ctx.db.get(args.invoiceId);
+      if (!inv || inv.workspaceId !== operator.workspaceId) {
+        throw new ConvexError({ code: "NOT_WORKSPACE_MEMBER", message: "Invoice is not in this workspace" });
+      }
+    }
+    if (args.financeExceptionId) {
+      const ex = await ctx.db.get(args.financeExceptionId);
+      if (!ex || ex.workspaceId !== operator.workspaceId) {
+        throw new ConvexError({ code: "NOT_WORKSPACE_MEMBER", message: "Exception is not in this workspace" });
+      }
+    }
     await checkRequest(ctx, args.action, subject, args.amountMinor, args.invoiceId);
     const r = await createApproval(
       ctx,
       {
+        workspaceId: operator.workspaceId,
         action: args.action,
         subjectKind: subject.kind,
         subjectId: subject.doc._id,
@@ -154,10 +168,11 @@ export const decide = mutation({
     executionResult: v.union(v.string(), v.null()),
   }),
   handler: async (ctx, args) => {
-    const approver = (await requireOperator(ctx)).actor;
     const note = args.note.trim().slice(0, 1000);
     const approval = await ctx.db.get(args.approvalId);
     if (!approval) throw new ConvexError({ code: "NOT_FOUND", message: "Approval not found" });
+    // Separation of duties is per workspace: only its members decide.
+    const approver = (await requireWorkspaceMember(ctx, approval.workspaceId)).actor;
     if (approval.status !== "pending") {
       throw new ConvexError({ code: "NOT_PENDING", message: `Approval is already ${approval.status}` });
     }
@@ -186,6 +201,7 @@ export const decide = mutation({
       decisionNote: note || undefined,
     });
     await recordAudit(ctx, {
+      workspaceId: approval.workspaceId,
       traceId,
       actor: approver,
       type: args.decision === "approved" ? "approval.approved" : "approval.rejected",
@@ -203,6 +219,7 @@ export const decide = mutation({
     if (executionResult !== null) {
       await ctx.db.patch(approval._id, { executionResult });
       await recordAudit(ctx, {
+      workspaceId: approval.workspaceId,
         traceId,
         actor: approver,
         type: "approval.executed",
@@ -251,6 +268,7 @@ async function execute(
         await ctx.db.patch(subject.doc._id, { status: "refunded" });
         const text = `Refund of ${usd(approval.amountMinor)} recorded for ${subject.doc.provider} payment ${subject.doc.externalRef}. Money movement via the provider is outside this system.`;
         await recordAudit(ctx, {
+      workspaceId: approval.workspaceId,
           traceId,
           actor: approver,
           type: "refund.recorded",
@@ -270,6 +288,7 @@ async function execute(
       });
       const text = `Refund of ${usd(approval.amountMinor)} unapplied cash recorded for bank line ${t.externalId}.`;
       await recordAudit(ctx, {
+      workspaceId: approval.workspaceId,
         traceId,
         actor: approver,
         type: "refund.recorded",
@@ -334,6 +353,7 @@ async function onRejected(
   const inv = await ctx.db.get(task.invoiceId);
   if (!inv || invoiceBalance(inv) === 0) return "Escalation declined; invoice already settled.";
   const firmId = await ctx.db.insert("collectionTasks", {
+    workspaceId: approval.workspaceId,
     invoiceId: task.invoiceId,
     advertiserId: task.advertiserId,
     tone: "firm",
@@ -344,6 +364,7 @@ async function onRejected(
     plannedAt: Date.now(),
   });
   await recordAudit(ctx, {
+      workspaceId: approval.workspaceId,
     traceId,
     actor: "agent:collections",
     type: "collection.planned",
@@ -355,7 +376,7 @@ async function onRejected(
 
 /** Pending approvals, newest first (max 50), with a human-readable subject. */
 export const pending = query({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       _id: v.id("approvals"),
@@ -364,11 +385,11 @@ export const pending = query({
       subjectLabel: v.string(),
     }),
   ),
-  handler: async (ctx) => {
-    await requireOperator(ctx);
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const rows = await ctx.db
       .query("approvals")
-      .withIndex("by_status", (q) => q.eq("status", "pending"))
+      .withIndex("by_workspace_and_status", (q) => q.eq("workspaceId", me.workspaceId).eq("status", "pending"))
       .order("desc")
       .take(50);
     const out = [];

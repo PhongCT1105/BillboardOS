@@ -21,12 +21,11 @@
  */
 import { randomUUID } from "node:crypto";
 import { ConvexHttpClient } from "convex/browser";
-import { ConvexError } from "convex/values";
 import { CdpX402Client } from "@coinbase/cdp-sdk/x402";
 import { wrapFetchWithPayment } from "@x402/fetch";
 import { api } from "../convex/_generated/api.js";
 import type { Id } from "../convex/_generated/dataModel.js";
-import { centsToAtomic, centsToUsd, env, presence, requireEnv } from "./lib.ts";
+import { agentApi, AgentApiError, centsToAtomic, centsToUsd, env, paymentServerUrl, presence, requireEnv } from "./lib.ts";
 
 // ---------------------------------------------------------------- config
 
@@ -36,7 +35,7 @@ const argValue = (name: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const NO_PAY = argv.includes("--no-pay");
-const SERVER = (argValue("server") ?? `http://localhost:${env("X402_SERVER_PORT") ?? 4021}`).replace(/\/$/, "");
+const SERVER = paymentServerUrl(argValue("server"));
 const NETWORK = env("X402_NETWORK") ?? "eip155:84532";
 const POLL_MS = 1500;
 /** Auction (2 min) + soft-close cap (3 min) + payment window (5 min) + margin must fit before air time. */
@@ -55,6 +54,8 @@ type AgentSpec = {
   /** Start below the full valuation and raise once if outbid. */
   openingShareOfValuation: number;
   wallet: string;
+  /** Env var holding this agent's key (issued by its company; `npx convex run seed:demoAgentKeys`). */
+  keyEnv: string;
 };
 
 const AGENTS: AgentSpec[] = [
@@ -66,6 +67,7 @@ const AGENTS: AgentSpec[] = [
     maxBidPerSlotMinor: 15_000,
     openingShareOfValuation: 1,
     wallet: env("AUCTION_COFFEE_WALLET") ?? "auction-coffee-agent",
+    keyEnv: "AUCTION_COFFEE_AGENT_KEY",
   },
   {
     name: "Nvidia agent",
@@ -75,6 +77,7 @@ const AGENTS: AgentSpec[] = [
     maxBidPerSlotMinor: 40_000,
     openingShareOfValuation: 0.7,
     wallet: env("AUCTION_NVIDIA_WALLET") ?? env("BUYER_WALLET_NAME") ?? "advertiser-agent-1",
+    keyEnv: "AUCTION_NVIDIA_AGENT_KEY",
   },
 ];
 
@@ -87,15 +90,11 @@ const fail = (msg: string): never => {
 };
 
 function errorText(error: unknown): string {
-  if (error instanceof ConvexError) {
-    const data = error.data as { code?: string; message?: string } | string;
-    return typeof data === "string" ? data : `${data.code ?? "ERROR"}: ${data.message ?? ""}`;
-  }
   return error instanceof Error ? error.message : String(error);
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error instanceof ConvexError ? (error.data as { code?: string }).code : undefined;
+  return error instanceof AgentApiError ? error.code : undefined;
 }
 
 /**
@@ -112,8 +111,10 @@ const convex = new ConvexHttpClient(requireEnv("CONVEX_URL", "public Convex API 
 console.log("BillboardOS auction demo: two buyer agents, one hot slot (TEST FUNDS ONLY)");
 console.log(`  ANTHROPIC_API_KEY ${presence("ANTHROPIC_API_KEY")} (reasoning is deterministic either way; narrate() is the Claude hook)`);
 
-const campaigns = await convex.query(api.campaigns.list, {});
 type Agent = AgentSpec & {
+  /** Agent API client with this agent's key; acts only for its own company. */
+  api: ReturnType<typeof agentApi>;
+  key: string;
   campaignId: Id<"campaigns">;
   budgetMinor: number;
   bidderKey: string;
@@ -121,18 +122,60 @@ type Agent = AgentSpec & {
   maxMinor: number;
   raised: boolean;
 };
-const agents: Agent[] = AGENTS.map((spec) => {
-  const c = campaigns.find((x) => x.advertiserName === spec.advertiser && (x.status === "active" || x.status === "draft"));
+type Me = { company: { displayName: string }; key: { name: string; prefix: string; budgetCapMinor: number }; campaigns: { campaignId: string; status: string; budgetMinor: number }[] };
+type Screen = {
+  billboardId: Id<"billboards">;
+  name: string;
+  explanation: string;
+  matchScore: number | null;
+  expectedAudiencePer15Min: number;
+  audienceBasis: "measured" | "normal_traffic";
+};
+const siteUrl = requireEnv("CONVEX_SITE_URL", "Convex HTTP actions base URL (agent API)");
+const agents: Agent[] = [];
+for (const spec of AGENTS) {
+  const key = requireEnv(spec.keyEnv, `${spec.advertiser}'s agent key (npx convex run seed:demoAgentKeys)`);
+  const client = agentApi(siteUrl, key);
+  let me: Me;
+  try {
+    me = await client.get<Me>("me");
+  } catch (error) {
+    fail(`${spec.name}: agent key rejected (${errorText(error)}). Issue fresh demo keys: npx convex run seed:demoAgentKeys`);
+  }
+  me = me!;
+  if (me.company.displayName !== spec.advertiser) fail(`${spec.keyEnv} belongs to ${me.company.displayName}, expected ${spec.advertiser}`);
+  const c = me.campaigns.find((x) => x.status === "active" || x.status === "draft");
   if (!c) fail(`No active campaign for ${spec.advertiser}. Run: npm run seed`);
-  return { ...spec, campaignId: c!._id, budgetMinor: c!.budgetMinor, bidderKey: `${randomUUID()}${randomUUID()}`.replace(/-/g, ""), valuationMinor: 0, maxMinor: 0, raised: false };
-});
+  say(spec.name, `agent key "${me.key.name}" (${me.key.prefix}) for ${me.company.displayName}, cap ${centsToUsd(me.key.budgetCapMinor)}`);
+  agents.push({
+    ...spec,
+    api: client,
+    key,
+    campaignId: c!.campaignId as Id<"campaigns">,
+    budgetMinor: Math.min(c!.budgetMinor, me.key.budgetCapMinor),
+    bidderKey: `${randomUUID()}${randomUUID()}`.replace(/-/g, ""),
+    valuationMinor: 0,
+    maxMinor: 0,
+    raised: false,
+  });
+}
+
+type BidOutcome = { leading: boolean; leaderLabel: string | null; currentMinor: number; minNextBidMinor: number; endsAt: number };
+type MyStatus = {
+  bidderLabel: string;
+  outcome: "leading" | "outbid" | "not_bidding" | "won" | "lost" | "defaulted" | "failed";
+  minNextBidMinor: number;
+  holdId: Id<"holds"> | null;
+  holdExpiresAt: number | null;
+  amountMinor: number | null;
+};
 
 // ---------------------------------------------------------------- 1. screens
 
 section("1. Each agent ranks screens for its audience");
-const recs = new Map<string, Awaited<ReturnType<typeof convex.query<typeof api.billboards.recommend>>>>();
+const recs = new Map<string, Screen[]>();
 for (const a of agents) {
-  const rows = await convex.query(api.billboards.recommend, { campaignId: a.campaignId });
+  const rows = (await a.api.get<{ screens: Screen[] }>(`inventory?campaignId=${a.campaignId}&hours=1`)).screens;
   recs.set(a.name, rows);
   const top = rows[0];
   if (!top) fail("No billboards. Run: npm run seed");
@@ -161,7 +204,7 @@ console.log(`  slot ${slotId}`);
 
 for (const a of agents) {
   try {
-    const q = await convex.mutation(api.quotes.create, { campaignId: a.campaignId, slotIds: [slotId!], actor: `agent:${a.name}` });
+    const q = await a.api.post<{ amountMinor: number }>("quotes", { campaignId: a.campaignId, slotIds: [slotId!] });
     say(a.name, `posted quote ${centsToUsd(q.amountMinor)}`);
   } catch (error) {
     say(a.name, errorCode(error) === "AUCTION_OPEN" ? "slot is already being auctioned" : `quote failed: ${errorText(error)}`);
@@ -211,12 +254,12 @@ for (const a of agents) {
 
 section("5. Bidding (proxy bids raise each agent one step at a time, up to its private max)");
 for (const a of agents) {
-  const joined = await convex.mutation(api.auctions.join, { auctionId, campaignId: a.campaignId, clientKey: a.bidderKey });
+  const joined = await a.api.post<{ bidderLabel: string }>(`auctions/${auctionId}/join`, { campaignId: a.campaignId, clientKey: a.bidderKey });
   say(a.name, `joined as ${joined.bidderLabel}`);
 }
 for (const a of agents) {
   try {
-    const r = await convex.mutation(api.auctions.setAutoBid, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: a.maxMinor });
+    const r = await a.api.post<BidOutcome>(`auctions/${auctionId}/auto-bid`, { campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: a.maxMinor });
     say(a.name, `auto-bid set; ${r.leading ? "leading" : `outbid, ${r.leaderLabel} leads`} at ${centsToUsd(r.currentMinor)}`);
   } catch (error) {
     say(a.name, `could not set auto-bid: ${errorText(error)}`);
@@ -235,7 +278,7 @@ for (;;) {
   if (view!.status !== "open") break;
   for (const a of agents) {
     if (a.raised || a.openingShareOfValuation >= 1) continue;
-    const mine = await convex.query(api.auctions.myStatus, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey });
+    const mine = await a.api.get<MyStatus>(`auctions/${auctionId}/status?campaignId=${a.campaignId}`, { "X-Bidder-Key": a.bidderKey });
     if (mine.outcome !== "outbid") continue;
     const full = Math.min(a.valuationMinor, a.maxBidPerSlotMinor * view!.slots.length, a.budgetMinor);
     a.raised = true;
@@ -250,7 +293,7 @@ for (;;) {
       say(a.name, line);
     }
     try {
-      const r = await convex.mutation(api.auctions.setAutoBid, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: full });
+      const r = await a.api.post<BidOutcome>(`auctions/${auctionId}/auto-bid`, { campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: full });
       a.maxMinor = full;
       say(a.name, `${r.leading ? "now leading" : "still outbid"} at ${centsToUsd(r.currentMinor)}`);
     } catch (error) {
@@ -274,7 +317,7 @@ for (const b of final.ladder) console.log(`    ${b.bidderLabel.padEnd(9)} ${cent
 
 let winner: { agent: Agent; holdId: Id<"holds">; amountMinor: number; expiresAt: number } | null = null;
 for (const a of agents) {
-  const mine = await convex.query(api.auctions.myStatus, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey });
+  const mine = await a.api.get<MyStatus>(`auctions/${auctionId}/status?campaignId=${a.campaignId}`, { "X-Bidder-Key": a.bidderKey });
   say(a.name, `${mine.bidderLabel}: ${mine.outcome}${mine.outcome === "won" && mine.amountMinor !== null ? ` at ${centsToUsd(mine.amountMinor)}` : ""}`);
   if (mine.outcome === "won" && mine.holdId && mine.amountMinor !== null && mine.holdExpiresAt) {
     winner = { agent: a, holdId: mine.holdId, amountMinor: mine.amountMinor, expiresAt: mine.holdExpiresAt };
@@ -311,7 +354,8 @@ const client = new CdpX402Client({
 });
 const fetchWithPayment = wrapFetchWithPayment(globalThis.fetch, client);
 try {
-  const res = await fetchWithPayment(purchaseUrl, { method: "POST" });
+  // The agent key proves this agent may pay for its company (x402 itself uses PAYMENT-SIGNATURE).
+  const res = await fetchWithPayment(purchaseUrl, { method: "POST", headers: { Authorization: `Bearer ${w.agent.key}` } });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   console.log(`  HTTP ${res.status} ${JSON.stringify(body)}`);
   if (res.status === 200 && body.outcome === "booked") {
@@ -320,5 +364,5 @@ try {
   }
   fail("Payment did not book the slot (see the finance exceptions in the console).");
 } catch (error) {
-  fail(`x402 payment failed: ${errorText(error)}. Is the x402 server running (npm run server) and the wallet funded (npm run buyer -- --faucet)?`);
+  fail(`x402 payment failed: ${errorText(error)}. Is x402 configured on the Convex deployment (CDP env vars) and the wallet funded (npm run buyer -- --faucet)?`);
 }

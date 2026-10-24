@@ -3,7 +3,18 @@ import { mutation, query } from "./_generated/server";
 import { creativeStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { scheduleBooking } from "./lib/scheduling";
-import { requireOperator } from "./lib/operator";
+import type { QueryCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
+import { requireCampaignAccess, requireCustomer, resolveWorkspace } from "./lib/tenancy";
+
+/** A host may review a campaign's creative once that campaign has quoted one of its screens. */
+async function campaignTouchesWorkspace(ctx: QueryCtx, campaignId: Id<"campaigns">, workspaceId: Id<"workspaces">) {
+  const quotes = await ctx.db
+    .query("quotes")
+    .withIndex("by_campaign", (q) => q.eq("campaignId", campaignId))
+    .take(100);
+  return quotes.some((q) => q.workspaceId === workspaceId);
+}
 
 const MAX_CREATIVE_BYTES = 50 * 1024 * 1024;
 const MAX_BOOKINGS_TO_SCHEDULE = 100;
@@ -17,6 +28,7 @@ export const generateUploadUrl = mutation({
   args: {},
   returns: v.string(),
   handler: async (ctx) => {
+    await requireCustomer(ctx);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -43,10 +55,7 @@ export const attach = mutation({
         message: "contentType must be image/* or video/*",
       });
     }
-    const campaign = await ctx.db.get(args.campaignId);
-    if (!campaign) {
-      throw new ConvexError({ code: "NOT_FOUND", message: "Campaign not found" });
-    }
+    const { campaign, customer } = await requireCampaignAccess(ctx, args.campaignId);
     if (campaign.creativeStatus === "approved") {
       throw new ConvexError({
         code: "CREATIVE_LOCKED",
@@ -75,7 +84,7 @@ export const attach = mutation({
     });
     await recordAudit(ctx, {
       traceId: `campaign:${args.campaignId}`,
-      actor: "advertiser",
+      actor: customer.actor,
       type: "creative.attached",
       subjectId: args.campaignId,
       reason: `Creative (${args.contentType}, ${file.size} bytes) submitted for review`,
@@ -95,6 +104,7 @@ export const review = mutation({
     campaignId: v.id("campaigns"),
     decision: v.union(v.literal("approved"), v.literal("rejected")),
     reason: v.string(),
+    workspaceId: v.optional(v.id("workspaces")),
   },
   returns: v.object({
     campaignId: v.id("campaigns"),
@@ -102,7 +112,13 @@ export const review = mutation({
     slotsScheduled: v.number(),
   }),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
+    const operator = await resolveWorkspace(ctx, args.workspaceId);
+    if (!(await campaignTouchesWorkspace(ctx, args.campaignId, operator.workspaceId))) {
+      throw new ConvexError({
+        code: "NOT_WORKSPACE_MEMBER",
+        message: "This campaign hasn't quoted any of your workspace's screens",
+      });
+    }
     const reason = args.reason.trim().slice(0, 500);
     if (reason.length === 0) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "reason is required" });
@@ -123,6 +139,7 @@ export const review = mutation({
       creativeReviewReason: reason,
     });
     await recordAudit(ctx, {
+      workspaceId: operator.workspaceId,
       traceId: `campaign:${args.campaignId}`,
       actor: operator.actor,
       type: args.decision === "approved" ? "creative.approved" : "creative.rejected",
@@ -141,6 +158,8 @@ export const review = mutation({
         )
         .take(MAX_BOOKINGS_TO_SCHEDULE);
       for (const booking of bookings) {
+        // Approval schedules this workspace's bookings only.
+        if (booking.workspaceId !== operator.workspaceId) continue;
         slotsScheduled += await scheduleBooking(ctx, booking, now, operator.actor);
       }
     }
@@ -150,7 +169,7 @@ export const review = mutation({
 
 /** Creatives awaiting operator review, oldest first (max 20), with a fresh file URL. */
 export const pendingReview = query({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       campaignId: v.id("campaigns"),
@@ -161,8 +180,8 @@ export const pendingReview = query({
       submittedAt: v.union(v.number(), v.null()),
     }),
   ),
-  handler: async (ctx) => {
-    await requireOperator(ctx);
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const campaigns = await ctx.db
       .query("campaigns")
       .withIndex("by_creativeStatus", (q) => q.eq("creativeStatus", "pending_review"))
@@ -170,6 +189,7 @@ export const pendingReview = query({
     const rows = [];
     for (const c of campaigns) {
       if (!c.creativeStorageId) continue;
+      if (!(await campaignTouchesWorkspace(ctx, c._id, me.workspaceId))) continue;
       const advertiser = await ctx.db.get(c.advertiserId);
       rows.push({
         campaignId: c._id,

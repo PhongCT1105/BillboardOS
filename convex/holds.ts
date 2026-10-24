@@ -18,8 +18,10 @@ import {
 import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH } from "./lib/constants";
 import { assertBoundedString } from "./lib/validators";
+import { requireCampaignAccess } from "./lib/tenancy";
+import { scheduleMatch } from "./watch";
 
-const holdResult = v.object({
+export const holdResult = v.object({
   holdId: v.id("holds"),
   quoteId: v.id("quotes"),
   slotIds: v.array(v.id("slots")),
@@ -32,7 +34,7 @@ const holdResult = v.object({
   replayed: v.boolean(),
 });
 
-function toResult(hold: Doc<"holds">, replayed: boolean) {
+export function toResult(hold: Doc<"holds">, replayed: boolean) {
   return {
     holdId: hold._id,
     quoteId: hold.quoteId,
@@ -63,7 +65,25 @@ export const create = mutation({
   handler: async (ctx, args) => {
     assertBoundedString("idempotencyKey", args.idempotencyKey, MAX_KEY_LENGTH);
     assertBoundedString("actor", args.actor, MAX_KEY_LENGTH);
+    const quoteForAccess = await ctx.db.get(args.quoteId);
+    if (!quoteForAccess) throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
+    // Only the quoting company may hold it.
+    const { customer } = await requireCampaignAccess(ctx, quoteForAccess.campaignId);
+    const actor = `${customer.actor} via ${args.actor}`;
+    return await createHoldCore(ctx, { quoteId: args.quoteId, idempotencyKey: args.idempotencyKey, actor });
+  },
+});
 
+/**
+ * Hold business rules, shared by the signed-in customer path and the agent
+ * API: idempotency, quote validity, then the exclusive hold. Callers must
+ * already have authorized the quote's campaign.
+ */
+export async function createHoldCore(
+  ctx: MutationCtx,
+  args: { quoteId: Id<"quotes">; idempotencyKey: string; actor: string; agentKeyId?: Id<"agentKeys"> },
+): Promise<ReturnType<typeof toResult>> {
+  {
     const existing = await ctx.db
       .query("holds")
       .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", args.idempotencyKey))
@@ -90,10 +110,10 @@ export const create = mutation({
       });
     }
 
-    const hold = await takeHold(ctx, quote, args.idempotencyKey, args.actor);
+    const hold = await takeHold(ctx, quote, args.idempotencyKey, args.actor, { agentKeyId: args.agentKeyId });
     return toResult(hold, false);
-  },
-});
+  }
+}
 
 /**
  * Take an exclusive hold on every slot of `quote` (all must be available and
@@ -104,7 +124,7 @@ export async function takeHold(
   quote: Doc<"quotes">,
   idempotencyKey: string,
   actor: string,
-  opts: { auctionId?: Id<"auctions"> } = {},
+  opts: { auctionId?: Id<"auctions">; agentKeyId?: Id<"agentKeys"> } = {},
 ): Promise<Doc<"holds">> {
   const now = Date.now();
   const slots: Doc<"slots">[] = [];
@@ -132,6 +152,7 @@ export async function takeHold(
 
   const expiresAt = now + HOLD_TTL_MS;
   const holdId = await ctx.db.insert("holds", {
+    workspaceId: quote.workspaceId,
     quoteId: quote._id,
     billboardId: quote.billboardId,
     slotIds: quote.slotIds,
@@ -143,6 +164,7 @@ export async function takeHold(
     actor,
     traceId: quote.traceId,
     auctionId: opts.auctionId,
+    agentKeyId: opts.agentKeyId,
   });
 
   for (const slot of slots) {
@@ -152,6 +174,7 @@ export async function takeHold(
   await ctx.scheduler.runAt(expiresAt, internal.holds.expire, { holdId });
 
   await recordAudit(ctx, {
+    workspaceId: quote.workspaceId,
     traceId: quote.traceId,
     actor,
     type: "slot.held",
@@ -182,7 +205,7 @@ export async function endHold(
 ): Promise<void> {
   await ctx.db.patch(hold._id, { status: outcome });
 
-  const reverted: string[] = [];
+  const reverted: Id<"slots">[] = [];
   for (const slotId of hold.slotIds) {
     const slot = await ctx.db.get(slotId);
     if (slot && slot.state === "held" && slot.holdId === hold._id) {
@@ -197,6 +220,7 @@ export async function endHold(
   if (quote && quote.status === "open" && Date.now() >= quote.expiresAt) {
     await ctx.db.patch(quote._id, { status: "expired" });
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor: "system",
       type: "quote.expired",
@@ -215,6 +239,7 @@ export async function endHold(
   }
 
   await recordAudit(ctx, {
+    workspaceId: hold.workspaceId,
     traceId: hold.traceId,
     actor,
     type: outcome === "expired" ? "hold.expired" : "hold.released",
@@ -223,7 +248,10 @@ export async function endHold(
     data: { quoteId: hold.quoteId, slotIds: reverted },
   });
   if (reverted.length > 0) {
+    // Back on sale: watch rules may alert again for these slots.
+    await scheduleMatch(ctx, { slotIds: reverted, reopened: true, reason: `hold ${outcome}` });
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor,
       type: "slot.released",
@@ -255,6 +283,9 @@ export const release = mutation({
     if (!hold) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Hold not found" });
     }
+    const holdQuote = await ctx.db.get(hold.quoteId);
+    if (!holdQuote) throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
+    await requireCampaignAccess(ctx, holdQuote.campaignId);
     if (hold.idempotencyKey !== args.idempotencyKey) {
       throw new ConvexError({ code: "FORBIDDEN", message: "Not the holder of this hold" });
     }
@@ -378,8 +409,12 @@ export const getForPayment = internalQuery({
       expiresAt: v.number(),
       status: holdStatus,
       payable: v.boolean(),
+      /** Workspace payout address for x402 (null = server default X402_PAY_TO). */
+      payTo: v.union(v.string(), v.null()),
       /** Correlates server logs with the audit trail (quote -> hold -> payment -> booking). */
       traceId: v.string(),
+      /** Host workspace selling the hold (ADR 0005 per-host purchase route checks it). */
+      workspaceId: v.union(v.id("workspaces"), v.null()),
     }),
   ),
   handler: async (ctx, args) => {
@@ -395,7 +430,9 @@ export const getForPayment = internalQuery({
       expiresAt: hold.expiresAt,
       status: hold.status,
       payable: hold.status === "active" && Date.now() < hold.expiresAt,
+      payTo: hold.workspaceId ? ((await ctx.db.get(hold.workspaceId))?.payoutAddress ?? null) : null,
       traceId: hold.traceId,
+      workspaceId: hold.workspaceId ?? null,
     };
   },
 });

@@ -25,6 +25,7 @@ export async function scheduleBooking(
   if (scheduled.length === 0) return 0;
   await ctx.db.patch(booking._id, { status: "scheduled" });
   await recordAudit(ctx, {
+    workspaceId: booking.workspaceId,
     traceId: booking.traceId,
     actor,
     type: "booking.scheduled",

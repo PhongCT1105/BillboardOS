@@ -69,7 +69,11 @@ function toCandidate(inv: Doc<"invoices">): InvoiceCandidate<Id<"invoices">, Id<
  * Run the AR clerk over unmatched bank lines (oldest first, max 50), then
  * file refund requests for booking-side payment exceptions that have none.
  */
-export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: string) {
+export async function runReconciliationBatch(
+  ctx: MutationCtx,
+  workspaceId: Id<"workspaces">,
+  triggeredBy: string,
+) {
   const summary = {
     processed: 0,
     matched: 0,
@@ -96,7 +100,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
 
   const lines = await ctx.db
     .query("bankTransactions")
-    .withIndex("by_status_and_postedAt", (q) => q.eq("status", "unmatched"))
+    .withIndex("by_workspace_and_status_and_postedAt", (q) => q.eq("workspaceId", workspaceId).eq("status", "unmatched"))
     .take(MAX_LINES_PER_RUN);
 
   for (const line of lines) {
@@ -109,7 +113,8 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
         .query("invoices")
         .withIndex("by_number", (q) => q.eq("number", number))
         .first();
-      if (inv) referenced.push(inv);
+      // Only this workspace's invoices: a bank line never pays another host's invoice.
+      if (inv && inv.workspaceId === workspaceId) referenced.push(inv);
     }
 
     // Open invoices of the identified payer.
@@ -123,7 +128,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
             .withIndex("by_advertiser_and_status", (q) =>
               q.eq("advertiserId", payer.id).eq("status", status),
             )
-            .take(25)),
+            .take(25)).filter((i) => i.workspaceId === workspaceId),
         );
       }
     }
@@ -138,7 +143,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
       )
       .take(100);
     const priorLines = nearby
-      .filter((p) => p._id !== line._id && p.status !== "unmatched" && !p.duplicateOf)
+      .filter((p) => p.workspaceId === workspaceId && p._id !== line._id && p.status !== "unmatched" && !p.duplicateOf)
       .map((p) => ({
         id: p._id,
         externalId: p.externalId,
@@ -205,6 +210,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
       const exceptionId = await openFinanceException(
         ctx,
         {
+          workspaceId,
           kind: ex.kind,
           expectedMinor: ex.expectedMinor,
           observedMinor: ex.observedMinor,
@@ -224,6 +230,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
           const r = await createApproval(
             ctx,
             {
+              workspaceId,
               action: "refund",
               subjectKind: "bank_transaction",
               subjectId: line._id,
@@ -240,6 +247,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
     }
 
     await recordAudit(ctx, {
+      workspaceId,
       traceId,
       actor: AR_AGENT,
       type: decision.outcome === "needs_review" ? "reconciliation.needs_review" : "reconciliation.applied",
@@ -269,8 +277,9 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
 
   // Hand-off: the collections seat re-plans right away on the updated balances.
   if (summary.processed > 0) {
-    await ctx.scheduler.runAfter(0, internal.collections.plan, {});
+    await ctx.scheduler.runAfter(0, internal.collections.plan, { workspaceId });
     await recordAudit(ctx, {
+      workspaceId,
       traceId: "handoff:ar->collections",
       actor: AR_AGENT,
       type: "reconciliation.handoff",
@@ -283,7 +292,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
   // Booking-side payment exceptions (x402/manual) with no refund request yet.
   const paymentExceptions = await ctx.db
     .query("financeExceptions")
-    .withIndex("by_status", (q) => q.eq("status", "open"))
+    .withIndex("by_workspace_and_status", (q) => q.eq("workspaceId", workspaceId).eq("status", "open"))
     .order("desc")
     .take(MAX_PAYMENT_EXCEPTIONS_SWEPT);
   for (const ex of paymentExceptions) {
@@ -299,6 +308,7 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
     await createApproval(
       ctx,
       {
+        workspaceId,
         action: "refund",
         subjectKind: "payment",
         subjectId: payment._id,
@@ -315,9 +325,33 @@ export async function runReconciliationBatch(ctx: MutationCtx, triggeredBy: stri
   return summary;
 }
 
-/** Cron/agent entry point for the AR clerk. */
+/** Cron/agent entry point for the AR clerk: one workspace, or every workspace (max 20). */
 export const run = internalMutation({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: reconciliationSummary,
-  handler: async (ctx) => runReconciliationBatch(ctx, AR_AGENT),
+  handler: async (ctx, args) => {
+    const ids = args.workspaceId ? [args.workspaceId] : (await ctx.db.query("workspaces").take(20)).map((w) => w._id);
+    const total = {
+      processed: 0,
+      matched: 0,
+      partiallyApplied: 0,
+      needsReview: 0,
+      applicationsCreated: 0,
+      exceptionsOpened: 0,
+      approvalsRequested: 0,
+      lines: [] as Awaited<ReturnType<typeof runReconciliationBatch>>["lines"],
+    };
+    for (const id of ids) {
+      const r = await runReconciliationBatch(ctx, id, AR_AGENT);
+      total.processed += r.processed;
+      total.matched += r.matched;
+      total.partiallyApplied += r.partiallyApplied;
+      total.needsReview += r.needsReview;
+      total.applicationsCreated += r.applicationsCreated;
+      total.exceptionsOpened += r.exceptionsOpened;
+      total.approvalsRequested += r.approvalsRequested;
+      total.lines.push(...r.lines);
+    }
+    return total;
+  },
 });

@@ -3,7 +3,7 @@ import { ConvexError } from "convex/values";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { modules, signedInOperator } from "./test.setup";
+import { joinCompanies, modules, signedInOperator } from "./test.setup";
 import { HOLD_TTL_MS } from "./lib/constants";
 
 // Same clock as booking.test.ts: 09:07 PDT, first seeded slot at 09:15 PDT.
@@ -22,6 +22,8 @@ afterEach(() => {
 async function setup() {
   const t = await signedInOperator(convexTest(schema, modules));
   const seed = await t.mutation(internal.seed.demo, {});
+  // Quotes and holds are for the campaign's own company: act for the seeded advertisers too.
+  await joinCompanies(t);
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
     from: START,

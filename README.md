@@ -49,10 +49,13 @@ npm run dev:convex              # Convex dev deployment (writes .env.local)
 npm run seed                    # billboard, slots, advertisers, campaigns, conference event, Nvidia campaign
 npx convex run seed:finance     # invoices + bank feed with planted errors
 
-npm run dev                     # web app at http://localhost:5173
-npm run server                  # x402 payment server at http://localhost:4021
+npm run dev                     # web app at http://localhost:5173 (payments and seller agents run on Convex)
+npm run deploy:web              # serve the built site from the Convex deployment at https://<deployment>.convex.site
+npx convex run seed:demoAgentKeys  # prints demo agent keys once; put them in .env
 npm run buyer -- --hold-only    # advertiser buying agent (pays when CDP wallet is funded)
 npm run auction:demo -- --no-pay  # two buyer agents compete in a live auction for a hot slot
+npm run a2a:demo                # Nvidia's agent buys a report from the host's seller agent, negotiates, pays over x402
+npm run webhook:listen          # local receiver for signed watch-rule alerts (needs a public tunnel URL)
 
 npm test                        # convex-test suite
 
@@ -70,6 +73,8 @@ npm run typecheck               # web, convex and server
 | `#/book` | Advertiser booking: quote, hold, creative upload |
 | `#/player/<billboardId>` | Fullscreen billboard screen |
 
+The x402 payment endpoints, seller agents (`/a2a/hosts/<workspaceId>/...`) and the agent API (`/api/agent/...`) are served by Convex at `https://<deployment>.convex.site`. Payments need `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET` and `X402_PAY_TO` (or `CDP_WALLET_SECRET`) set with `npx convex env set`.
+
 **Operator accounts.** The console, Finance and Sensor pages need an operator sign-in; booking and the screen are public. The **first account created on a deployment becomes the operator**. Teammates create an account, then an operator grants them with `operators.grant` (by email). Demoing separation of duties on operator-filed requests needs two operator accounts; agent-filed requests (for example `agent:ar` refunds) can be approved by any operator.
 
 Convex reads its own environment, not `.env`: push server-side keys with `npx convex env set NAME value`.
@@ -86,6 +91,8 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Ascending auctions, proxy bidding, soft close, winner default | **Real** (Convex, 100 tests); the two competing buyer agents are **scripted** demo agents |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
+| Agent-to-agent commerce: seller agent per host, paid audience reports, negotiation, x402 to the host's wallet | **Real** protocol and policies; the demo buyer is a **scripted** agent; paid runs need a funded wallet |
+| Watch rules, alerts, signed agent webhooks | **Real** |
 | Manual payment button in the console | **Simulated** fallback, labeled "MANUAL (simulated)" in the audit log |
 | Invoices, reconciliation, approvals, collections planning | **Real logic** on **simulated** fixture data with planted errors and an answer key |
 | Bank feed | **Simulated** fixture today; Capital One Nessie sandbox next |

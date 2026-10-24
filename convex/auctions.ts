@@ -1,11 +1,11 @@
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { auctionStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH, QUOTE_TTL_MS } from "./lib/constants";
-import { requireOperator } from "./lib/operator";
+import { requireCampaignAccess, requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
 import { computeScreenPrice } from "./lib/screenPrice";
 import { loadTrailingAudience } from "./lib/audienceWindow";
 import { effectiveBaseline } from "./lib/pricing";
@@ -26,6 +26,7 @@ import {
   resolveProxy,
 } from "./lib/auction";
 import { takeHold } from "./holds";
+import { scheduleMatch } from "./watch";
 
 const MAX_PARTICIPANTS = 50;
 const MAX_BIDS_READ = 200;
@@ -78,6 +79,7 @@ async function openAuction(
   const { price } = await computeScreenPrice(ctx.db, billboard, slots, now);
   const traceId = `auction_${crypto.randomUUID()}`;
   const auctionId = await ctx.db.insert("auctions", {
+    workspaceId: billboard.workspaceId,
     billboardId,
     slotIds: input.slotIds,
     reserveMinor: price.amountMinor,
@@ -95,7 +97,9 @@ async function openAuction(
   });
   for (const slot of slots) await ctx.db.patch(slot._id, { auctionId });
   await ctx.scheduler.runAt(endsAt, internal.auctions.close, { auctionId });
+  await scheduleMatch(ctx, { slotIds: input.slotIds, reason: "auction opened" });
   await recordAudit(ctx, {
+    workspaceId: billboard.workspaceId,
     traceId,
     actor: input.openedBy,
     type: "auction.opened",
@@ -115,7 +119,9 @@ export const open = mutation({
   },
   returns: v.object({ auctionId: v.id("auctions") }),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
+    const firstSlot = args.slotIds[0] ? await ctx.db.get(args.slotIds[0]) : null;
+    if (!firstSlot) throw new ConvexError({ code: "NOT_FOUND", message: "Slot not found" });
+    const operator = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, firstSlot.billboardId));
     const minutes = args.durationMinutes ?? DEFAULT_DURATION_MS / 60_000;
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 30) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "durationMinutes must be between 1 and 30" });
@@ -222,6 +228,7 @@ async function authBidder(
   campaignId: Id<"campaigns">,
   bidderKey: string,
 ): Promise<{ auction: Doc<"auctions">; participant: Doc<"auctionParticipants">; campaign: Doc<"campaigns"> }> {
+  // Callers authorize the campaign first (session: requireCampaignAccess; agent API: key + allowlist).
   const auction = await ctx.db.get(auctionId);
   if (!auction) throw new ConvexError({ code: "NOT_FOUND", message: "Auction not found" });
   const participant = await ctx.db
@@ -306,6 +313,7 @@ async function reprice(ctx: MutationCtx, auctionId: Id<"auctions">, now: number,
       patch.endsAt = newEnds;
       patch.extensions = auction.extensions + 1;
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "system",
         type: "auction.extended",
@@ -318,6 +326,7 @@ async function reprice(ctx: MutationCtx, auctionId: Id<"auctions">, now: number,
   if (changed) {
     const leader = parts.find((p) => p._id === res.leaderId);
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor,
       type: "auction.bid",
@@ -358,126 +367,148 @@ async function bidResultFor(ctx: QueryCtx, auction: Doc<"auctions">, participant
  * bid must present (stored hashed). Pass your own `clientKey` to make joining
  * idempotent; without it the key is generated and shown only once.
  */
-export const join = mutation({
-  args: { auctionId: v.id("auctions"), campaignId: v.id("campaigns"), clientKey: v.optional(v.string()) },
-  returns: v.object({
+export const joinResult = v.object({
     participantId: v.id("auctionParticipants"),
     bidderLabel: v.string(),
     bidderKey: v.string(),
     reserveMinor: v.number(),
     minNextBidMinor: v.number(),
     endsAt: v.number(),
-  }),
+  });
+
+export const join = mutation({
+  args: { auctionId: v.id("auctions"), campaignId: v.id("campaigns"), clientKey: v.optional(v.string()) },
+  returns: joinResult,
   handler: async (ctx, args) => {
-    const now = Date.now();
-    const auction = await ctx.db.get(args.auctionId);
-    if (!auction) throw new ConvexError({ code: "NOT_FOUND", message: "Auction not found" });
-    assertOpen(auction, now);
-    const campaign = await ctx.db.get(args.campaignId);
-    if (!campaign) throw new ConvexError({ code: "NOT_FOUND", message: "Campaign not found" });
-    if (campaign.status === "completed" || campaign.status === "cancelled") {
-      throw new ConvexError({ code: "CAMPAIGN_CLOSED", message: `Campaign is ${campaign.status}` });
-    }
-    if (campaign.budgetMinor < auction.reserveMinor) {
-      throw new ConvexError({
-        code: "BUDGET_EXCEEDED",
-        message: `Campaign budget ${usd(campaign.budgetMinor)} is below the reserve ${usd(auction.reserveMinor)}`,
-      });
-    }
-    if (args.clientKey !== undefined && (args.clientKey.length < 16 || args.clientKey.length > MAX_KEY_LENGTH)) {
-      throw new ConvexError({ code: "INVALID_INPUT", message: `clientKey must be 16..${MAX_KEY_LENGTH} characters` });
-    }
-    const key = args.clientKey ?? `bk_${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
-    const keyHash = await hashKey(key);
-    const existing = await ctx.db
-      .query("auctionParticipants")
-      .withIndex("by_auction_and_campaign", (q) => q.eq("auctionId", args.auctionId).eq("campaignId", args.campaignId))
-      .unique();
-    const nextMin = minNextBid(
-      { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
-      auction.incrementRule,
-    );
-    if (existing) {
-      if (existing.keyHash !== keyHash) {
-        throw new ConvexError({ code: "ALREADY_JOINED", message: "This campaign already joined with a different key" });
-      }
-      return {
-        participantId: existing._id,
-        bidderLabel: existing.label,
-        bidderKey: key,
-        reserveMinor: auction.reserveMinor,
-        minNextBidMinor: nextMin,
-        endsAt: auction.endsAt,
-      };
-    }
-    const count = (await participantsOf(ctx.db, args.auctionId)).length;
-    if (count >= MAX_PARTICIPANTS) throw new ConvexError({ code: "AUCTION_FULL", message: "Too many bidders" });
-    const label = bidderLabel(count);
-    const participantId = await ctx.db.insert("auctionParticipants", {
-      auctionId: args.auctionId,
-      campaignId: args.campaignId,
-      label,
-      keyHash,
-      manualTopMinor: 0,
-      effectiveMaxMinor: 0,
-      maxSetAt: now,
+    await requireCampaignAccess(ctx, args.campaignId);
+    return await joinCore(ctx, args);
+  },
+});
+
+/** Shared by the signed-in customer path and the agent API (campaign already authorized). */
+export async function joinCore(
+  ctx: MutationCtx,
+  args: { auctionId: Id<"auctions">; campaignId: Id<"campaigns">; clientKey?: string; agentKeyId?: Id<"agentKeys"> },
+): Promise<Infer<typeof joinResult>> {
+  const now = Date.now();
+  const auction = await ctx.db.get(args.auctionId);
+  if (!auction) throw new ConvexError({ code: "NOT_FOUND", message: "Auction not found" });
+  assertOpen(auction, now);
+  const campaign = await ctx.db.get(args.campaignId);
+  if (!campaign) throw new ConvexError({ code: "NOT_FOUND", message: "Campaign not found" });
+  if (campaign.status === "completed" || campaign.status === "cancelled") {
+    throw new ConvexError({ code: "CAMPAIGN_CLOSED", message: `Campaign is ${campaign.status}` });
+  }
+  if (campaign.budgetMinor < auction.reserveMinor) {
+    throw new ConvexError({
+      code: "BUDGET_EXCEEDED",
+      message: `Campaign budget ${usd(campaign.budgetMinor)} is below the reserve ${usd(auction.reserveMinor)}`,
     });
-    await recordAudit(ctx, {
-      traceId: auction.traceId,
-      actor: `campaign:${args.campaignId}`,
-      type: "auction.joined",
-      subjectId: args.auctionId,
-      reason: `${label} joined`,
-    });
+  }
+  if (args.clientKey !== undefined && (args.clientKey.length < 16 || args.clientKey.length > MAX_KEY_LENGTH)) {
+    throw new ConvexError({ code: "INVALID_INPUT", message: `clientKey must be 16..${MAX_KEY_LENGTH} characters` });
+  }
+  const key = args.clientKey ?? `bk_${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
+  const keyHash = await hashKey(key);
+  const existing = await ctx.db
+    .query("auctionParticipants")
+    .withIndex("by_auction_and_campaign", (q) => q.eq("auctionId", args.auctionId).eq("campaignId", args.campaignId))
+    .unique();
+  const nextMin = minNextBid(
+    { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
+    auction.incrementRule,
+  );
+  if (existing) {
+    if (existing.keyHash !== keyHash) {
+      throw new ConvexError({ code: "ALREADY_JOINED", message: "This campaign already joined with a different key" });
+    }
     return {
-      participantId,
-      bidderLabel: label,
+      participantId: existing._id,
+      bidderLabel: existing.label,
       bidderKey: key,
       reserveMinor: auction.reserveMinor,
       minNextBidMinor: nextMin,
       endsAt: auction.endsAt,
     };
-  },
-});
+  }
+  const count = (await participantsOf(ctx.db, args.auctionId)).length;
+  if (count >= MAX_PARTICIPANTS) throw new ConvexError({ code: "AUCTION_FULL", message: "Too many bidders" });
+  const label = bidderLabel(count);
+  const participantId = await ctx.db.insert("auctionParticipants", {
+    auctionId: args.auctionId,
+    campaignId: args.campaignId,
+    label,
+    keyHash,
+    agentKeyId: args.agentKeyId,
+    manualTopMinor: 0,
+    effectiveMaxMinor: 0,
+    maxSetAt: now,
+  });
+  await recordAudit(ctx, {
+    workspaceId: auction.workspaceId,
+    traceId: auction.traceId,
+    actor: `campaign:${args.campaignId}`,
+    type: "auction.joined",
+    subjectId: args.auctionId,
+    reason: `${label} joined`,
+  });
+  return {
+    participantId,
+    bidderLabel: label,
+    bidderKey: key,
+    reserveMinor: auction.reserveMinor,
+    minNextBidMinor: nextMin,
+    endsAt: auction.endsAt,
+  };
+}
 
 /** Place a public bid: must beat the current price by the increment (5%, >= $1) and stay within budget. */
 export const bid = mutation({
   args: { auctionId: v.id("auctions"), campaignId: v.id("campaigns"), bidderKey: v.string(), amountMinor: v.number() },
   returns: bidResult,
   handler: async (ctx, args) => {
-    const now = Date.now();
-    const { auction, participant, campaign } = await authBidder(ctx, args.auctionId, args.campaignId, args.bidderKey);
-    assertOpen(auction, now);
-    assertAmount("Bid", args.amountMinor, campaign.budgetMinor);
-    if (auction.leaderParticipantId === participant._id) {
-      throw new ConvexError({ code: "ALREADY_LEADING", message: "You are already leading; raise your auto-bid instead" });
-    }
-    const minNext = minNextBid(
-      { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
-      auction.incrementRule,
-    );
-    if (args.amountMinor < minNext) {
-      throw new ConvexError({ code: "BID_TOO_LOW", message: `Bid at least ${usd(minNext)}`, minNextBidMinor: minNext });
-    }
-    await ctx.db.insert("bids", {
-      auctionId: auction._id,
-      campaignId: args.campaignId,
-      participantId: participant._id,
-      bidderLabel: participant.label,
-      amountMinor: args.amountMinor,
-      isAuto: false,
-      createdAt: now,
-    });
-    const effective = Math.min(campaign.budgetMinor, Math.max(participant.effectiveMaxMinor, args.amountMinor));
-    await ctx.db.patch(participant._id, {
-      manualTopMinor: Math.max(participant.manualTopMinor, args.amountMinor),
-      effectiveMaxMinor: effective,
-      maxSetAt: effective > participant.effectiveMaxMinor ? now : participant.maxSetAt,
-    });
-    const updated = await reprice(ctx, auction._id, now, `${participant.label} (campaign ${args.campaignId})`);
-    return await bidResultFor(ctx, updated, participant._id);
+    await requireCampaignAccess(ctx, args.campaignId);
+    return await bidCore(ctx, args);
   },
 });
+
+/** Shared by the signed-in customer path and the agent API (campaign already authorized). */
+export async function bidCore(
+  ctx: MutationCtx,
+  args: { auctionId: Id<"auctions">; campaignId: Id<"campaigns">; bidderKey: string; amountMinor: number },
+): Promise<Infer<typeof bidResult>> {
+  const now = Date.now();
+  const { auction, participant, campaign } = await authBidder(ctx, args.auctionId, args.campaignId, args.bidderKey);
+  assertOpen(auction, now);
+  assertAmount("Bid", args.amountMinor, campaign.budgetMinor);
+  if (auction.leaderParticipantId === participant._id) {
+    throw new ConvexError({ code: "ALREADY_LEADING", message: "You are already leading; raise your auto-bid instead" });
+  }
+  const minNext = minNextBid(
+    { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
+    auction.incrementRule,
+  );
+  if (args.amountMinor < minNext) {
+    throw new ConvexError({ code: "BID_TOO_LOW", message: `Bid at least ${usd(minNext)}`, minNextBidMinor: minNext });
+  }
+  await ctx.db.insert("bids", {
+    auctionId: auction._id,
+    campaignId: args.campaignId,
+    participantId: participant._id,
+    bidderLabel: participant.label,
+    amountMinor: args.amountMinor,
+    isAuto: false,
+    createdAt: now,
+  });
+  const effective = Math.min(campaign.budgetMinor, Math.max(participant.effectiveMaxMinor, args.amountMinor));
+  await ctx.db.patch(participant._id, {
+    manualTopMinor: Math.max(participant.manualTopMinor, args.amountMinor),
+    effectiveMaxMinor: effective,
+    maxSetAt: effective > participant.effectiveMaxMinor ? now : participant.maxSetAt,
+  });
+  const updated = await reprice(ctx, auction._id, now, `${participant.label} (campaign ${args.campaignId})`);
+  return await bidResultFor(ctx, updated, participant._id);
+}
 
 /**
  * Set or change your private auto-bid maximum. The system bids for you, one
@@ -488,55 +519,65 @@ export const setAutoBid = mutation({
   args: { auctionId: v.id("auctions"), campaignId: v.id("campaigns"), bidderKey: v.string(), maxMinor: v.number() },
   returns: bidResult,
   handler: async (ctx, args) => {
-    const now = Date.now();
-    const { auction, participant, campaign } = await authBidder(ctx, args.auctionId, args.campaignId, args.bidderKey);
-    assertOpen(auction, now);
-    assertAmount("Auto-bid maximum", args.maxMinor, campaign.budgetMinor);
-    const leading = auction.leaderParticipantId === participant._id;
-    const floor = leading
-      ? auction.currentMinor
-      : minNextBid(
-          { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
-          auction.incrementRule,
-        );
-    if (args.maxMinor < floor) {
-      throw new ConvexError({
-        code: "AUTO_BID_TOO_LOW",
-        message: leading ? `You lead at ${usd(floor)}; your maximum can't be lower` : `Set at least ${usd(floor)}`,
-        minMinor: floor,
-      });
-    }
-    const existing = await ctx.db
-      .query("autoBids")
-      .withIndex("by_auction_and_campaign", (q) => q.eq("auctionId", auction._id).eq("campaignId", args.campaignId))
-      .unique();
-    if (existing) await ctx.db.patch(existing._id, { maxMinor: args.maxMinor, updatedAt: now });
-    else {
-      await ctx.db.insert("autoBids", {
-        auctionId: auction._id,
-        campaignId: args.campaignId,
-        participantId: participant._id,
-        maxMinor: args.maxMinor,
-        updatedAt: now,
-      });
-    }
-    const effective = Math.min(campaign.budgetMinor, Math.max(participant.manualTopMinor, args.maxMinor));
-    await ctx.db.patch(participant._id, {
-      effectiveMaxMinor: effective,
-      maxSetAt: effective > participant.effectiveMaxMinor ? now : participant.maxSetAt,
-    });
-    await recordAudit(ctx, {
-      traceId: auction.traceId,
-      actor: `campaign:${args.campaignId}`,
-      type: "auction.auto_bid_set",
-      subjectId: auction._id,
-      // The maximum itself stays private, even in the audit text.
-      reason: `${participant.label} ${existing ? "changed" : "set"} an auto-bid`,
-    });
-    const updated = await reprice(ctx, auction._id, now, `${participant.label} (auto)`);
-    return await bidResultFor(ctx, updated, participant._id);
+    await requireCampaignAccess(ctx, args.campaignId);
+    return await setAutoBidCore(ctx, args);
   },
 });
+
+/** Shared by the signed-in customer path and the agent API (campaign already authorized). */
+export async function setAutoBidCore(
+  ctx: MutationCtx,
+  args: { auctionId: Id<"auctions">; campaignId: Id<"campaigns">; bidderKey: string; maxMinor: number },
+): Promise<Infer<typeof bidResult>> {
+  const now = Date.now();
+  const { auction, participant, campaign } = await authBidder(ctx, args.auctionId, args.campaignId, args.bidderKey);
+  assertOpen(auction, now);
+  assertAmount("Auto-bid maximum", args.maxMinor, campaign.budgetMinor);
+  const leading = auction.leaderParticipantId === participant._id;
+  const floor = leading
+    ? auction.currentMinor
+    : minNextBid(
+        { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
+        auction.incrementRule,
+      );
+  if (args.maxMinor < floor) {
+    throw new ConvexError({
+      code: "AUTO_BID_TOO_LOW",
+      message: leading ? `You lead at ${usd(floor)}; your maximum can't be lower` : `Set at least ${usd(floor)}`,
+      minMinor: floor,
+    });
+  }
+  const existing = await ctx.db
+    .query("autoBids")
+    .withIndex("by_auction_and_campaign", (q) => q.eq("auctionId", auction._id).eq("campaignId", args.campaignId))
+    .unique();
+  if (existing) await ctx.db.patch(existing._id, { maxMinor: args.maxMinor, updatedAt: now });
+  else {
+    await ctx.db.insert("autoBids", {
+      auctionId: auction._id,
+      campaignId: args.campaignId,
+      participantId: participant._id,
+      maxMinor: args.maxMinor,
+      updatedAt: now,
+    });
+  }
+  const effective = Math.min(campaign.budgetMinor, Math.max(participant.manualTopMinor, args.maxMinor));
+  await ctx.db.patch(participant._id, {
+    effectiveMaxMinor: effective,
+    maxSetAt: effective > participant.effectiveMaxMinor ? now : participant.maxSetAt,
+  });
+  await recordAudit(ctx, {
+    workspaceId: auction.workspaceId,
+    traceId: auction.traceId,
+    actor: `campaign:${args.campaignId}`,
+    type: "auction.auto_bid_set",
+    subjectId: auction._id,
+    // The maximum itself stays private, even in the audit text.
+    reason: `${participant.label} ${existing ? "changed" : "set"} an auto-bid`,
+  });
+  const updated = await reprice(ctx, auction._id, now, `${participant.label} (auto)`);
+  return await bidResultFor(ctx, updated, participant._id);
+}
 
 // ---------------------------------------------------------------------------
 // Closing, award, default
@@ -552,6 +593,7 @@ async function award(
 ): Promise<Doc<"holds"> | null> {
   const now = Date.now();
   const quoteId = await ctx.db.insert("quotes", {
+    workspaceId: auction.workspaceId,
     campaignId: participant.campaignId,
     billboardId: auction.billboardId,
     slotIds: auction.slotIds,
@@ -572,6 +614,7 @@ async function award(
   try {
     const hold = await takeHold(ctx, (await ctx.db.get(quoteId))!, holdKey, `auction:${participant.label}`, {
       auctionId: auction._id,
+      agentKeyId: participant.agentKeyId,
     });
     await ctx.db.patch(participant._id, { holdKey });
     await ctx.db.patch(auction._id, {
@@ -606,6 +649,7 @@ export const close = internalMutation({
     if (!leader) {
       await ctx.db.patch(auction._id, { status: "failed", outcomeNote: "No bids at or above the reserve" });
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "system",
         type: "auction.failed",
@@ -618,6 +662,7 @@ export const close = internalMutation({
     if (!hold) {
       await ctx.db.patch(auction._id, { status: "failed", outcomeNote: "Slot no longer available at close" });
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "system",
         type: "auction.failed",
@@ -627,6 +672,7 @@ export const close = internalMutation({
       return null;
     }
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: "system",
       type: "auction.closed",
@@ -656,6 +702,7 @@ export const handleWinnerDefault = internalMutation({
     const defaulted = [...(auction.defaultedParticipantIds ?? []), defaulter._id];
     await ctx.db.patch(auction._id, { defaultedParticipantIds: defaulted });
     await ctx.db.insert("financeExceptions", {
+      workspaceId: auction.workspaceId,
       kind: "winner_default",
       status: "open",
       holdId: hold._id,
@@ -667,6 +714,7 @@ export const handleWinnerDefault = internalMutation({
       nextAction: "Slot offered to the runner-up at their last bid. Review the defaulting buyer's terms before they bid again.",
     });
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: "system",
       type: "auction.winner_default",
@@ -685,6 +733,7 @@ export const handleWinnerDefault = internalMutation({
       const offered = await award(ctx, auction, p, last.amountMinor, "runner-up");
       if (!offered) break;
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "agent:seller",
         type: "auction.runner_up_offered",
@@ -696,6 +745,7 @@ export const handleWinnerDefault = internalMutation({
     }
     await ctx.db.patch(auction._id, { status: "failed", outcomeNote: "Winner defaulted and no runner-up was available" });
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: "system",
       type: "auction.failed",
@@ -713,6 +763,7 @@ export async function markAuctionSettled(ctx: MutationCtx, hold: Doc<"holds">, b
   if (!auction || auction.winnerHoldId !== hold._id || auction.status !== "closed") return;
   await ctx.db.patch(auction._id, { status: "settled", outcomeNote: `Paid and booked (${bookingId})` });
   await recordAudit(ctx, {
+    workspaceId: auction.workspaceId,
     traceId: auction.traceId,
     actor: "system",
     type: "auction.settled",
@@ -840,9 +891,7 @@ export const forSlot = query({
 });
 
 /** A bidder's own view: whether it leads, its own maximum, and its hold if it won. */
-export const myStatus = query({
-  args: { auctionId: v.id("auctions"), campaignId: v.id("campaigns"), bidderKey: v.string() },
-  returns: v.object({
+export const myStatusResult = v.object({
     bidderLabel: v.string(),
     status: auctionStatus,
     outcome: v.union(
@@ -863,33 +912,46 @@ export const myStatus = query({
     holdKey: v.union(v.string(), v.null()),
     holdExpiresAt: v.union(v.number(), v.null()),
     amountMinor: v.union(v.number(), v.null()),
-  }),
+  });
+
+export const myStatus = query({
+  args: { auctionId: v.id("auctions"), campaignId: v.id("campaigns"), bidderKey: v.string() },
+  returns: myStatusResult,
   handler: async (ctx, args) => {
-    const { auction, participant } = await authBidder(ctx, args.auctionId, args.campaignId, args.bidderKey);
-    const last = await lastBidOf(ctx.db, auction._id, participant._id);
-    const isAwarded = auction.winnerParticipantId === participant._id;
-    const hold = isAwarded && auction.winnerHoldId ? await ctx.db.get(auction.winnerHoldId) : null;
-    let outcome: "leading" | "outbid" | "not_bidding" | "won" | "lost" | "defaulted" | "failed";
-    if (auction.defaultedParticipantIds?.includes(participant._id)) outcome = "defaulted";
-    else if (auction.status === "open") outcome = auction.leaderParticipantId === participant._id ? "leading" : last ? "outbid" : "not_bidding";
-    else if (auction.status === "failed") outcome = "failed";
-    else outcome = isAwarded ? "won" : "lost";
-    return {
-      bidderLabel: participant.label,
-      status: auction.status,
-      outcome,
-      myMaxMinor: participant.effectiveMaxMinor,
-      myLastBidMinor: last?.amountMinor ?? null,
-      currentMinor: auction.currentMinor,
-      minNextBidMinor: minNextBid(
-        { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
-        auction.incrementRule,
-      ),
-      endsAt: auction.endsAt,
-      holdId: hold?._id ?? null,
-      holdKey: hold ? (participant.holdKey ?? null) : null,
-      holdExpiresAt: hold?.expiresAt ?? null,
-      amountMinor: isAwarded ? (auction.winningBidMinor ?? null) : null,
-    };
+    await requireCampaignAccess(ctx, args.campaignId);
+    return await myStatusCore(ctx, args);
   },
 });
+
+/** Shared by the signed-in customer path and the agent API (campaign already authorized). */
+export async function myStatusCore(
+  ctx: QueryCtx,
+  args: { auctionId: Id<"auctions">; campaignId: Id<"campaigns">; bidderKey: string },
+): Promise<Infer<typeof myStatusResult>> {
+  const { auction, participant } = await authBidder(ctx, args.auctionId, args.campaignId, args.bidderKey);
+  const last = await lastBidOf(ctx.db, auction._id, participant._id);
+  const isAwarded = auction.winnerParticipantId === participant._id;
+  const hold = isAwarded && auction.winnerHoldId ? await ctx.db.get(auction.winnerHoldId) : null;
+  let outcome: "leading" | "outbid" | "not_bidding" | "won" | "lost" | "defaulted" | "failed";
+  if (auction.defaultedParticipantIds?.includes(participant._id)) outcome = "defaulted";
+  else if (auction.status === "open") outcome = auction.leaderParticipantId === participant._id ? "leading" : last ? "outbid" : "not_bidding";
+  else if (auction.status === "failed") outcome = "failed";
+  else outcome = isAwarded ? "won" : "lost";
+  return {
+    bidderLabel: participant.label,
+    status: auction.status,
+    outcome,
+    myMaxMinor: participant.effectiveMaxMinor,
+    myLastBidMinor: last?.amountMinor ?? null,
+    currentMinor: auction.currentMinor,
+    minNextBidMinor: minNextBid(
+      { hasLeader: !!auction.leaderParticipantId, currentMinor: auction.currentMinor, reserveMinor: auction.reserveMinor },
+      auction.incrementRule,
+    ),
+    endsAt: auction.endsAt,
+    holdId: hold?._id ?? null,
+    holdKey: hold ? (participant.holdKey ?? null) : null,
+    holdExpiresAt: hold?.expiresAt ?? null,
+    amountMinor: isAwarded ? (auction.winningBidMinor ?? null) : null,
+  };
+}

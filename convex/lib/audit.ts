@@ -10,6 +10,8 @@ export type AuditData = Infer<typeof auditData>;
 export async function recordAudit(
   ctx: MutationCtx,
   event: {
+    /** Host workspace the event belongs to (omitted for platform-level events). */
+    workspaceId?: Id<"workspaces">;
     traceId: string;
     actor: string;
     type: AuditEventType;

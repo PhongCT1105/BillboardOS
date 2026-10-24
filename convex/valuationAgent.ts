@@ -131,14 +131,13 @@ export const assessCompany = internalAction({
     force: v.optional(v.boolean()),
   },
   returns: v.object({
-    method: v.union(v.literal("claude"), v.literal("heuristic"), v.literal("skipped_override")),
+    method: v.union(v.literal("claude"), v.literal("heuristic")),
     multiplier: v.union(v.number(), v.null()),
   }),
   handler: async (ctx, args) => {
-    const { inputs, inputsSummary, hasActiveOverride } = await ctx.runQuery(internal.valuation.gatherInputs, {
+    const { inputs, inputsSummary } = await ctx.runQuery(internal.valuation.gatherInputs, {
       advertiserId: args.advertiserId,
     });
-    if (hasActiveOverride && !args.force) return { method: "skipped_override" as const, multiplier: null };
 
     const heuristic = heuristicAssessment(inputs);
     const apiKey = process.env.ANTHROPIC_API_KEY;

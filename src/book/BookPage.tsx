@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { CheckIcon, WarningIcon } from "@phosphor-icons/react";
@@ -6,7 +6,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { HOLD_TTL_MS } from "../../convex/lib/constants";
 import { countdown, dayLabel, errorMessage, money, shortDate, timeOfDay, timeRange } from "../lib/format";
-import { useNow } from "../lib/hooks";
+import { useHashParams, useNow } from "../lib/hooks";
 import { BidPanel } from "../auctions/BidPanel";
 import { explorerTxUrl, networkName, PaymentCard } from "./checkout";
 
@@ -31,17 +31,42 @@ export function BookPage() {
   const campaigns = useQuery(api.campaigns.list, {});
   const billboards = useQuery(api.billboards.list);
   const advertisers = useQuery(api.advertisers.list);
-  const [campaignId, setCampaignId] = useState<Id<"campaigns"> | null>(null);
+  // Deep link from an alert: #/book?billboard=..&campaign=..&slots=a,b
+  const params = useHashParams();
+  const [campaignId, setCampaignId] = useState<Id<"campaigns"> | null>(() => (params.get("campaign") as Id<"campaigns"> | null) ?? null);
+  const [billboardId, setBillboardId] = useState<Id<"billboards"> | null>(() => (params.get("billboard") as Id<"billboards"> | null) ?? null);
+  const [initialSlots] = useState<Id<"slots">[]>(() =>
+    (params.get("slots") ?? "")
+      .split(",")
+      .filter(Boolean)
+      .slice(0, MAX_SLOTS) as Id<"slots">[],
+  );
+  const [creating, setCreating] = useState(false);
   const activeCampaign = campaigns?.find((c) => c._id === campaignId) ?? campaigns?.[0];
-  const billboard = billboards?.[0];
+  const billboard = billboards?.find((b) => b._id === billboardId) ?? billboards?.[0];
 
   if (campaigns === undefined || billboards === undefined) {
     return <main className="mx-auto max-w-[1200px] px-4 pt-8 md:px-6"><div className="h-64 animate-pulse rounded bg-panel" /></main>;
   }
-  if (!activeCampaign || !billboard) {
+  if (!billboard) {
     return (
       <main className="mx-auto max-w-[1200px] px-4 py-16 md:px-6">
-        <p className="text-muted">No campaigns or billboards yet. Run <code className="font-mono text-fg">npm run seed</code>.</p>
+        <p className="text-muted">No screens are on the marketplace yet.</p>
+      </main>
+    );
+  }
+  if (!activeCampaign || creating) {
+    return (
+      <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-16 md:px-6">
+        <h1 className="text-[30px] font-semibold tracking-tight">{activeCampaign ? "New campaign" : "Start your first campaign"}</h1>
+        <p className="mt-2 text-[15px] text-muted">Quotes, holds and bookings belong to a campaign. Only your company sees it.</p>
+        <NewCampaignForm
+          onCreated={(id) => {
+            setCampaignId(id);
+            setCreating(false);
+          }}
+          onCancel={activeCampaign ? () => setCreating(false) : undefined}
+        />
       </main>
     );
   }
@@ -50,22 +75,101 @@ export function BookPage() {
   return (
     <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-16 md:px-6">
       <BookingFlow
-        key={activeCampaign._id}
+        key={`${activeCampaign._id}:${billboard._id}`}
         billboard={billboard}
+        billboards={billboards}
         campaign={activeCampaign}
         campaigns={campaigns}
+        initialSlots={billboard._id === billboardId ? initialSlots : []}
+        onBillboardChange={setBillboardId}
         onCampaignChange={setCampaignId}
+        onNewCampaign={() => setCreating(true)}
         onTerms={terms === "net15"}
       />
     </main>
   );
 }
 
+function NewCampaignForm(props: { onCreated: (id: Id<"campaigns">) => void; onCancel?: () => void }) {
+  const create = useMutation(api.campaigns.create);
+  const [brief, setBrief] = useState("");
+  const [budget, setBudget] = useState("300");
+  const [city, setCity] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const id = await create({
+        brief,
+        budgetMinor: Math.round(Number.parseFloat(budget) * 100),
+        targetCity: city.trim() || undefined,
+      });
+      props.onCreated(id);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form onSubmit={submit} className="mt-6 flex max-w-xl flex-col gap-4">
+      <label className="flex flex-col gap-2 text-sm">
+        <span className="text-muted">What are you promoting, and to whom?</span>
+        <textarea
+          required
+          rows={3}
+          value={brief}
+          onChange={(e) => setBrief(e.target.value)}
+          className="rounded-md border border-line bg-panel px-3 py-2 text-fg"
+        />
+      </label>
+      <div className="grid grid-cols-2 gap-4">
+        <label className="flex flex-col gap-2 text-sm">
+          <span className="text-muted">Budget (USD)</span>
+          <input
+            inputMode="decimal"
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+            className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 font-mono text-fg"
+          />
+        </label>
+        <label className="flex flex-col gap-2 text-sm">
+          <span className="text-muted">Target city (optional)</span>
+          <input value={city} onChange={(e) => setCity(e.target.value)} className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 text-fg" />
+        </label>
+      </div>
+      {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={busy || !brief.trim()}
+          className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-accent-ink active:scale-[0.98] disabled:opacity-50"
+        >
+          Create campaign
+        </button>
+        {props.onCancel && (
+          <button type="button" onClick={props.onCancel} className="min-h-11 px-3 text-sm text-muted hover:text-fg">
+            Cancel
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}
+
 function BookingFlow(props: {
   billboard: Billboard;
+  billboards: Billboard[];
   campaign: Campaign;
   campaigns: Campaign[];
+  /** Slots preselected by an alert's deep link. */
+  initialSlots: Id<"slots">[];
+  onBillboardChange: (id: Id<"billboards">) => void;
   onCampaignChange: (id: Id<"campaigns">) => void;
+  onNewCampaign: () => void;
   onTerms: boolean;
 }) {
   const { billboard, campaign } = props;
@@ -95,7 +199,8 @@ function BookingFlow(props: {
     [estimates],
   );
   const [auctionSlot, setAuctionSlot] = useState<Id<"slots"> | null>(null);
-  const [selected, setSelected] = useState<Id<"slots">[]>([]);
+  const [selected, setSelected] = useState<Id<"slots">[]>(props.initialSlots);
+  const [preselectNote, setPreselectNote] = useState<string | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [hold, setHold] = useState<Hold | null>(null);
   const [holdKey, setHoldKey] = useState<string | null>(null);
@@ -108,6 +213,7 @@ function BookingFlow(props: {
   const receipt = useQuery(api.holds.receipt, hold && holdKey ? { holdId: hold.holdId, idempotencyKey: holdKey } : "skip");
 
   const upcoming = useMemo(() => (slots ?? []).filter((s) => s.startAt > minuteNow), [slots, minuteNow]);
+  const available = useMemo(() => upcoming.filter((s) => s.state === "available"), [upcoming]);
   // Live view of the held slots: a payment from x402 or the console flips them to booked.
   const heldSlots = useMemo(() => (hold ? (slots ?? []).filter((s) => hold.slotIds.includes(s._id)) : []), [slots, hold]);
   const booked =
@@ -120,15 +226,46 @@ function BookingFlow(props: {
   const expired = hold !== null && !booked && now >= hold.expiresAt;
   const step = booked ? 4 : hold ? 3 : quote ? 2 : 1;
 
-  // The seller agent can auction a slot while it sits in the selection: take it out and offer the auction.
+  // Slots preselected from an alert: drop any that sold meanwhile; auctioned ones go to the bid panel.
+  const reconciled = useRef(props.initialSlots.length === 0);
   useEffect(() => {
-    if (hold) return;
-    const moved = selected.find((id) => auctionSlotIds.has(id));
+    if (reconciled.current || slots === undefined || auctions === undefined) return;
+    reconciled.current = true;
+    const open = new Set(available.map((s) => s._id));
+    const still = props.initialSlots.filter((id) => open.has(id));
+    const hot = still.find((id) => auctionSlotIds.has(id));
+    if (hot) {
+      setSelected([]);
+      setAuctionSlot(hot);
+    } else {
+      setSelected(still);
+    }
+    const gone = props.initialSlots.length - still.length;
+    setPreselectNote(
+      still.length === 0
+        ? "The slots from your alert are no longer available. Pick others below."
+        : gone > 0
+          ? `${gone} slot${gone === 1 ? " from your alert has" : "s from your alert have"} sold since; the rest are selected.`
+          : hot
+            ? "This slot is in a live auction: bid below."
+            : "Slots from your alert are selected. Get a quote to lock today's price.",
+    );
+  }, [slots, auctions, available, auctionSlotIds, props.initialSlots]);
+
+  // The seller agent can auction a slot while it sits in the selection: take it out and offer the auction.
+  // Only slots that turn hot after the first load count; the alert check above handles the first load.
+  const seenAuctionSlots = useRef<Set<Id<"slots">> | null>(null);
+  useEffect(() => {
+    if (auctions === undefined) return;
+    const before = seenAuctionSlots.current;
+    seenAuctionSlots.current = auctionSlotIds;
+    if (before === null || hold) return;
+    const moved = selected.find((id) => auctionSlotIds.has(id) && !before.has(id));
     if (!moved) return;
     setSelected((cur) => cur.filter((id) => !auctionSlotIds.has(id)));
     setQuote(null);
     setNotice({ slotId: moved, moved: true });
-  }, [auctionSlotIds, selected, hold]);
+  }, [auctions, auctionSlotIds, selected, hold]);
 
   function toggle(id: Id<"slots">) {
     setNotice(null);
@@ -258,7 +395,15 @@ function BookingFlow(props: {
             <HeldSlots hold={hold} slots={heldSlots} />
           ) : (
             <>
-              <CampaignPicker campaign={campaign} campaigns={props.campaigns} onChange={props.onCampaignChange} />
+              <Pickers
+                billboard={billboard}
+                billboards={props.billboards}
+                campaign={campaign}
+                campaigns={props.campaigns}
+                onBillboardChange={props.onBillboardChange}
+                onCampaignChange={props.onCampaignChange}
+                onNewCampaign={props.onNewCampaign}
+              />
               <SlotPicker
                 slots={slots === undefined ? undefined : upcoming}
                 estimates={estimateBySlot}
@@ -289,6 +434,7 @@ function BookingFlow(props: {
               )}
             </div>
           )}
+          {preselectNote && !hold && !quote && !notice && <p role="status" className="text-sm text-muted">{preselectNote}</p>}
           {error && <p role="alert" className="text-sm text-danger">{error}</p>}
           {hold ? (
             flagged?.exception ? (
@@ -391,22 +537,53 @@ function Mark({ mark }: { mark: MarkKind }) {
   return <span role="img" aria-label="Not started" className="size-[22px] flex-none rounded-full border border-line" />;
 }
 
-function CampaignPicker(props: { campaign: Campaign; campaigns: Campaign[]; onChange: (id: Id<"campaigns">) => void }) {
+function Pickers(props: {
+  billboard: Billboard;
+  billboards: Billboard[];
+  campaign: Campaign;
+  campaigns: Campaign[];
+  onBillboardChange: (id: Id<"billboards">) => void;
+  onCampaignChange: (id: Id<"campaigns">) => void;
+  onNewCampaign: () => void;
+}) {
   return (
-    <label className="flex max-w-md flex-col gap-2 text-sm">
-      <span className="text-muted">Booking for</span>
-      <select
-        className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 text-fg"
-        value={props.campaign._id}
-        onChange={(e) => props.onChange(e.target.value as Id<"campaigns">)}
+    <div className="flex flex-wrap items-end gap-4">
+      <label className="flex min-w-[240px] flex-1 flex-col gap-2 text-sm">
+        <span className="text-muted">Screen</span>
+        <select
+          className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 text-fg"
+          value={props.billboard._id}
+          onChange={(e) => props.onBillboardChange(e.target.value as Id<"billboards">)}
+        >
+          {props.billboards.map((b) => (
+            <option key={b._id} value={b._id}>
+              {b.name}, {b.city}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex min-w-[240px] flex-1 flex-col gap-2 text-sm">
+        <span className="text-muted">Booking for</span>
+        <select
+          className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 text-fg"
+          value={props.campaign._id}
+          onChange={(e) => props.onCampaignChange(e.target.value as Id<"campaigns">)}
+        >
+          {props.campaigns.map((c) => (
+            <option key={c._id} value={c._id}>
+              {c.advertiserName}: {c.brief.slice(0, 48)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="button"
+        onClick={props.onNewCampaign}
+        className="min-h-11 rounded-md border border-line px-3 text-sm text-muted hover:border-muted hover:text-fg"
       >
-        {props.campaigns.map((c) => (
-          <option key={c._id} value={c._id}>
-            {c.advertiserName}: {c.brief.slice(0, 48)}
-          </option>
-        ))}
-      </select>
-    </label>
+        New campaign
+      </button>
+    </div>
   );
 }
 

@@ -32,6 +32,7 @@ export type BankLineInput = {
  */
 export async function ingestBankLines(
   ctx: MutationCtx,
+  workspaceId: Id<"workspaces">,
   lines: BankLineInput[],
   actor: string,
 ): Promise<{ inserted: Id<"bankTransactions">[]; duplicates: string[] }> {
@@ -68,6 +69,7 @@ export async function ingestBankLines(
     if (existing) {
       duplicates.push(line.externalId);
       await recordAudit(ctx, {
+        workspaceId,
         traceId: `bank:${line.source}:${line.externalId}`,
         actor,
         type: "bank.duplicate_ignored",
@@ -78,6 +80,7 @@ export async function ingestBankLines(
       continue;
     }
     const id = await ctx.db.insert("bankTransactions", {
+      workspaceId,
       source: line.source,
       externalId: line.externalId,
       amountMinor: line.amountMinor,
@@ -89,6 +92,7 @@ export async function ingestBankLines(
     });
     inserted.push(id);
     await recordAudit(ctx, {
+      workspaceId,
       traceId: `bank:${line.source}:${line.externalId}`,
       actor,
       type: "bank.ingested",
@@ -107,14 +111,14 @@ export async function ingestBankLines(
  * source "nessie", and call `ctx.runMutation(internal.bank.ingest, { lines })`.
  */
 export const ingest = internalMutation({
-  args: { lines: v.array(bankLineInput) },
+  args: { workspaceId: v.id("workspaces"), lines: v.array(bankLineInput) },
   returns: v.object({
     inserted: v.number(),
     duplicates: v.array(v.string()),
     insertedIds: v.array(v.id("bankTransactions")),
   }),
   handler: async (ctx, args) => {
-    const result = await ingestBankLines(ctx, args.lines, "system:bank-feed");
+    const result = await ingestBankLines(ctx, args.workspaceId, args.lines, "system:bank-feed");
     return {
       inserted: result.inserted.length,
       duplicates: result.duplicates,

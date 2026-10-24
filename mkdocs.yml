@@ -46,6 +46,7 @@ nav:
       - Agent protocol: architecture/agents.md
       - Payments & risk: architecture/payments-and-risk.md
       - Data model: architecture/data-model.md
+      - Agent API: architecture/agent-api.md
   - Development:
       - Kickoff checklist: development/kickoff-checklist.md
       - Getting started: development/getting-started.md
@@ -58,3 +59,6 @@ nav:
       - 0001 Scope: decisions/0001-scope.md
       - 0002 Sponsor-native stack: decisions/0002-sponsor-native-stack.md
       - 0003 Pricing harness and bidding: decisions/0003-pricing-harness-and-bidding.md
+      - 0004 Two-sided marketplace: decisions/0004-two-sided-marketplace.md
+      - 0005 Agent-to-agent x402: decisions/0005-agent-to-agent-x402.md
+      - 0006 Live moment in 30 seconds: decisions/0006-live-moment-30-seconds.md
