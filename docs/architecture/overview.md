@@ -2,6 +2,8 @@
 
 **Status:** Proposed architecture, not implemented. Keep execution deterministic and agent reasoning bounded.
 
+> The logical components below map onto sponsor tools (Convex, Coinbase x402, Capital One Nessie, CRS, Claude, Fetch.ai) in [ADR 0002](../decisions/0002-sponsor-native-stack.md).
+
 ## Component map
 
 ```mermaid

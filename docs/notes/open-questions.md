@@ -8,7 +8,7 @@ Use this file as a lightweight decision queue. Document outcomes under `docs/dec
 | Physical MVP | One laptop webcam + HDMI screen | Hardware / open |
 | Real measurements | Aggregate pedestrian counts with no face retention | CV / open |
 | Display runtime | Browser-based fullscreen player polling signed schedule | Platform / open |
-| Data backend | TypeScript API plus Postgres, or Convex if track chosen | Backend / open |
+| Data backend | Convex (see [ADR 0002](../decisions/0002-sponsor-native-stack.md)) | Backend / proposed |
 | LLM orchestration | One bounded orchestrator delegating specialized tasks | Agents / open |
 | Actual x402 sponsor environment | Validate docs, network, wallet, asset, facilitator and test balance | Finance / open |
 | Risk screening | Confirm CRS sandbox entities and legal scope | Finance / open |
