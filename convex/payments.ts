@@ -4,6 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { financeExceptionKind, paymentProvider } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { ACCEPTED_PAYMENT_ASSETS, MAX_KEY_LENGTH } from "./lib/constants";
+import { creativeReady, onMomentPaid } from "./lib/momentHooks";
 import { scheduleBooking } from "./lib/scheduling";
 import { recordSaleHistory } from "./lib/marketHistory";
 import { markAuctionSettled } from "./auctions";
@@ -99,7 +100,7 @@ type PaymentInput = {
  * exception for a payment that has already been verified (or, for manual,
  * asserted by an operator). Idempotent on `externalRef`.
  */
-async function applyVerifiedPayment(
+export async function applyVerifiedPayment(
   ctx: MutationCtx,
   args: PaymentInput,
   opts: { actor: string; reasonPrefix: string },
@@ -295,12 +296,14 @@ async function applyVerifiedPayment(
   if (booked) await recordSaleHistory(ctx, booked, hold.auctionId ? "auction" : "posted", now);
   await markAuctionSettled(ctx, hold, bookingId);
 
-  // Creative already approved -> straight to scheduled (P0-07).
+  // Creative already approved (platform-wide, or ready for this host's screens) -> straight to scheduled (P0-07, ADR 0006).
   const campaign = await ctx.db.get(quote.campaignId);
-  if (campaign?.creativeStatus === "approved") {
+  if (campaign && (await creativeReady(ctx, campaign, hold.workspaceId))) {
     const booking = await ctx.db.get(bookingId);
     if (booking) await scheduleBooking(ctx, booking, now, "system");
   }
+  // Live moment (ADR 0006): payment settled -> timeline.
+  await onMomentPaid(ctx, hold._id, bookingId, { provider: args.provider, externalRef: args.externalRef, network: args.network, amountMinor: args.amountMinor });
 
   return { outcome: "booked", paymentId, bookingId, replayed: false };
 }

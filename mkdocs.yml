@@ -51,7 +51,9 @@ nav:
       - Kickoff checklist: development/kickoff-checklist.md
       - Getting started: development/getting-started.md
       - Roadmap: development/roadmap.md
-  - Demo: demo/judging.md
+  - Demo:
+      - Judging: demo/judging.md
+      - Live moment runbook: demo/live-moment-runbook.md
   - Notes:
       - Original ideation: notes/ideation.md
       - Open questions: notes/open-questions.md

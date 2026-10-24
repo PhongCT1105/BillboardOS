@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { internalMutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { audienceTags, eventFields, eventSource } from "./schema";
+import { scheduleDetect } from "./moments";
 import { recordAudit } from "./lib/audit";
 import { EVENT_UPLIFT_MAX } from "./lib/stages";
 import { validateTags } from "./lib/match";
@@ -53,6 +54,9 @@ export async function upsertEvent(
     .withIndex("by_billboard_and_startsAt", (q) => q.eq("billboardId", input.billboardId).eq("startsAt", input.startsAt))
     .take(10);
   const same = existing.find((e) => e.name === name);
+  // A live event changes who is in front of the screen: let the moment detector re-check (ADR 0006).
+  const now = Date.now();
+  if (input.startsAt <= now && input.endsAt > now) await scheduleDetect(ctx, input.billboardId, "event");
   if (same) {
     await ctx.db.replace(same._id, fields);
     return { eventId: same._id, created: false };

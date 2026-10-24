@@ -12,6 +12,7 @@ const TRIGGER_LABEL: Record<Alert["trigger"], string> = {
   price_drop: "Price drop",
   last_minute: "Last minute",
   auction_open: "Auction open",
+  flash_offer: "Flash offer",
 };
 
 /** Max slots the booking page takes in one quote. */

@@ -93,7 +93,7 @@ export const loadForDelivery = internalQuery({
     const alert = await ctx.db.get(args.alertId);
     if (!alert || !alert.agent) return { ok: false as const, reason: "Alert has no agent delivery" };
     if (alert.agent.status !== "pending") return { ok: false as const, reason: `Already ${alert.agent.status}` };
-    const rule = await ctx.db.get(alert.ruleId);
+    const rule = alert.ruleId ? await ctx.db.get(alert.ruleId) : null;
     const key = rule?.agentKeyId ? await ctx.db.get(rule.agentKeyId) : null;
     if (!key || key.advertiserId !== alert.advertiserId) return { ok: false as const, reason: "Agent key not found" };
     const status = keyStatus(key, Date.now());

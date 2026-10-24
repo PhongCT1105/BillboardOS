@@ -203,3 +203,86 @@ export const pendingReview = query({
     return rows;
   },
 });
+
+// ---------------------------------------------------------------------------
+// Ready creatives (ADR 0006): a host approves a campaign's creative for its
+// screens once; it can then play the moment a flash spot is paid, and the
+// player preloads it.
+// ---------------------------------------------------------------------------
+
+/** Creatives a host can make ready: approved ones, and pending ones that quoted this host. */
+export const readyForWorkspace = query({
+  args: { workspaceId: v.optional(v.id("workspaces")) },
+  returns: v.array(
+    v.object({
+      campaignId: v.id("campaigns"),
+      advertiserName: v.string(),
+      brief: v.string(),
+      contentType: v.string(),
+      creativeUrl: v.union(v.string(), v.null()),
+      ready: v.boolean(),
+      approvedBy: v.union(v.string(), v.null()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    const approved = await ctx.db
+      .query("campaigns")
+      .withIndex("by_creativeStatus", (q) => q.eq("creativeStatus", "approved"))
+      .take(50);
+    const pending = await ctx.db
+      .query("campaigns")
+      .withIndex("by_creativeStatus", (q) => q.eq("creativeStatus", "pending_review"))
+      .take(20);
+    const rows = [];
+    for (const c of [...approved, ...pending]) {
+      if (!c.creativeStorageId || c.status !== "active") continue;
+      const approval = await ctx.db
+        .query("creativeApprovals")
+        .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", me.workspaceId).eq("campaignId", c._id))
+        .first();
+      if (c.creativeStatus === "pending_review" && !approval && !(await campaignTouchesWorkspace(ctx, c._id, me.workspaceId))) continue;
+      rows.push({
+        campaignId: c._id,
+        advertiserName: (await ctx.db.get(c.advertiserId))?.displayName ?? "Unknown advertiser",
+        brief: c.brief,
+        contentType: c.creativeContentType ?? "application/octet-stream",
+        creativeUrl: await ctx.storage.getUrl(c.creativeStorageId),
+        ready: approval !== null,
+        approvedBy: approval?.approvedBy ?? null,
+      });
+    }
+    return rows;
+  },
+});
+
+/** Host member: make (or stop making) a campaign's creative ready on this workspace's screens. */
+export const setReady = mutation({
+  args: { campaignId: v.id("campaigns"), ready: v.boolean(), workspaceId: v.optional(v.id("workspaces")) },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    const campaign = await ctx.db.get(args.campaignId);
+    if (!campaign?.creativeStorageId) throw new ConvexError({ code: "NOT_FOUND", message: "Campaign has no creative" });
+    const existing = await ctx.db
+      .query("creativeApprovals")
+      .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", me.workspaceId).eq("campaignId", campaign._id))
+      .first();
+    if (args.ready && !existing) {
+      await ctx.db.insert("creativeApprovals", { campaignId: campaign._id, workspaceId: me.workspaceId, approvedBy: me.actor, approvedAt: Date.now() });
+    } else if (!args.ready && existing) {
+      await ctx.db.delete(existing._id);
+    } else {
+      return null;
+    }
+    await recordAudit(ctx, {
+      workspaceId: me.workspaceId,
+      traceId: `campaign:${campaign._id}`,
+      actor: me.actor,
+      type: "creative.ready",
+      subjectId: campaign._id,
+      reason: args.ready ? "Creative approved as ready to play on this host's screens" : "Creative no longer ready on this host's screens",
+    });
+    return null;
+  },
+});

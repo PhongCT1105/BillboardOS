@@ -4,6 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { computeScreenPrice } from "./lib/screenPrice";
+import { creativeReady, onMomentFirstFrame } from "./lib/momentHooks";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
@@ -48,7 +49,7 @@ async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
   const advertiser = await ctx.db.get(campaign.advertiserId);
   if (advertiser) view.advertiserName = advertiser.displayName;
   const playable = slot.state === "scheduled" || slot.state === "played";
-  if (playable && campaign.creativeStatus === "approved" && campaign.creativeStorageId) {
+  if (playable && campaign.creativeStorageId && (await creativeReady(ctx, campaign, slot.workspaceId))) {
     const url = await ctx.storage.getUrl(campaign.creativeStorageId);
     if (url) {
       view.creativeUrl = url;
@@ -248,6 +249,35 @@ export const recordPlayback = mutation({
       },
     });
 
+    // Live moment (ADR 0006): first frame stops the stopwatch.
+    if (args.status === "played") await onMomentFirstFrame(ctx, booking._id, now);
+
     return { playbackEventId, slotState: newState, replayed: false };
+  },
+});
+
+/**
+ * Creatives ready to play on this screen (approved for its host): the player
+ * preloads them so a flash spot starts instantly (ADR 0006). URLs only.
+ */
+export const readyCreatives = query({
+  args: { billboardId: v.id("billboards") },
+  returns: v.array(v.object({ campaignId: v.id("campaigns"), url: v.string(), contentType: v.union(v.string(), v.null()) })),
+  handler: async (ctx, args) => {
+    const billboard = await ctx.db.get(args.billboardId);
+    if (!billboard?.workspaceId) return [];
+    const workspaceId = billboard.workspaceId;
+    const approvals = await ctx.db
+      .query("creativeApprovals")
+      .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId))
+      .take(12);
+    const out = [];
+    for (const a of approvals) {
+      const campaign = await ctx.db.get(a.campaignId);
+      if (!campaign?.creativeStorageId || campaign.status !== "active") continue;
+      const url = await ctx.storage.getUrl(campaign.creativeStorageId);
+      if (url) out.push({ campaignId: campaign._id, url, contentType: campaign.creativeContentType ?? null });
+    }
+    return out;
   },
 });

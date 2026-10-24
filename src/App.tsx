@@ -13,6 +13,7 @@ import { SignInPage } from "./auth/SignInPage";
 import { CreateCompany, CreateWorkspace, RoleChooser } from "./auth/Onboarding";
 import { AlertsBadgeLink, CUSTOMER_TABS, CustomerPage, type CustomerTab } from "./customer/CustomerPage";
 import { WorkspacePage } from "./workspace/WorkspacePage";
+import { MomentPage } from "./moment/MomentPage";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 
@@ -78,6 +79,7 @@ function HostArea({ me, route }: { me: Me; route: string }) {
   if (sensorMatch) return <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />;
   if (route === "/finance") return <FinancePage />;
   if (route === "/workspace") return <WorkspacePage />;
+  if (route === "/moment") return <MomentPage />;
   if (route === "/book") {
     return (
       <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
@@ -112,6 +114,9 @@ function HostNav({ route }: { route: string }) {
     <nav className="flex items-center gap-1 text-sm">
       <NavLink href="#/console" active={route === "/console" || route === "/"}>
         Console
+      </NavLink>
+      <NavLink href="#/moment" active={route === "/moment"}>
+        Live moment
       </NavLink>
       <NavLink href="#/finance" active={route === "/finance"}>
         Finance

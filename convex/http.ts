@@ -172,6 +172,9 @@ const STATUS_FOR_CODE: Record<string, number> = {
   BILLBOARD_OFFLINE: 409,
   NEGOTIATION_CLOSED: 409,
   MAX_ROUNDS: 409,
+  OFFER_CLOSED: 409,
+  ALREADY_REPLIED: 409,
+  STANDING_INSTRUCTIONS: 409,
 };
 
 function agentError(status: number, code: string, message: string, extra: Record<string, unknown> = {}): Response {
@@ -287,6 +290,22 @@ const agentPost = httpAction(async (ctx, request) => {
       if (!quoteId || !idempotencyKey) return missing(["quoteId", "idempotencyKey"]);
       const result = await ctx.runMutation(internal.agentApi.hold, { token, quoteId, idempotencyKey });
       return json(result.replayed ? 200 : 201, result);
+    }
+    const offerReply = /^offers\/([^/]+)\/reply$/.exec(path);
+    if (offerReply) {
+      const decision = str(body.decision);
+      if (decision !== "accept" && decision !== "counter" && decision !== "pass") return missing(["decision (accept | counter | pass)"]);
+      if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.moments.reply, {
+          token,
+          offerId: offerReply[1],
+          decision,
+          amountMinor: num(body.amountMinor),
+          reasoning: str(body.reasoning),
+        }),
+      );
     }
     const action = /^auctions\/([^/]+)\/(join|bid|auto-bid)$/.exec(path);
     if (action) {
@@ -508,7 +527,9 @@ async function payForHold(ctx: ActionCtx, request: Request, holdId: string, work
   if (hold.currency !== "USD" || !Number.isSafeInteger(hold.amountMinor) || hold.amountMinor <= 0) {
     return json(409, { error: "HOLD_NOT_PRICEABLE", holdId });
   }
-  console.log(`[x402] trace=${hold.traceId} request holdId=${holdId} agent=${actor} paid=${Boolean(plainRequest(request).headers["payment-signature"] ?? plainRequest(request).headers["x-payment"])}`);
+  const signed = Boolean(plainRequest(request).headers["payment-signature"] ?? plainRequest(request).headers["x-payment"]);
+  console.log(`[x402] trace=${hold.traceId} request holdId=${holdId} agent=${actor} paid=${signed}`);
+  if (signed) await ctx.runMutation(internal.moments.markPaymentStarted, { holdId: hold.holdId });
   const result = await ctx.runAction(internal.x402Node.payHold, {
     request: plainRequest(request),
     holdId: hold.holdId,
@@ -644,6 +665,37 @@ const hostsPost = httpAction(async (ctx, request) => {
 });
 
 http.route({ pathPrefix: "/purchases/", method: "POST", handler: legacyPurchase });
+
+/**
+ * POST /demo-agents/{advertiserId}/webhook: the hosted demo customer agents'
+ * webhook receiver ("simulated customer agent", ADR 0006). Verifies the
+ * signature like any external receiver, then lets the agent act asynchronously.
+ */
+http.route({
+  pathPrefix: "/demo-agents/",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const m = /^\/demo-agents\/([^/]+)\/webhook\/?$/.exec(new URL(request.url).pathname);
+    if (!m) return json(404, { error: "not found" });
+    const body = await request.text();
+    if (body.length > 64 * 1024) return json(413, { error: "too large" });
+    const verified = await ctx.runQuery(internal.demoAgents.verifyWebhook, {
+      advertiserId: m[1],
+      timestamp: request.headers.get("X-BillboardOS-Timestamp") ?? "",
+      signature: request.headers.get("X-BillboardOS-Signature") ?? "",
+      body,
+    });
+    if (!verified.ok) return json(401, { error: verified.reason });
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return json(400, { error: "body is not JSON" });
+    }
+    await ctx.runMutation(internal.demoAgents.enqueue, { advertiserId: verified.advertiserId, payload });
+    return json(200, { ok: true });
+  }),
+});
 http.route({ pathPrefix: "/a2a/hosts/", method: "GET", handler: hostsGet });
 http.route({ pathPrefix: "/a2a/hosts/", method: "POST", handler: hostsPost });
 

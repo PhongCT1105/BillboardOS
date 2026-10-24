@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { agentScope } from "./schema";
+import { agentScope, standingInstructions } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { requireCustomer } from "./lib/tenancy";
 import {
@@ -149,6 +149,8 @@ export const list = query({
       webhookUrl: v.union(v.string(), v.null()),
       lastUsedAt: v.union(v.number(), v.null()),
       status: v.union(v.literal("active"), v.literal("revoked"), v.literal("expired")),
+      /** Standing instructions for live-moment flash offers (ADR 0006). */
+      standing: v.union(standingInstructions, v.null()),
     }),
   ),
   handler: async (ctx, args) => {
@@ -174,6 +176,7 @@ export const list = query({
         webhookUrl: k.webhookUrl ?? null,
         lastUsedAt: k.lastUsedAt ?? null,
         status: keyStatus(k, now),
+        standing: k.standing ?? null,
       });
     }
     return out;

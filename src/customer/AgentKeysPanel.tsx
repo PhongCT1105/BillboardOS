@@ -230,6 +230,7 @@ function KeyRow({ k }: { k: Key }) {
           </div>
         </div>
       </div>
+      <StandingInstructions k={k} />
       {k.status === "active" && (
         <div className="flex gap-2">
           {confirming ? (
@@ -250,5 +251,98 @@ function KeyRow({ k }: { k: Key }) {
       )}
       <ErrorLine error={error} />
     </Card>
+  );
+}
+
+/** Standing instructions (ADR 0006): what the agent may do with live-moment flash offers. Enforced server-side too. */
+function StandingInstructions({ k }: { k: Key }) {
+  const save = useMutation(api.moments.setStanding);
+  const [editing, setEditing] = useState(false);
+  const s = k.standing;
+  const [max, setMax] = useState(s ? String(s.maxPricePerSpotMinor / 100) : "50");
+  const [minViewers, setMinViewers] = useState(s ? String(s.minRelevantViewers) : "10");
+  const [daily, setDaily] = useState(s ? String(s.dailyBudgetMinor / 100) : "200");
+  const [policy, setPolicy] = useState<"auto_accept" | "counter" | "pass">(s?.policy ?? "auto_accept");
+  const [ratio, setRatio] = useState(s?.counterRatio ? String(Math.round(s.counterRatio * 100)) : "85");
+  const { busy, error, setError, run } = useAction();
+  const summary = s
+    ? `${s.policy === "auto_accept" ? "Auto-accept" : s.policy === "counter" ? `Counter at ${Math.round((s.counterRatio ?? 0.85) * 100)}%` : "Pass"} · max ${money(s.maxPricePerSpotMinor)}/spot · ${s.minRelevantViewers}+ relevant viewers · ${money(s.dailyBudgetMinor)}/day`
+    : "No standing instructions: this key gets no flash offers.";
+  if (!editing) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-ink px-3 py-2 text-sm">
+        <span className="text-muted">
+          <span className="text-fg">Flash offers:</span> {summary}
+        </span>
+        {k.status === "active" && (
+          <button type="button" className="text-sm text-accent hover:underline" onClick={() => setEditing(true)}>
+            {s ? "Edit" : "Set up"}
+          </button>
+        )}
+      </div>
+    );
+  }
+  return (
+    <form
+      className="grid grid-cols-2 gap-3 rounded-md border border-line bg-ink p-3 md:grid-cols-5"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        const maxMinor = parseUsd(max);
+        const dailyMinor = parseUsd(daily);
+        if (maxMinor === null || dailyMinor === null) return setError("Prices must be positive dollar amounts");
+        const ok = await run(async () => {
+          await save({
+            agentKeyId: k.agentKeyId,
+            standing: {
+              maxPricePerSpotMinor: maxMinor,
+              minRelevantViewers: Number(minViewers),
+              dailyBudgetMinor: dailyMinor,
+              policy,
+              counterRatio: policy === "counter" ? Number(ratio) / 100 : undefined,
+            },
+          });
+          return true;
+        });
+        if (ok) setEditing(false);
+      }}
+    >
+      <Field label="Policy">
+        <select value={policy} onChange={(e) => setPolicy(e.target.value as typeof policy)} className={inputCls}>
+          <option value="auto_accept">Auto-accept</option>
+          <option value="counter">Counter</option>
+          <option value="pass">Pass</option>
+        </select>
+      </Field>
+      <Field label="Max per spot (USD)">
+        <input value={max} onChange={(e) => setMax(e.target.value)} inputMode="decimal" className={`${inputCls} font-mono`} />
+      </Field>
+      <Field label="Min relevant viewers">
+        <input value={minViewers} onChange={(e) => setMinViewers(e.target.value)} inputMode="numeric" className={`${inputCls} font-mono`} />
+      </Field>
+      <Field label="Daily budget (USD)">
+        <input value={daily} onChange={(e) => setDaily(e.target.value)} inputMode="decimal" className={`${inputCls} font-mono`} />
+      </Field>
+      {policy === "counter" && (
+        <Field label="Counter at (% of ask)">
+          <input value={ratio} onChange={(e) => setRatio(e.target.value)} inputMode="numeric" className={`${inputCls} font-mono`} />
+        </Field>
+      )}
+      <div className="col-span-full flex items-center gap-2">
+        <button type="submit" disabled={busy} className={primaryBtn}>
+          Save
+        </button>
+        <button type="button" className="px-2 text-sm text-muted hover:text-fg" onClick={() => setEditing(false)}>
+          Cancel
+        </button>
+        {s && (
+          <button type="button" className="ml-auto text-sm text-muted hover:text-fg" onClick={() => run(() => save({ agentKeyId: k.agentKeyId, standing: null }))}>
+            Clear
+          </button>
+        )}
+      </div>
+      <div className="col-span-full">
+        <ErrorLine error={error} />
+      </div>
+    </form>
   );
 }
