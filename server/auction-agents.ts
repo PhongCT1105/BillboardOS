@@ -25,7 +25,7 @@ import { CdpX402Client } from "@coinbase/cdp-sdk/x402";
 import { wrapFetchWithPayment } from "@x402/fetch";
 import { api } from "../convex/_generated/api.js";
 import type { Id } from "../convex/_generated/dataModel.js";
-import { agentApi, AgentApiError, centsToAtomic, centsToUsd, env, presence, requireEnv } from "./lib.ts";
+import { agentApi, AgentApiError, centsToAtomic, centsToUsd, env, paymentServerUrl, presence, requireEnv } from "./lib.ts";
 
 // ---------------------------------------------------------------- config
 
@@ -35,7 +35,7 @@ const argValue = (name: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const NO_PAY = argv.includes("--no-pay");
-const SERVER = (argValue("server") ?? `http://localhost:${env("X402_SERVER_PORT") ?? 4021}`).replace(/\/$/, "");
+const SERVER = paymentServerUrl(argValue("server"));
 const NETWORK = env("X402_NETWORK") ?? "eip155:84532";
 const POLL_MS = 1500;
 /** Auction (2 min) + soft-close cap (3 min) + payment window (5 min) + margin must fit before air time. */
@@ -364,5 +364,5 @@ try {
   }
   fail("Payment did not book the slot (see the finance exceptions in the console).");
 } catch (error) {
-  fail(`x402 payment failed: ${errorText(error)}. Is the x402 server running (npm run server) and the wallet funded (npm run buyer -- --faucet)?`);
+  fail(`x402 payment failed: ${errorText(error)}. Is x402 configured on the Convex deployment (CDP env vars) and the wallet funded (npm run buyer -- --faucet)?`);
 }

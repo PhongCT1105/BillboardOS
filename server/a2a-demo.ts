@@ -4,7 +4,7 @@
  *
  *   npm run a2a:demo                     # newest unacknowledged non-auction alert
  *   npm run a2a:demo -- --slot <slotId>  # skip the alert, negotiate for this slot
- *   options: --slots <n> (1..4, default 2)  --server <x402 url>  --no-ack
+ *   options: --slots <n> (1..4, default 2)  --server <url> (default: the Convex deployment)  --no-ack
  *
  * Steps:
  *   1. alert       GET  /api/agent/alerts (Convex agent API)
@@ -24,7 +24,7 @@
 import { CdpX402Client } from "@coinbase/cdp-sdk/x402";
 import { wrapFetchWithPayment, decodePaymentResponseHeader } from "@x402/fetch";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
-import { atomicToCents, centsToAtomic, centsToUsd, env, explorerTxUrl, presence, requireEnv, agentApi, AgentApiError } from "./lib.ts";
+import { atomicToCents, centsToAtomic, centsToUsd, env, explorerTxUrl, presence, requireEnv, agentApi, AgentApiError, paymentServerUrl } from "./lib.ts";
 
 // ---------------------------------------------------------------- args & env
 
@@ -35,7 +35,7 @@ const opt = (name: string) => {
 };
 const NETWORK = env("X402_NETWORK") ?? "eip155:84532";
 const ENVIRONMENT = env("X402_ENVIRONMENT") === "production" ? "production" : "development";
-const SERVER = (opt("server") ?? env("X402_PUBLIC_URL") ?? `http://localhost:${env("X402_SERVER_PORT") ?? 4021}`).replace(/\/$/, "");
+const SERVER = paymentServerUrl(opt("server"));
 const WALLET_NAME = env("AUCTION_NVIDIA_WALLET") ?? env("BUYER_WALLET_NAME") ?? "nvidia-buyer-agent";
 const KEY = requireEnv("AUCTION_NVIDIA_AGENT_KEY", "Nvidia's agent key: npx convex run seed:demoAgentKeys");
 const api = agentApi(requireEnv("CONVEX_SITE_URL", "Convex HTTP actions base URL (agent API)"), KEY);
@@ -160,7 +160,7 @@ type Negotiation = {
 // ---------------------------------------------------------------- 1. alert
 
 console.log(bold("BillboardOS agent-to-agent demo") + dim("  (TEST FUNDS ONLY: Base Sepolia USDC)"));
-note(`x402 server ${SERVER} · wallet "${WALLET_NAME}" · payments ${CAN_PAY ? "enabled" : "disabled (no CDP_WALLET_SECRET): stops at each 402"}`);
+note(`payment server ${SERVER} · wallet "${WALLET_NAME}" · payments ${CAN_PAY ? "enabled" : "disabled (no CDP_WALLET_SECRET): stops at each 402"}`);
 
 step(1, "Buyer agent wakes up on a watch-rule alert");
 let me: Me;
@@ -219,7 +219,7 @@ line("buyer", `wants ${chosen.length} slot(s) on ${billboardName}: ${chosen.map(
 // ---------------------------------------------------------------- 2. agent card
 
 step(2, "Reads the seller agent's card");
-const cardRes = await fetch(`${SERVER}/a2a/hosts/${workspaceId}/agent.json`).catch((e: unknown) => stop(`x402 server unreachable at ${SERVER}: ${String(e)}. Start it: npm run server`));
+const cardRes = await fetch(`${SERVER}/a2a/hosts/${workspaceId}/agent.json`).catch((e: unknown) => stop(`payment server unreachable at ${SERVER}: ${String(e)}`));
 if (!cardRes.ok) stop(`agent card: HTTP ${cardRes.status} ${await cardRes.text()}`);
 const card = (await cardRes.json()) as Card;
 line("seller", `${card.name} · pays to ${card.payment.payTo} on ${card.payment.network}`);

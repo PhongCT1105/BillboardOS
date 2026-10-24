@@ -1,8 +1,11 @@
 import { httpRouter } from "convex/server";
 import { ConvexError } from "convex/values";
-import { env, httpAction } from "./_generated/server";
-import { internal } from "./_generated/api";
+import { env, httpAction, type ActionCtx } from "./_generated/server";
+import { components, internal } from "./_generated/api";
+import { registerStaticRoutes } from "@convex-dev/static-hosting";
 import { auth } from "./auth";
+import { buildAgentCard } from "./lib/x402/agentCard";
+import { centsToUsd, decimalToCents } from "./lib/x402/money";
 
 /**
  * Internal HTTP surface for the Express x402 payment server.
@@ -423,6 +426,227 @@ const a2aPost = httpAction(async (ctx, request) => {
 http.route({ pathPrefix: "/internal/a2a/", method: "GET", handler: a2aGet });
 http.route({ pathPrefix: "/internal/a2a/", method: "POST", handler: a2aPost });
 
+// ---------------------------------------------------------------------------
+// x402 payment endpoints and seller agents, served by Convex (ADR 0006: one
+// OS server). Same contracts as the retired Express server:
+//   POST /purchases/{holdId}                                 x402, hold amount (any host)
+//   POST /a2a/hosts/{workspaceId}/purchases/{holdId}         x402, hold amount (hold must be that host's)
+//   GET  /a2a/hosts/{workspaceId}/reports/audience?billboardId=  x402, X402_REPORT_PRICE_USD (default $0.05)
+//   GET  /a2a/hosts/{workspaceId}/agent.json                 free
+//   POST /a2a/hosts/{workspaceId}/negotiations               agent key
+//   GET  /a2a/hosts/{workspaceId}/negotiations/{id}          agent key
+//   POST /a2a/hosts/{workspaceId}/negotiations/{id}/messages agent key
+// This file checks keys and looks things up; x402Node.ts (node) challenges,
+// verifies with the CDP facilitator, re-checks, settles and records.
+// ---------------------------------------------------------------------------
+
+const ID_RE = /^[a-z0-9]{1,64}$/i;
+const X402_NETWORK = () => process.env.X402_NETWORK || "eip155:84532";
+
+function reportPriceMinor(): number {
+  try {
+    return decimalToCents(process.env.X402_REPORT_PRICE_USD || "0.05");
+  } catch {
+    return 5;
+  }
+}
+
+function agentKeyOf(request: Request): string | null {
+  return /^Bearer (bos_agent_\S+)$/.exec(request.headers.get("Authorization") ?? "")?.[1] ?? null;
+}
+
+/** Serializable copy of the request for the node action (only what x402 reads). */
+function plainRequest(request: Request) {
+  const headers: Record<string, string> = {};
+  for (const name of ["payment-signature", "x-payment", "accept", "user-agent", "content-type"]) {
+    const value = request.headers.get(name);
+    if (value !== null) headers[name] = value;
+  }
+  return { method: request.method, url: request.url, headers };
+}
+
+function fromPlain(r: { status: number; headers: Record<string, string>; body: unknown }): Response {
+  return new Response(JSON.stringify(r.body ?? {}), {
+    status: r.status,
+    headers: { "Content-Type": "application/json", "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-PAYMENT-RESPONSE", ...r.headers },
+  });
+}
+
+async function payForHold(ctx: ActionCtx, request: Request, holdId: string, workspaceId: string | null): Promise<Response> {
+  if (!ID_RE.test(holdId) || (workspaceId !== null && !ID_RE.test(workspaceId))) {
+    return json(404, { error: "HOLD_NOT_FOUND", holdId });
+  }
+  // 0. Agent key: only the hold's company, with the "pay" scope. x402 uses
+  //    PAYMENT-SIGNATURE / X-PAYMENT, so Authorization is free for the key.
+  const agentKey = agentKeyOf(request);
+  if (!agentKey) return json(401, { error: "AGENT_KEY_REQUIRED", message: "Send Authorization: Bearer <agent key with the pay scope>" });
+  let actor: string;
+  try {
+    actor = (await ctx.runMutation(internal.agentApi.verifyPayment, { token: agentKey, holdId })).actor;
+  } catch (error) {
+    if (error instanceof ConvexError) {
+      const data = error.data as { code?: string; message?: string };
+      const status = STATUS_FOR_CODE[data.code ?? ""] ?? 403;
+      return json(status === 404 ? 404 : status === 401 ? 401 : 403, { error: data.code ?? "FORBIDDEN", message: data.message ?? "Agent key not allowed to pay this hold" });
+    }
+    throw error;
+  }
+  // 1. Hold lookup, before any payment is requested.
+  const hold = await ctx.runQuery(internal.holds.getForPayment, { holdId });
+  if (!hold || (workspaceId !== null && hold.workspaceId !== workspaceId)) {
+    return json(404, { error: "HOLD_NOT_FOUND", holdId, ...(workspaceId ? { message: "No such hold at this host" } : {}) });
+  }
+  if (!hold.payable) {
+    return json(409, {
+      error: "HOLD_NOT_PAYABLE",
+      holdId,
+      status: hold.status,
+      expiresAt: hold.expiresAt,
+      message: hold.status === "active" ? "Hold has expired; request a new quote and hold." : `Hold is ${hold.status}; nothing to pay.`,
+    });
+  }
+  if (hold.currency !== "USD" || !Number.isSafeInteger(hold.amountMinor) || hold.amountMinor <= 0) {
+    return json(409, { error: "HOLD_NOT_PRICEABLE", holdId });
+  }
+  console.log(`[x402] trace=${hold.traceId} request holdId=${holdId} agent=${actor} paid=${Boolean(plainRequest(request).headers["payment-signature"] ?? plainRequest(request).headers["x-payment"])}`);
+  const result = await ctx.runAction(internal.x402Node.payHold, {
+    request: plainRequest(request),
+    holdId: hold.holdId,
+    traceId: hold.traceId,
+    charge: {
+      amountMinor: hold.amountMinor,
+      payTo: hold.payTo,
+      unpaid: { holdId: hold.holdId, amountMinor: hold.amountMinor, price: centsToUsd(hold.amountMinor), asset: "USDC", network: X402_NETWORK(), expiresAt: hold.expiresAt },
+    },
+  });
+  return fromPlain(result);
+}
+
+const legacyPurchase = httpAction(async (ctx, request) => {
+  const holdId = new URL(request.url).pathname.replace(/^\/purchases\//, "").replace(/\/$/, "");
+  try {
+    return await payForHold(ctx, request, holdId, null);
+  } catch (error) {
+    console.error("purchase failed", error);
+    return json(500, { error: "INTERNAL_ERROR" });
+  }
+});
+
+const hostsGet = httpAction(async (ctx, request) => {
+  const url = new URL(request.url);
+  const m = /^\/a2a\/hosts\/([^/]+)\/(.+?)\/?$/.exec(url.pathname);
+  if (!m || !ID_RE.test(m[1])) return agentError(404, "NOT_FOUND", "Host not found");
+  const [, workspaceId, rest] = m;
+  try {
+    if (rest === "agent.json") {
+      const card = await ctx.runQuery(internal.a2a.agentCard, { workspaceId });
+      return json(
+        200,
+        buildAgentCard(card, {
+          baseUrl: process.env.CONVEX_SITE_URL ?? url.origin,
+          network: X402_NETWORK(),
+          defaultPayTo: process.env.X402_PAY_TO?.trim() || null,
+          reportPriceMinor: reportPriceMinor(),
+        }),
+      );
+    }
+    if (rest === "reports/audience") {
+      const billboardId = url.searchParams.get("billboardId") ?? "";
+      if (!ID_RE.test(billboardId)) return agentError(404, "NOT_FOUND", "Send ?billboardId= for one of this host's screens");
+      // 0. Agent key (any scope) and 1. the screen belongs to this host.
+      const agentKey = agentKeyOf(request);
+      if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
+      const auth = await ctx.runMutation(internal.a2a.authorizeReport, { token: agentKey, workspaceId, billboardId });
+      const price = reportPriceMinor();
+      const result = await ctx.runAction(internal.x402Node.payReport, {
+        request: plainRequest(request),
+        agentKey,
+        agentKeyId: auth.agentKeyId,
+        workspaceId,
+        billboardId,
+        charge: {
+          amountMinor: price,
+          payTo: auth.payTo,
+          unpaid: {
+            product: "audience_report",
+            billboardId,
+            amountMinor: price,
+            price: centsToUsd(price),
+            asset: "USDC",
+            network: X402_NETWORK(),
+            contents: ["trailing 2h crowd", "peak in view", "audience mix", "upcoming events", "recent clearing prices"],
+          },
+        },
+      });
+      return fromPlain(result);
+    }
+    const neg = /^negotiations\/([^/]+)$/.exec(rest);
+    if (neg) {
+      const agentKey = agentKeyOf(request);
+      if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
+      return json(200, await ctx.runMutation(internal.negotiations.get, { token: agentKey, workspaceId, negotiationId: neg[1] }));
+    }
+    return agentError(404, "NOT_FOUND", `No endpoint GET ${url.pathname}`);
+  } catch (error) {
+    return errorResponse(error);
+  }
+});
+
+const hostsPost = httpAction(async (ctx, request) => {
+  const url = new URL(request.url);
+  const m = /^\/a2a\/hosts\/([^/]+)\/(.+?)\/?$/.exec(url.pathname);
+  if (!m || !ID_RE.test(m[1])) return agentError(404, "NOT_FOUND", "Host not found");
+  const [, workspaceId, rest] = m;
+  try {
+    const purchase = /^purchases\/([^/]+)$/.exec(rest);
+    if (purchase) return await payForHold(ctx, request, purchase[1], workspaceId);
+    const agentKey = agentKeyOf(request);
+    if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
+    const body = await readJson(request);
+    if (body instanceof Response) return body;
+    if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
+    if (rest === "negotiations") {
+      const campaignId = str(body.campaignId);
+      const slotIds = Array.isArray(body.slotIds) && body.slotIds.every((x) => typeof x === "string") ? (body.slotIds as string[]) : undefined;
+      if (!campaignId || !slotIds) return missing(["campaignId", "slotIds[]"]);
+      return json(
+        201,
+        await ctx.runMutation(internal.negotiations.open, {
+          token: agentKey,
+          workspaceId,
+          campaignId,
+          slotIds,
+          amountMinor: num(body.amountMinor),
+          reasoning: str(body.reasoning),
+        }),
+      );
+    }
+    const msg = /^negotiations\/([^/]+)\/messages$/.exec(rest);
+    if (msg) {
+      const kind = str(body.kind);
+      if (kind !== "offer" && kind !== "accept" && kind !== "reject") return missing(["kind (offer | accept | reject)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.negotiations.post, {
+          token: agentKey,
+          workspaceId,
+          negotiationId: msg[1],
+          kind,
+          amountMinor: num(body.amountMinor),
+          reasoning: str(body.reasoning),
+        }),
+      );
+    }
+    return agentError(404, "NOT_FOUND", `No endpoint POST ${url.pathname}`);
+  } catch (error) {
+    return errorResponse(error);
+  }
+});
+
+http.route({ pathPrefix: "/purchases/", method: "POST", handler: legacyPurchase });
+http.route({ pathPrefix: "/a2a/hosts/", method: "GET", handler: hostsGet });
+http.route({ pathPrefix: "/a2a/hosts/", method: "POST", handler: hostsPost });
+
 http.route({ pathPrefix: "/api/agent/", method: "GET", handler: agentGet });
 http.route({ pathPrefix: "/api/agent/", method: "POST", handler: agentPost });
 
@@ -449,5 +673,10 @@ http.route({
     }
   }),
 });
+
+// Website (Vite build uploaded by `npm run deploy:web`): everything not matched
+// above. Registered last; exact and longer-prefix app routes win. SPA fallback
+// serves index.html for client routes (the app uses hash routes anyway).
+registerStaticRoutes(http, components.staticHosting);
 
 export default http;

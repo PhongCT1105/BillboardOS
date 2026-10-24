@@ -55,8 +55,13 @@ import type * as lib_validators from "../lib/validators.js";
 import type * as lib_valuation from "../lib/valuation.js";
 import type * as lib_watch from "../lib/watch.js";
 import type * as lib_webhook from "../lib/webhook.js";
+import type * as lib_x402_agentCard from "../lib/x402/agentCard.js";
+import type * as lib_x402_cdpEngine from "../lib/x402/cdpEngine.js";
+import type * as lib_x402_flow from "../lib/x402/flow.js";
+import type * as lib_x402_money from "../lib/x402/money.js";
 import type * as migrations from "../migrations.js";
 import type * as negotiations from "../negotiations.js";
+import type * as paymentLocks from "../paymentLocks.js";
 import type * as payments from "../payments.js";
 import type * as playback from "../playback.js";
 import type * as player from "../player.js";
@@ -70,6 +75,7 @@ import type * as watch from "../watch.js";
 import type * as watchDelivery from "../watchDelivery.js";
 import type * as watchRules from "../watchRules.js";
 import type * as workspaces from "../workspaces.js";
+import type * as x402Node from "../x402Node.js";
 
 import type {
   ApiFromModules,
@@ -125,8 +131,13 @@ declare const fullApi: ApiFromModules<{
   "lib/valuation": typeof lib_valuation;
   "lib/watch": typeof lib_watch;
   "lib/webhook": typeof lib_webhook;
+  "lib/x402/agentCard": typeof lib_x402_agentCard;
+  "lib/x402/cdpEngine": typeof lib_x402_cdpEngine;
+  "lib/x402/flow": typeof lib_x402_flow;
+  "lib/x402/money": typeof lib_x402_money;
   migrations: typeof migrations;
   negotiations: typeof negotiations;
+  paymentLocks: typeof paymentLocks;
   payments: typeof payments;
   playback: typeof playback;
   player: typeof player;
@@ -140,6 +151,7 @@ declare const fullApi: ApiFromModules<{
   watchDelivery: typeof watchDelivery;
   watchRules: typeof watchRules;
   workspaces: typeof workspaces;
+  x402Node: typeof x402Node;
 }>;
 
 /**
@@ -168,4 +180,6 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  staticHosting: import("@convex-dev/static-hosting/_generated/component.js").ComponentApi<"staticHosting">;
+};

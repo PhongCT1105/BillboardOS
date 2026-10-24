@@ -15,7 +15,7 @@
  *   --billboard <id> restrict to one billboard
  *   --hold-only      stop after placing the hold (prints a curl for the 402 challenge)
  *   --faucet         request Base Sepolia test USDC for the buyer wallet, then exit
- *   --server <url>   x402 server (default http://localhost:$X402_SERVER_PORT)
+ *   --server <url>   x402 payment server (default: the Convex deployment, CONVEX_SITE_URL; or X402_SERVER_URL)
  */
 import { randomUUID } from "node:crypto";
 import { CdpClient } from "@coinbase/cdp-sdk";
@@ -34,6 +34,7 @@ import {
   requireEnv,
   agentApi,
   AgentApiError,
+  paymentServerUrl,
 } from "./lib.ts";
 
 // ---------------------------------------------------------------- args
@@ -64,7 +65,7 @@ const flag = (name: string) => {
 const NETWORK = env("X402_NETWORK") ?? "eip155:84532";
 const ENVIRONMENT = env("X402_ENVIRONMENT") === "production" ? "production" : "development";
 const WALLET_NAME = env("BUYER_WALLET_NAME") ?? "advertiser-agent-1";
-const SERVER = (flag("server") ?? `http://localhost:${env("X402_SERVER_PORT") ?? 4021}`).replace(/\/$/, "");
+const SERVER = paymentServerUrl(flag("server"));
 const SLOT_MS = 15 * 60 * 1000;
 const CANDIDATE_SETS = 4;
 

@@ -1030,6 +1030,9 @@ export default defineSchema({
 
   negotiationMessages: defineTable(negotiationMessageFields).index("by_negotiation", ["negotiationId"]),
 
+  /** Short-lived lock: one x402 settle attempt per resource at a time (ADR 0006). */
+  paymentLocks: defineTable({ key: v.string(), expiresAt: v.number() }).index("by_key", ["key"]),
+
   dataSales: defineTable(dataSaleFields)
     .index("by_workspace", ["workspaceId"])
     .index("by_advertiser", ["advertiserId"])

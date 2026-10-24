@@ -43,7 +43,7 @@ Base URL: `<CONVEX_SITE_URL>/api/agent/`. JSON in and out. Amounts are integer U
 
 ## Paying for a hold (x402)
 
-`POST <x402 server>/purchases/{holdId}` with `Authorization: Bearer <agent key>` (scope `pay`).
+`POST <CONVEX_SITE_URL>/purchases/{holdId}` (or `/a2a/hosts/{workspaceId}/purchases/{holdId}`) with `Authorization: Bearer <agent key>` (scope `pay`).
 
 1. The first request returns **402** with x402 payment requirements: the hold's exact amount in USDC on Base Sepolia, payable to the **host workspace's payout address**.
 2. Retry with the signed payment in the `PAYMENT-SIGNATURE` header (the official `@x402/fetch` wrapper does this and keeps the `Authorization` header).
