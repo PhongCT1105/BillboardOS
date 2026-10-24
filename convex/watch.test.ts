@@ -167,7 +167,7 @@ describe("watch rules", () => {
     const sf = await make("sf sunday", { cities: ["san francisco"], daysOfWeek: [0], billboardIds: [w.billboardId] });
     await sweepScreen(w);
     const byRule = new Map<string, number>();
-    for (const a of (await inbox(w.custA)).alerts) byRule.set(a.ruleId, (byRule.get(a.ruleId) ?? 0) + 1);
+    for (const a of (await inbox(w.custA)).alerts) byRule.set(a.ruleId ?? "", (byRule.get(a.ruleId ?? "") ?? 0) + 1);
     for (const r of [cheap, oakland, weekdays, match]) expect(byRule.get(r.ruleId)).toBeUndefined();
     expect(byRule.get(sf.ruleId)).toBe(1);
 

@@ -4,6 +4,7 @@ import { audienceSource } from "./schema";
 
 import { AUDIENCE_BUCKET_MS } from "./lib/pricing";
 import { requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
+import { scheduleDetect } from "./moments";
 
 export { AUDIENCE_BUCKET_MS };
 const MAX_COUNT = 100_000;
@@ -61,6 +62,8 @@ export const record = mutation({
       source: args.source,
       confidence: args.confidence,
     };
+    // Live moment detector (ADR 0006) re-checks after every reading.
+    await scheduleDetect(ctx, args.billboardId, "arrivals");
     if (existing) {
       await ctx.db.patch(existing._id, fields);
       return { aggregateId: existing._id, bucketStart };
@@ -132,6 +135,8 @@ export const addArrivals = mutation({
       )
       .first();
 
+    // Live moment detector (ADR 0006) re-checks after new arrivals.
+    if (args.arrivals > 0) await scheduleDetect(ctx, args.billboardId, "arrivals");
     if (existing) {
       const countEstimate = Math.min(MAX_COUNT, existing.countEstimate + args.arrivals);
       const peakInView = Math.max(existing.peakInView ?? 0, args.peakInView);

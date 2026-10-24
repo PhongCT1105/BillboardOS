@@ -117,13 +117,22 @@ export async function takeHold(
   quote: Doc<"quotes">,
   idempotencyKey: string,
   actor: string,
-  opts: { auctionId?: Id<"auctions">; agentKeyId?: Id<"agentKeys"> } = {},
+  opts: {
+    auctionId?: Id<"auctions">;
+    agentKeyId?: Id<"agentKeys">;
+    /** Flash spots (ADR 0006, moments.ts only): an in-progress slot with at least this much left. */
+    inProgressMinRemainingMs?: number;
+    /** Pay window for this hold (flash spots: shorter than the default 5 minutes). */
+    ttlMs?: number;
+  } = {},
 ): Promise<Doc<"holds">> {
   const now = Date.now();
   const slots: Doc<"slots">[] = [];
   for (const slotId of quote.slotIds) {
     const slot = await ctx.db.get(slotId);
-    if (!slot || slot.state !== "available" || slot.startAt <= now) {
+    const started =
+      opts.inProgressMinRemainingMs !== undefined ? slot !== null && slot.endAt - now < opts.inProgressMinRemainingMs : slot !== null && slot.startAt <= now;
+    if (!slot || slot.state !== "available" || started) {
       throw new ConvexError({
         code: "SLOT_UNAVAILABLE",
         message: "One or more quoted slots are no longer available",
@@ -143,7 +152,7 @@ export async function takeHold(
     slots.push(slot);
   }
 
-  const expiresAt = now + HOLD_TTL_MS;
+  const expiresAt = now + (opts.ttlMs ?? HOLD_TTL_MS);
   const holdId = await ctx.db.insert("holds", {
     workspaceId: quote.workspaceId,
     quoteId: quote._id,

@@ -8,7 +8,7 @@
  *   X402_NETWORK (default eip155:84532), X402_ENVIRONMENT (default development)
  * Cached per warm action instance.
  */
-import { createX402Server, type X402Server } from "@coinbase/cdp-sdk/x402";
+import type { X402Server } from "@coinbase/cdp-sdk/x402";
 import { paidRoutes, type Engine } from "./flow";
 
 export type EngineHandle = { engine: Engine; defaultPayTo: string; network: `${string}:${string}` };
@@ -27,6 +27,8 @@ async function build(): Promise<EngineHandle> {
     throw new Error("x402 is not configured: set CDP_API_KEY_ID and CDP_API_KEY_SECRET on this Convex deployment");
   }
   const payTo = process.env.X402_PAY_TO?.trim();
+  // Loaded lazily: only when x402 is configured on this deployment.
+  const { createX402Server } = await import("@coinbase/cdp-sdk/x402");
   const routes = paidRoutes(network);
   let server: X402Server;
   if (payTo) {

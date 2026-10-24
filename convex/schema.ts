@@ -303,6 +303,13 @@ export const auditEventType = v.union(
   v.literal("negotiation.closed"),
   v.literal("workspace.policy_changed"),
   v.literal("data_sale.recorded"),
+  v.literal("moment.detected"),
+  v.literal("moment.offer"),
+  v.literal("moment.reply"),
+  v.literal("moment.awarded"),
+  v.literal("moment.paid"),
+  v.literal("moment.closed"),
+  v.literal("creative.ready"),
 );
 
 /** Small structured payload for audit events: primitives or string lists (e.g. slot ids). */
@@ -908,11 +915,23 @@ export const agentDeliveryState = v.object({
   deliveredAt: v.optional(v.number()),
 });
 
+/** Alert triggers: watch-rule triggers plus seller-agent flash offers (ADR 0006). */
+export const alertTrigger = v.union(
+  v.literal("available"),
+  v.literal("price_drop"),
+  v.literal("last_minute"),
+  v.literal("auction_open"),
+  v.literal("flash_offer"),
+);
+
 export const alertFields = {
   advertiserId: v.id("advertisers"),
-  ruleId: v.id("watchRules"),
+  /** Watch rule that fired; absent for flash offers. */
+  ruleId: v.optional(v.id("watchRules")),
   campaignId: v.id("campaigns"),
-  trigger: watchTrigger,
+  trigger: alertTrigger,
+  /** Flash offer behind a `flash_offer` alert (ADR 0006). */
+  flashOfferId: v.optional(v.id("flashOffers")),
   billboardId: v.id("billboards"),
   workspaceId: v.optional(v.id("workspaces")),
   slotIds: v.array(v.id("slots")),
@@ -930,6 +949,107 @@ export const alertFields = {
   ackedAt: v.optional(v.number()),
   inbox: v.object({ status: deliveryStatus }),
   agent: v.optional(agentDeliveryState),
+};
+
+// ---------------------------------------------------------------------------
+// Live moments (ADR 0006): crowd -> flash offers -> paid playback
+// ---------------------------------------------------------------------------
+
+export const standingPolicy = v.union(v.literal("auto_accept"), v.literal("counter"), v.literal("pass"));
+
+/** A buyer agent's standing instructions (on its agent key). Shared with agents in each offer; enforced server-side. */
+export const standingInstructions = v.object({
+  maxPricePerSpotMinor: v.number(),
+  minRelevantViewers: v.number(),
+  dailyBudgetMinor: v.number(),
+  policy: standingPolicy,
+  /** For "counter": offer this share of the asking price (0.5..1). */
+  counterRatio: v.optional(v.number()),
+});
+
+export const momentTrigger = v.union(v.literal("arrivals"), v.literal("event"), v.literal("simulated"));
+export const momentStatus = v.union(
+  v.literal("offering"),
+  v.literal("awarded"),
+  v.literal("paid"),
+  v.literal("playing"),
+  v.literal("no_takers"),
+  v.literal("failed"),
+);
+export const momentStep = v.object({
+  key: v.string(),
+  label: v.string(),
+  at: v.number(),
+  detail: v.optional(v.string()),
+});
+export const paymentMode = v.union(v.literal("x402"), v.literal("rehearsal"));
+
+export const momentFields = {
+  workspaceId: v.id("workspaces"),
+  billboardId: v.id("billboards"),
+  trigger: momentTrigger,
+  status: momentStatus,
+  startedAt: v.number(),
+  /** Trailing 15-minute crowd when detected. */
+  crowd: v.number(),
+  /** Best audience segment and its share (max of screen and event mix). */
+  segment: v.string(),
+  segmentShare: v.number(),
+  relevantViewers: v.number(),
+  eventName: v.optional(v.string()),
+  crowdSource: v.string(),
+  reasoning: v.string(),
+  slotId: v.id("slots"),
+  spotStartAt: v.number(),
+  spotEndAt: v.number(),
+  /** Pro-rata screen price for the spot. */
+  priceMinor: v.number(),
+  floorMinor: v.number(),
+  offerClosesAt: v.number(),
+  winnerOfferId: v.optional(v.id("flashOffers")),
+  holdId: v.optional(v.id("holds")),
+  bookingId: v.optional(v.id("bookings")),
+  paidMinor: v.optional(v.number()),
+  paymentTx: v.optional(v.string()),
+  paymentNetwork: v.optional(v.string()),
+  paymentMode: v.optional(paymentMode),
+  paymentBlocked: v.optional(v.string()),
+  firstFrameAt: v.optional(v.number()),
+  durationMs: v.optional(v.number()),
+  steps: v.array(momentStep),
+};
+
+export const flashOfferStatus = v.union(
+  v.literal("sent"),
+  v.literal("accepted"),
+  v.literal("countered"),
+  v.literal("passed"),
+  v.literal("expired"),
+  v.literal("won"),
+  v.literal("lost"),
+  v.literal("defaulted"),
+);
+
+export const flashOfferFields = {
+  momentId: v.id("moments"),
+  workspaceId: v.id("workspaces"),
+  advertiserId: v.id("advertisers"),
+  campaignId: v.id("campaigns"),
+  agentKeyId: v.id("agentKeys"),
+  /** Asking price (the moment's pro-rata screen price). */
+  priceMinor: v.number(),
+  /** Relevant viewers for this campaign's audience. */
+  relevantViewers: v.number(),
+  matchScore: v.number(),
+  status: flashOfferStatus,
+  replyAmountMinor: v.optional(v.number()),
+  replyReasoning: v.optional(v.string()),
+  repliedAt: v.optional(v.number()),
+  holdId: v.optional(v.id("holds")),
+  /** Hosted demo agent (ours, labeled "simulated customer agent"). */
+  simulatedAgent: v.boolean(),
+  delivery: agentDeliveryState,
+  sentAt: v.number(),
 };
 
 export const accountType = v.union(v.literal("host"), v.literal("customer"));
@@ -959,6 +1079,14 @@ export default defineSchema({
     negotiationFloorRatio: v.optional(v.number()),
     negotiationMaxRounds: v.optional(v.number()),
     negotiationOfferTtlMs: v.optional(v.number()),
+    /** Moment detector (ADR 0006). Missing = defaults in lib/moment.ts. */
+    momentEnabled: v.optional(v.boolean()),
+    momentMinRelevantViewers: v.optional(v.number()),
+    momentCooldownMs: v.optional(v.number()),
+    momentResponseWindowMs: v.optional(v.number()),
+    momentMinMatch: v.optional(v.number()),
+    /** Owner-only, OFF by default: settle a blocked winner with a labeled REHEARSAL (simulated) payment. */
+    rehearsalSettlement: v.optional(v.boolean()),
   }).index("by_name", ["name"]),
 
   workspaceMembers: defineTable({
@@ -1001,6 +1129,8 @@ export default defineSchema({
     revokedAt: v.optional(v.number()),
     webhookUrl: v.optional(v.string()),
     webhookSecret: v.string(),
+    /** Standing instructions for flash offers (ADR 0006). */
+    standing: v.optional(standingInstructions),
     lastUsedAt: v.optional(v.number()),
     createdBy: v.string(),
     /** Fixed-window rate limit state. */
@@ -1037,6 +1167,46 @@ export default defineSchema({
     .index("by_workspace", ["workspaceId"])
     .index("by_advertiser", ["advertiserId"])
     .index("by_txHash", ["txHash"]),
+
+  moments: defineTable(momentFields)
+    .index("by_workspace", ["workspaceId"])
+    .index("by_billboard", ["billboardId"])
+    .index("by_hold", ["holdId"])
+    .index("by_booking", ["bookingId"]),
+
+  flashOffers: defineTable(flashOfferFields)
+    .index("by_moment", ["momentId"])
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_hold", ["holdId"]),
+
+  /** A host approved this campaign's creative for its screens: "ready to play" (ADR 0006). */
+  creativeApprovals: defineTable({
+    campaignId: v.id("campaigns"),
+    workspaceId: v.id("workspaces"),
+    approvedBy: v.string(),
+    approvedAt: v.number(),
+  })
+    .index("by_workspace_and_campaign", ["workspaceId", "campaignId"])
+    .index("by_campaign", ["campaignId"]),
+
+  /**
+   * Hosted demo customer agents (labeled "simulated customer agent"). The agent
+   * key is stored AES-GCM encrypted (key derived from INTERNAL_API_SECRET) and
+   * never returned by any query.
+   */
+  demoAgents: defineTable({
+    advertiserId: v.id("advertisers"),
+    slug: v.string(),
+    campaignId: v.id("campaigns"),
+    agentKeyId: v.id("agentKeys"),
+    keyCiphertext: v.string(),
+    keyIv: v.string(),
+    walletName: v.string(),
+    /** Small "think time" before replying, so replies arrive in a realistic order. */
+    thinkMs: v.number(),
+    lastAction: v.optional(v.string()),
+    lastActionAt: v.optional(v.number()),
+  }).index("by_advertiser", ["advertiserId"]),
 
   alerts: defineTable(alertFields)
     .index("by_advertiser", ["advertiserId"])

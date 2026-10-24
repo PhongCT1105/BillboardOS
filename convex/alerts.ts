@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { alertSlot, deliveryStatus, watchTrigger } from "./schema";
+import { alertSlot, alertTrigger, deliveryStatus } from "./schema";
 import { requireCustomer } from "./lib/tenancy";
 
 /** Customer alert inbox (ADR 0004). Live via useQuery; newest first. */
@@ -10,10 +10,12 @@ const MARK_ALL_BATCH = 200;
 
 export const alertView = v.object({
   alertId: v.id("alerts"),
-  ruleId: v.id("watchRules"),
+  /** Null for flash offers (no watch rule). */
+  ruleId: v.union(v.id("watchRules"), v.null()),
   ruleName: v.string(),
+  flashOfferId: v.union(v.id("flashOffers"), v.null()),
   campaignId: v.id("campaigns"),
-  trigger: watchTrigger,
+  trigger: alertTrigger,
   billboardId: v.id("billboards"),
   billboardName: v.string(),
   city: v.string(),
@@ -53,15 +55,17 @@ export const inbox = query({
         const b = await ctx.db.get(a.billboardId);
         names.set(a.billboardId, { name: b?.name ?? "Unknown screen", city: b?.city ?? "" });
       }
-      if (!ruleNames.has(a.ruleId)) {
-        const r = await ctx.db.get(a.ruleId);
-        ruleNames.set(a.ruleId, r?.name ?? "Deleted rule");
+      const ruleKey = a.ruleId ?? "flash";
+      if (!ruleNames.has(ruleKey)) {
+        const r = a.ruleId ? await ctx.db.get(a.ruleId) : null;
+        ruleNames.set(ruleKey, a.ruleId ? (r?.name ?? "Deleted rule") : "Seller agent flash offer");
       }
       const screen = names.get(a.billboardId)!;
       alerts.push({
         alertId: a._id,
-        ruleId: a.ruleId,
-        ruleName: ruleNames.get(a.ruleId)!,
+        ruleId: a.ruleId ?? null,
+        ruleName: ruleNames.get(ruleKey)!,
+        flashOfferId: a.flashOfferId ?? null,
         campaignId: a.campaignId,
         trigger: a.trigger,
         billboardId: a.billboardId,

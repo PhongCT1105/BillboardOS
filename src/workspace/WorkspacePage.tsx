@@ -27,6 +27,7 @@ export function WorkspacePage() {
         </p>
       </div>
       <Screens />
+      <ReadyCreatives />
       <SellerPolicy workspace={workspace} />
       <Team workspace={workspace} />
       <Payout workspace={workspace} />
@@ -294,6 +295,56 @@ function SellerPolicyForm({
       {!owner && <p className="text-sm text-muted">Only owners can change the seller agent's policy.</p>}
       <ErrorLine error={error} />
       {saved && <p role="status" className="text-sm text-muted">Saved. New negotiations use it.</p>}
+    </Section>
+  );
+}
+
+/** Ready creatives (ADR 0006): approve a campaign's creative for this host's screens once; flash spots can then play it instantly. */
+function ReadyCreatives() {
+  const rows = useQuery(api.creatives.readyForWorkspace, {});
+  const setReady = useMutation(api.creatives.setReady);
+  const { busy, error, run } = useAction();
+  return (
+    <Section
+      title="Ready creatives"
+      lead="Creatives you've approved for your screens. Only campaigns with a ready creative get flash offers from your seller agent, and the player preloads them."
+    >
+      {rows === undefined ? (
+        <Skeleton />
+      ) : rows.length === 0 ? (
+        <Empty>No creatives to review yet.</Empty>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {rows.map((r) => (
+            <Card key={r.campaignId} className="flex flex-col gap-3 p-4">
+              <div className="aspect-video overflow-hidden rounded-md border border-line bg-ink">
+                {r.creativeUrl &&
+                  (r.contentType.startsWith("video/") ? (
+                    <video src={r.creativeUrl} muted playsInline className="h-full w-full object-cover" />
+                  ) : (
+                    <img src={r.creativeUrl} alt={`${r.advertiserName} creative`} className="h-full w-full object-cover" />
+                  ))}
+              </div>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-medium">{r.advertiserName}</p>
+                  <p className="truncate text-xs text-faint">{r.brief}</p>
+                </div>
+                <Pill tone={r.ready ? "ok" : "muted"}>{r.ready ? "ready" : "not ready"}</Pill>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => run(() => setReady({ campaignId: r.campaignId, ready: !r.ready }))}
+                className={r.ready ? secondaryBtn : primaryBtn}
+              >
+                {r.ready ? "Remove from my screens" : "Approve for my screens"}
+              </button>
+            </Card>
+          ))}
+        </div>
+      )}
+      <ErrorLine error={error} />
     </Section>
   );
 }

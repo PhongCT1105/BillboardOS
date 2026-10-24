@@ -12,11 +12,14 @@ export function PlayerPage({ billboardId }: { billboardId: Id<"billboards"> }) {
   const now = useNow(5_000);
   const atMinute = Math.floor(now / MINUTE) * MINUTE;
   const state = useQuery(api.player.nowPlaying, { billboardId, atMinute });
+  // Creatives approved for this host: preloaded so a paid flash spot starts instantly (ADR 0006).
+  const ready = useQuery(api.player.readyCreatives, { billboardId });
   const recordPlayback = useMutation(api.player.recordPlayback);
   const recorded = useRef(new Set<string>());
 
   const current = state?.current ?? null;
-  const showCreative = current?.state === "scheduled" && current.creativeUrl;
+  // Keep showing the creative for the whole slot (the playback receipt flips it to "played").
+  const showCreative = (current?.state === "scheduled" || current?.state === "played") && current.creativeUrl;
 
   // A billboard has no pointer; hide the cursor while this page is open.
   useEffect(() => {
@@ -76,6 +79,15 @@ export function PlayerPage({ billboardId }: { billboardId: Id<"billboards"> }) {
           </p>
         </div>
       )}
+      <div aria-hidden className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0">
+        {(ready ?? []).map((c) =>
+          c.contentType?.startsWith("video/") ? (
+            <video key={c.campaignId} src={c.url} preload="auto" muted playsInline />
+          ) : (
+            <img key={c.campaignId} src={c.url} alt="" loading="eager" />
+          ),
+        )}
+      </div>
       <div className="absolute bottom-4 left-5 text-xs text-faint">
         {state.billboard.name}, {state.billboard.city}
       </div>
