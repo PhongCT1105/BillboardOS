@@ -227,7 +227,18 @@ const agentGet = httpAction(async (ctx, request) => {
         }),
       );
     }
-    if (path === "alerts") return json(200, await ctx.runMutation(internal.agentApi.alerts, { token }));
+    if (path === "alerts") {
+      const since = q.get("since");
+      const limit = q.get("limit");
+      return json(
+        200,
+        await ctx.runMutation(internal.agentApi.alerts, {
+          token,
+          since: since === null ? undefined : Number(since),
+          limit: limit === null ? undefined : Number(limit),
+        }),
+      );
+    }
     const status = /^auctions\/([^/]+)\/status$/.exec(path);
     if (status) {
       const campaignId = q.get("campaignId");
@@ -248,6 +259,14 @@ const agentPost = httpAction(async (ctx, request) => {
   const token = bearer(request);
   if (!token) return agentError(401, "INVALID_KEY", "Send Authorization: Bearer <agent key>");
   const path = new URL(request.url).pathname.replace(/^\/api\/agent\//, "").replace(/\/$/, "");
+  const ack = /^alerts\/([^/]+)\/ack$/.exec(path);
+  if (ack) {
+    try {
+      return json(200, await ctx.runMutation(internal.agentApi.ackAlert, { token, alertId: ack[1] }));
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }
   const body = await readJson(request);
   if (body instanceof Response) return body;
   try {

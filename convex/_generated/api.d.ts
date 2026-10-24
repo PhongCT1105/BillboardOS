@@ -12,6 +12,7 @@ import type * as accounts from "../accounts.js";
 import type * as advertisers from "../advertisers.js";
 import type * as agentApi from "../agentApi.js";
 import type * as agentKeys from "../agentKeys.js";
+import type * as alerts from "../alerts.js";
 import type * as approvals from "../approvals.js";
 import type * as auctions from "../auctions.js";
 import type * as audience from "../audience.js";
@@ -24,6 +25,7 @@ import type * as campaigns from "../campaigns.js";
 import type * as collections from "../collections.js";
 import type * as creatives from "../creatives.js";
 import type * as crons from "../crons.js";
+import type * as customerPortal from "../customerPortal.js";
 import type * as dashboard from "../dashboard.js";
 import type * as events from "../events.js";
 import type * as finance from "../finance.js";
@@ -49,6 +51,8 @@ import type * as lib_stages from "../lib/stages.js";
 import type * as lib_tenancy from "../lib/tenancy.js";
 import type * as lib_validators from "../lib/validators.js";
 import type * as lib_valuation from "../lib/valuation.js";
+import type * as lib_watch from "../lib/watch.js";
+import type * as lib_webhook from "../lib/webhook.js";
 import type * as migrations from "../migrations.js";
 import type * as payments from "../payments.js";
 import type * as playback from "../playback.js";
@@ -59,6 +63,9 @@ import type * as seed from "../seed.js";
 import type * as slots from "../slots.js";
 import type * as valuation from "../valuation.js";
 import type * as valuationAgent from "../valuationAgent.js";
+import type * as watch from "../watch.js";
+import type * as watchDelivery from "../watchDelivery.js";
+import type * as watchRules from "../watchRules.js";
 import type * as workspaces from "../workspaces.js";
 
 import type {
@@ -72,6 +79,7 @@ declare const fullApi: ApiFromModules<{
   advertisers: typeof advertisers;
   agentApi: typeof agentApi;
   agentKeys: typeof agentKeys;
+  alerts: typeof alerts;
   approvals: typeof approvals;
   auctions: typeof auctions;
   audience: typeof audience;
@@ -84,6 +92,7 @@ declare const fullApi: ApiFromModules<{
   collections: typeof collections;
   creatives: typeof creatives;
   crons: typeof crons;
+  customerPortal: typeof customerPortal;
   dashboard: typeof dashboard;
   events: typeof events;
   finance: typeof finance;
@@ -109,6 +118,8 @@ declare const fullApi: ApiFromModules<{
   "lib/tenancy": typeof lib_tenancy;
   "lib/validators": typeof lib_validators;
   "lib/valuation": typeof lib_valuation;
+  "lib/watch": typeof lib_watch;
+  "lib/webhook": typeof lib_webhook;
   migrations: typeof migrations;
   payments: typeof payments;
   playback: typeof playback;
@@ -119,6 +130,9 @@ declare const fullApi: ApiFromModules<{
   slots: typeof slots;
   valuation: typeof valuation;
   valuationAgent: typeof valuationAgent;
+  watch: typeof watch;
+  watchDelivery: typeof watchDelivery;
+  watchRules: typeof watchRules;
   workspaces: typeof workspaces;
 }>;
 

@@ -17,7 +17,8 @@
     "server": "tsx server/x402-server.ts",
     "buyer": "tsx server/buyer-agent.ts",
     "postinstall": "node -e \"require('fs').cpSync('node_modules/@mediapipe/tasks-vision/wasm','public/mediapipe',{recursive:true})\"",
-    "auction:demo": "tsx server/auction-agents.ts"
+    "auction:demo": "tsx server/auction-agents.ts",
+    "webhook:listen": "tsx server/webhook-receiver.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",

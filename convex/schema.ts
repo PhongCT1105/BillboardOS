@@ -231,6 +231,7 @@ export const auditEventType = v.union(
   v.literal("workspace.payout_changed"),
   v.literal("company.created"),
   v.literal("agent_key.created"),
+  v.literal("watch_rule.changed"),
   v.literal("agent_key.revoked"),
   v.literal("tenancy.migrated"),
   v.literal("operator.granted"),
@@ -762,6 +763,80 @@ export const auditEventFields = {
 
 export const agentScope = v.union(v.literal("quote"), v.literal("hold"), v.literal("bid"), v.literal("pay"));
 
+export const watchTrigger = v.union(
+  v.literal("available"),
+  v.literal("price_drop"),
+  v.literal("last_minute"),
+  v.literal("auction_open"),
+);
+export const watchDelivery = v.union(v.literal("inbox"), v.literal("agent"));
+export const deliveryStatus = v.union(v.literal("pending"), v.literal("delivered"), v.literal("failed"));
+
+/** Customer "tell me when a spot fits" rule (ADR 0004). */
+export const watchRuleFields = {
+  advertiserId: v.id("advertisers"),
+  campaignId: v.id("campaigns"),
+  name: v.string(),
+  cities: v.optional(v.array(v.string())),
+  billboardIds: v.optional(v.array(v.id("billboards"))),
+  /** 0..1 audience match between the screen and the campaign's target audience. */
+  minMatch: v.optional(v.number()),
+  /** Max screen price per 15-minute slot. */
+  maxPriceMinor: v.number(),
+  /** 0 = Sunday .. 6 = Saturday, in the screen's local time. */
+  daysOfWeek: v.optional(v.array(v.number())),
+  /** Local hours [hourStart, hourEnd), 0..24. */
+  hourStart: v.optional(v.number()),
+  hourEnd: v.optional(v.number()),
+  dateFrom: v.optional(v.number()),
+  dateTo: v.optional(v.number()),
+  triggers: v.array(watchTrigger),
+  delivery: v.array(watchDelivery),
+  /** Agent key whose webhookUrl receives "agent" deliveries. */
+  agentKeyId: v.optional(v.id("agentKeys")),
+  active: v.boolean(),
+  createdBy: v.string(),
+};
+
+export const alertSlot = v.object({
+  slotId: v.id("slots"),
+  startAt: v.number(),
+  endAt: v.number(),
+  screenPriceMinor: v.number(),
+});
+
+export const agentDeliveryState = v.object({
+  status: deliveryStatus,
+  attempts: v.number(),
+  lastError: v.optional(v.string()),
+  lastAttemptAt: v.optional(v.number()),
+  deliveredAt: v.optional(v.number()),
+});
+
+export const alertFields = {
+  advertiserId: v.id("advertisers"),
+  ruleId: v.id("watchRules"),
+  campaignId: v.id("campaigns"),
+  trigger: watchTrigger,
+  billboardId: v.id("billboards"),
+  workspaceId: v.optional(v.id("workspaces")),
+  slotIds: v.array(v.id("slots")),
+  /** First (up to 5) matching slots with their screen price at alert time. */
+  slots: v.array(alertSlot),
+  /** All matching slots found in this pass (slots[] is capped). */
+  matchCount: v.number(),
+  /** Lowest screen price among the alerted slots. */
+  priceMinor: v.number(),
+  auctionId: v.optional(v.id("auctions")),
+  reason: v.string(),
+  createdAt: v.number(),
+  readAt: v.optional(v.number()),
+  /** Set when the company's agent acknowledged it over the API. */
+  ackedAt: v.optional(v.number()),
+  inbox: v.object({ status: deliveryStatus }),
+  agent: v.optional(agentDeliveryState),
+};
+
 export const accountType = v.union(v.literal("host"), v.literal("customer"));
 export const workspaceRole = v.union(v.literal("owner"), v.literal("operator"));
 export const companyRole = v.union(v.literal("owner"), v.literal("member"));
@@ -835,6 +910,25 @@ export default defineSchema({
   })
     .index("by_hash", ["keyHash"])
     .index("by_advertiser", ["advertiserId"]),
+
+  watchRules: defineTable(watchRuleFields)
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_active", ["active"]),
+
+  /** Per rule x slot memory: which triggers already fired, and the last price seen (for price_drop). */
+  watchMatches: defineTable({
+    ruleId: v.id("watchRules"),
+    slotId: v.id("slots"),
+    lastPriceMinor: v.number(),
+    fired: v.array(watchTrigger),
+    updatedAt: v.number(),
+  }).index("by_rule_and_slot", ["ruleId", "slotId"]),
+
+  alerts: defineTable(alertFields)
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_advertiser_and_readAt", ["advertiserId", "readAt"])
+    .index("by_advertiser_and_ackedAt_and_createdAt", ["advertiserId", "ackedAt", "createdAt"])
+    .index("by_rule", ["ruleId"]),
 
   /** LEGACY (pre ADR 0004): read once by the tenancy migration, then unused. */
   operators: defineTable({

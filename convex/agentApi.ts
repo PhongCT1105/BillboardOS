@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, type MutationCtx } from "./_generated/server";
+import { env, internalMutation, type MutationCtx } from "./_generated/server";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
 import { agentScope, audienceTags } from "./schema";
 import {
@@ -15,6 +15,7 @@ import { createQuoteCore, quoteResult } from "./quotes";
 import { createHoldCore, holdResult } from "./holds";
 import { bidCore, joinCore, joinResult, myStatusCore, myStatusResult, setAutoBidCore } from "./auctions";
 import { rankScreens } from "./billboards";
+import { alertPayload, webhookPayload } from "./watchDelivery";
 
 /**
  * Agent HTTP API back end (ADR 0004). One internal mutation per endpoint; the
@@ -28,6 +29,7 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const MAX_SCREENS = 5;
 const MAX_SLOTS_PER_SCREEN = 24;
+const MAX_ALERTS = 50;
 
 /** Parse an id from untrusted input: unknown or malformed -> NOT_FOUND (never a validator 500). */
 function idOf<T extends TableNames>(ctx: MutationCtx, table: T, value: string, label: string): Id<T> {
@@ -304,13 +306,52 @@ export const auctionStatus = internalMutation({
   },
 });
 
-/** GET /api/agent/alerts: watch-rule alerts arrive in ADR 0004 step 3. */
+/** GET /api/agent/alerts?since=<ms>: unacknowledged alerts for the key's company, oldest first. */
 export const alerts = internalMutation({
-  args: { token: v.string() },
-  returns: v.object({ alerts: v.array(v.object({ alertId: v.string() })), note: v.string() }),
+  args: { token: v.string(), since: v.optional(v.number()), limit: v.optional(v.number()) },
+  returns: v.object({ alerts: v.array(webhookPayload), hasMore: v.boolean() }),
   handler: async (ctx, args) => {
-    await authenticateAgent(ctx, args.token, null);
-    return { alerts: [], note: "Watch rules and alerts are not enabled yet." };
+    const agent = await authenticateAgent(ctx, args.token, null);
+    if (args.since !== undefined && !Number.isFinite(args.since)) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "since must be a timestamp in ms" });
+    }
+    if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > MAX_ALERTS)) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: `limit must be 1..${MAX_ALERTS}` });
+    }
+    const limit = args.limit ?? MAX_ALERTS;
+    const since = args.since ?? 0;
+    const rows = await ctx.db
+      .query("alerts")
+      .withIndex("by_advertiser_and_ackedAt_and_createdAt", (q) =>
+        q.eq("advertiserId", agent.key.advertiserId).eq("ackedAt", undefined).gt("createdAt", since),
+      )
+      .take(limit * 4 + 1);
+    const allowed = agent.key.campaignIds;
+    const visible = allowed ? rows.filter((a) => allowed.includes(a.campaignId)) : rows;
+    const base = env.CONVEX_SITE_URL ?? "";
+    const out = [];
+    for (const a of visible.slice(0, limit)) out.push(alertPayload(a, await ctx.db.get(a.billboardId), base));
+    return { alerts: out, hasMore: visible.length > limit || rows.length > limit * 4 };
+  },
+});
+
+/** POST /api/agent/alerts/{id}/ack: the agent has handled this alert (idempotent). */
+export const ackAlert = internalMutation({
+  args: { token: v.string(), alertId: v.string() },
+  returns: v.object({ alertId: v.id("alerts"), ackedAt: v.number() }),
+  handler: async (ctx, args) => {
+    const agent = await authenticateAgent(ctx, args.token, null);
+    const alert = await ctx.db.get(idOf(ctx, "alerts", args.alertId, "Alert"));
+    if (!alert || alert.advertiserId !== agent.key.advertiserId) {
+      throw new ConvexError({ code: "NOT_FOUND", message: "Alert not found" });
+    }
+    if (agent.key.campaignIds && !agent.key.campaignIds.includes(alert.campaignId)) {
+      throw new ConvexError({ code: "CAMPAIGN_NOT_ALLOWED", message: "This key is not allowed to act for that campaign" });
+    }
+    if (alert.ackedAt !== undefined) return { alertId: alert._id, ackedAt: alert.ackedAt };
+    const ackedAt = Date.now();
+    await ctx.db.patch(alert._id, { ackedAt });
+    return { alertId: alert._id, ackedAt };
   },
 });
 

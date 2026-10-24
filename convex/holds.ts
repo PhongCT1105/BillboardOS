@@ -12,6 +12,7 @@ import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH } from "./lib/constants";
 import { assertBoundedString } from "./lib/validators";
 import { requireCampaignAccess } from "./lib/tenancy";
+import { scheduleMatch } from "./watch";
 
 export const holdResult = v.object({
   holdId: v.id("holds"),
@@ -197,7 +198,7 @@ export async function endHold(
 ): Promise<void> {
   await ctx.db.patch(hold._id, { status: outcome });
 
-  const reverted: string[] = [];
+  const reverted: Id<"slots">[] = [];
   for (const slotId of hold.slotIds) {
     const slot = await ctx.db.get(slotId);
     if (slot && slot.state === "held" && slot.holdId === hold._id) {
@@ -240,6 +241,8 @@ export async function endHold(
     data: { quoteId: hold.quoteId, slotIds: reverted },
   });
   if (reverted.length > 0) {
+    // Back on sale: watch rules may alert again for these slots.
+    await scheduleMatch(ctx, { slotIds: reverted, reopened: true, reason: `hold ${outcome}` });
     await recordAudit(ctx, {
       workspaceId: hold.workspaceId,
       traceId: hold.traceId,

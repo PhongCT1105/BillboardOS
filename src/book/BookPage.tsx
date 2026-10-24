@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { countdown, errorMessage, money, timeOfDay } from "../lib/format";
-import { useNow } from "../lib/hooks";
+import { useHashParams, useNow } from "../lib/hooks";
 import { BidPanel } from "../auctions/BidPanel";
 
 type Quote = FunctionReturnType<typeof api.quotes.create>;
@@ -16,8 +16,16 @@ const MAX_SLOTS = 4;
 export function BookPage() {
   const campaigns = useQuery(api.campaigns.list, {});
   const billboards = useQuery(api.billboards.list);
-  const [campaignId, setCampaignId] = useState<Id<"campaigns"> | null>(null);
-  const [billboardId, setBillboardId] = useState<Id<"billboards"> | null>(null);
+  // Deep link from an alert: #/book?billboard=..&campaign=..&slots=a,b
+  const params = useHashParams();
+  const [campaignId, setCampaignId] = useState<Id<"campaigns"> | null>(() => (params.get("campaign") as Id<"campaigns"> | null) ?? null);
+  const [billboardId, setBillboardId] = useState<Id<"billboards"> | null>(() => (params.get("billboard") as Id<"billboards"> | null) ?? null);
+  const [initialSlots] = useState<Id<"slots">[]>(() =>
+    (params.get("slots") ?? "")
+      .split(",")
+      .filter(Boolean)
+      .slice(0, MAX_SLOTS) as Id<"slots">[],
+  );
   const [creating, setCreating] = useState(false);
   const activeCampaign = campaigns?.find((c) => c._id === campaignId) ?? campaigns?.[0];
   const billboard = billboards?.find((b) => b._id === billboardId) ?? billboards?.[0];
@@ -91,6 +99,7 @@ export function BookPage() {
         key={`${activeCampaign._id}:${billboard._id}`}
         campaignId={activeCampaign._id}
         billboardId={billboard._id}
+        initialSlots={billboard._id === billboardId ? initialSlots : []}
         aside={<CreativeUpload campaign={activeCampaign} />}
       />
     </main>
@@ -158,7 +167,12 @@ function NewCampaignForm(props: { onCreated: (id: Id<"campaigns">) => void; onCa
   );
 }
 
-function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"billboards">; aside: React.ReactNode }) {
+function BookingFlow(props: {
+  campaignId: Id<"campaigns">;
+  billboardId: Id<"billboards">;
+  initialSlots: Id<"slots">[];
+  aside: React.ReactNode;
+}) {
   const minuteNow = useNow(60_000);
   const from = Math.floor(minuteNow / QUARTER_HOUR) * QUARTER_HOUR;
   const slots = useQuery(api.slots.listForBillboard, {
@@ -176,7 +190,8 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
     [auctions],
   );
   const [auctionSlot, setAuctionSlot] = useState<Id<"slots"> | null>(null);
-  const [selected, setSelected] = useState<Id<"slots">[]>([]);
+  const [selected, setSelected] = useState<Id<"slots">[]>(props.initialSlots);
+  const [preselectNote, setPreselectNote] = useState<string | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [hold, setHold] = useState<Hold | null>(null);
   const [holdKey, setHoldKey] = useState<string | null>(null);
@@ -185,6 +200,32 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
   const now = useNow(1000);
 
   const available = useMemo(() => (slots ?? []).filter((s) => s.state === "available" && s.startAt > minuteNow), [slots, minuteNow]);
+
+  // Slots preselected from an alert: drop any that sold meanwhile; auctioned ones go to the bid panel.
+  const reconciled = useRef(props.initialSlots.length === 0);
+  useEffect(() => {
+    if (reconciled.current || slots === undefined || auctions === undefined) return;
+    reconciled.current = true;
+    const open = new Set(available.map((s) => s._id));
+    const still = props.initialSlots.filter((id) => open.has(id));
+    const hot = still.find((id) => auctionSlotIds.has(id));
+    if (hot) {
+      setSelected([]);
+      setAuctionSlot(hot);
+    } else {
+      setSelected(still);
+    }
+    const gone = props.initialSlots.length - still.length;
+    setPreselectNote(
+      still.length === 0
+        ? "The slots from your alert are no longer available. Pick others below."
+        : gone > 0
+          ? `${gone} slot${gone === 1 ? " from your alert has" : "s from your alert have"} sold since; the rest are selected.`
+          : hot
+            ? "This slot is in a live auction: bid below."
+            : "Slots from your alert are selected. Get a quote to lock today's price.",
+    );
+  }, [slots, auctions, available, auctionSlotIds, props.initialSlots]);
 
   function toggle(id: Id<"slots">) {
     setQuote(null);
@@ -331,6 +372,7 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
             </span>
           </div>
         )}
+        {preselectNote && !hold && !quote && <p role="status" className="text-sm text-muted">{preselectNote}</p>}
         {error && <p role="alert" className="text-sm text-danger">{error}</p>}
         {holdPanel}
         {quotePanel}

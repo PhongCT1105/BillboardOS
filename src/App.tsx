@@ -11,6 +11,8 @@ import { FinancePage } from "./finance/FinancePage";
 import { SensorPage } from "./sensor/SensorPage";
 import { SignInPage } from "./auth/SignInPage";
 import { CreateCompany, CreateWorkspace, RoleChooser } from "./auth/Onboarding";
+import { AlertsBadgeLink, CUSTOMER_TABS, CustomerPage, type CustomerTab } from "./customer/CustomerPage";
+import { WorkspacePage } from "./workspace/WorkspacePage";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 
@@ -38,9 +40,13 @@ function Shell({ route }: { route: string }) {
           {signedIn?.accountType === "host" && signedIn.workspaces.length > 0 && <HostNav route={route} />}
           {signedIn?.accountType === "customer" && signedIn.companies.length > 0 && (
             <nav className="flex items-center gap-1 text-sm">
-              <NavLink href="#/book" active={route === "/book" || route === "/"}>
+              <NavLink href="#/customer" active={route.startsWith("/customer") && route !== "/customer/alerts"}>
+                Dashboard
+              </NavLink>
+              <NavLink href="#/book" active={route === "/book"}>
                 Book a slot
               </NavLink>
+              <AlertsBadgeLink active={route === "/customer/alerts"} />
             </nav>
           )}
           <div className="ml-auto flex items-center gap-3">
@@ -71,6 +77,7 @@ function HostArea({ me, route }: { me: Me; route: string }) {
   const sensorMatch = route.match(/^\/sensor\/([^/]+)$/);
   if (sensorMatch) return <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />;
   if (route === "/finance") return <FinancePage />;
+  if (route === "/workspace") return <WorkspacePage />;
   if (route === "/book") {
     return (
       <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
@@ -83,16 +90,19 @@ function HostArea({ me, route }: { me: Me; route: string }) {
 
 function CustomerArea({ me, route }: { me: Me; route: string }) {
   if (me.companies.length === 0) return <CreateCompany />;
-  if (route !== "/book" && route !== "/" && route !== "/console") {
-    return (
-      <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
-        <p className="text-muted">
-          That page is for screen hosts. <a href="#/book" className="text-fg underline underline-offset-4">Book a slot</a> instead.
-        </p>
-      </main>
-    );
+  if (route === "/book") return <BookPage />;
+  const tabMatch = route.match(/^\/customer(?:\/([a-z]+))?$/);
+  if (tabMatch || route === "/" || route === "/console") {
+    const tab = (CUSTOMER_TABS.find((t) => t.key === tabMatch?.[1])?.key ?? "alerts") as CustomerTab;
+    return <CustomerPage tab={tab} companyName={me.companies[0]?.displayName ?? "Your company"} />;
   }
-  return <BookPage />;
+  return (
+    <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
+      <p className="text-muted">
+        That page is for screen hosts. <a href="#/customer" className="text-fg underline underline-offset-4">Go to your dashboard</a> instead.
+      </p>
+    </main>
+  );
 }
 
 function HostNav({ route }: { route: string }) {
@@ -105,6 +115,9 @@ function HostNav({ route }: { route: string }) {
       </NavLink>
       <NavLink href="#/finance" active={route === "/finance"}>
         Finance
+      </NavLink>
+      <NavLink href="#/workspace" active={route === "/workspace"}>
+        Workspace
       </NavLink>
       {first && (
         <NavLink href={`#/sensor/${first._id}`} active={route.startsWith("/sensor/")}>

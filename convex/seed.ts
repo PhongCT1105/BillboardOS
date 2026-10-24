@@ -1,6 +1,8 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, type MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { issueAgentKey } from "./agentKeys";
+import { insertRule } from "./watchRules";
 import type { Doc, Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
 import { ensureUpcomingSlots } from "./lib/inventory";
@@ -679,5 +681,197 @@ export const addDemoOwner = internalMutation({
       reason: `${email} added as owner of ${DEMO_WORKSPACE_NAME} (CLI)`,
     });
     return { workspaceId, added: !existing };
+  },
+});
+
+/**
+ * Let an existing (signed-up) account act for a demo company, e.g. to see its
+ * alerts inbox in the customer dashboard:
+ *   npx convex run seed:addDemoCustomer '{"email":"you@example.com","company":"Nvidia"}'
+ * Host accounts can't also be customers.
+ */
+export const addDemoCustomer = internalMutation({
+  args: { email: v.string(), company: v.string() },
+  returns: v.object({ advertiserId: v.id("advertisers"), added: v.boolean() }),
+  handler: async (ctx, args) => {
+    const email = args.email.trim().toLowerCase();
+    const user = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", email))
+      .first();
+    if (!user) throw new ConvexError({ code: "USER_NOT_FOUND", message: "Sign up with this email first" });
+    const advertiser = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", args.company))
+      .first();
+    if (!advertiser) throw new ConvexError({ code: "NOT_FOUND", message: `No company named ${args.company}` });
+    const profile = await ctx.db
+      .query("profiles")
+      .withIndex("by_userId", (q) => q.eq("userId", user._id))
+      .unique();
+    if (profile?.accountType === "host") {
+      throw new ConvexError({ code: "HOST_ACCOUNT", message: "That account is a host; sign up a separate customer account" });
+    }
+    if (!profile) await ctx.db.insert("profiles", { userId: user._id, accountType: "customer" });
+    const existing = await ctx.db
+      .query("advertiserMembers")
+      .withIndex("by_advertiser_and_user", (q) => q.eq("advertiserId", advertiser._id).eq("userId", user._id))
+      .unique();
+    if (!existing) {
+      await ctx.db.insert("advertiserMembers", {
+        advertiserId: advertiser._id,
+        userId: user._id,
+        email,
+        role: advertiser.ownerUserId ? "member" : "owner",
+      });
+      if (!advertiser.ownerUserId) await ctx.db.patch(advertiser._id, { ownerUserId: user._id });
+    }
+    return { advertiserId: advertiser._id, added: !existing };
+  },
+});
+
+const DEMO_WEBHOOK_KEY_NAME = "demo-webhook";
+const DEMO_RULE_NAMES = ["Morning coffee crowd", "Developer screens for GTC"];
+
+/**
+ * One sensible watch rule per demo company (run after seed:demo,
+ * seed:pricingDemo):
+ *   npx convex run seed:demoWatchRules '{"webhookUrl":"https://<tunnel>/alerts"}'
+ *  - Golden Gate Coffee: inbox alerts for SF morning slots under $60.
+ *  - Nvidia: inbox + agent webhook for software-heavy screens under $150,
+ *    including auctions. Issues a fresh "demo-webhook" agent key (earlier ones
+ *    are revoked) and prints its webhook secret ONCE for `npm run webhook:listen`.
+ * Idempotent: earlier demo rules with the same names are replaced (and their
+ * alerts deleted). `clearAlerts: true` also empties both companies' inboxes.
+ */
+export const demoWatchRules = internalMutation({
+  args: { webhookUrl: v.optional(v.string()), clearAlerts: v.optional(v.boolean()) },
+  returns: v.object({
+    rules: v.array(v.object({ company: v.string(), ruleId: v.id("watchRules"), summary: v.string() })),
+    webhook: v.object({
+      company: v.string(),
+      url: v.string(),
+      keyPrefix: v.string(),
+      key: v.string(),
+      webhookSecret: v.string(),
+      envVar: v.string(),
+    }),
+    replacedRules: v.number(),
+    deletedAlerts: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const webhookUrl = args.webhookUrl?.trim() || "http://localhost:8787/alerts";
+    const companyCampaign = async (displayName: string) => {
+      const advertiser = await ctx.db
+        .query("advertisers")
+        .withIndex("by_displayName", (q) => q.eq("displayName", displayName))
+        .first();
+      const campaign = advertiser
+        ? await ctx.db
+            .query("campaigns")
+            .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
+            .first()
+        : null;
+      if (!advertiser || !campaign) {
+        throw new ConvexError({ code: "NOT_SEEDED", message: `${displayName} not found; run seed:demo and seed:pricingDemo first` });
+      }
+      return { advertiser, campaign };
+    };
+    const coffee = await companyCampaign("Golden Gate Coffee Co.");
+    const nvidia = await companyCampaign("Nvidia");
+
+    let replacedRules = 0;
+    let deletedAlerts = 0;
+    for (const advertiserId of [coffee.advertiser._id, nvidia.advertiser._id]) {
+      if (args.clearAlerts) {
+        for (const a of await ctx.db
+          .query("alerts")
+          .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+          .take(500)) {
+          await ctx.db.delete(a._id);
+          deletedAlerts++;
+        }
+      }
+      for (const r of await ctx.db
+        .query("watchRules")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+        .take(100)) {
+        if (DEMO_RULE_NAMES.includes(r.name)) {
+          for (const a of await ctx.db
+            .query("alerts")
+            .withIndex("by_rule", (q) => q.eq("ruleId", r._id))
+            .take(500)) {
+            await ctx.db.delete(a._id);
+            deletedAlerts++;
+          }
+          await ctx.db.delete(r._id);
+          await ctx.scheduler.runAfter(0, internal.watchRules.cleanupMatches, { ruleId: r._id });
+          replacedRules++;
+        }
+      }
+    }
+    for (const k of await ctx.db
+      .query("agentKeys")
+      .withIndex("by_advertiser", (q) => q.eq("advertiserId", nvidia.advertiser._id))
+      .take(100)) {
+      if (k.name === DEMO_WEBHOOK_KEY_NAME && k.revokedAt === undefined) await ctx.db.patch(k._id, { revokedAt: Date.now() });
+    }
+    const key = await issueAgentKey(ctx, {
+      advertiserId: nvidia.advertiser._id,
+      name: DEMO_WEBHOOK_KEY_NAME,
+      scopes: ["quote", "hold", "bid"],
+      campaignIds: [nvidia.campaign._id],
+      budgetCapMinor: 200_000,
+      expiresInDays: 30,
+      webhookUrl,
+      createdBy: "system:seed",
+    });
+
+    const coffeeRule = await insertRule(
+      ctx,
+      coffee.advertiser._id,
+      {
+        campaignId: coffee.campaign._id,
+        name: DEMO_RULE_NAMES[0],
+        cities: ["San Francisco"],
+        maxPriceMinor: 6000,
+        hourStart: 7,
+        hourEnd: 11,
+        triggers: ["available", "price_drop", "last_minute"],
+        delivery: ["inbox"],
+      },
+      "system:seed",
+    );
+    const nvidiaRule = await insertRule(
+      ctx,
+      nvidia.advertiser._id,
+      {
+        campaignId: nvidia.campaign._id,
+        name: DEMO_RULE_NAMES[1],
+        cities: ["San Francisco"],
+        minMatch: 0.5,
+        maxPriceMinor: 15_000,
+        triggers: ["available", "price_drop", "auction_open"],
+        delivery: ["inbox", "agent"],
+        agentKeyId: key.agentKeyId,
+      },
+      "system:seed",
+    );
+    return {
+      rules: [
+        { company: coffee.advertiser.displayName, ...coffeeRule },
+        { company: nvidia.advertiser.displayName, ...nvidiaRule },
+      ],
+      webhook: {
+        company: nvidia.advertiser.displayName,
+        url: webhookUrl,
+        keyPrefix: key.prefix,
+        key: key.key,
+        webhookSecret: key.webhookSecret,
+        envVar: "WEBHOOK_SECRET",
+      },
+      replacedRules,
+      deletedAlerts,
+    };
   },
 });

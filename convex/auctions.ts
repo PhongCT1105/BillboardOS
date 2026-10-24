@@ -26,6 +26,7 @@ import {
   resolveProxy,
 } from "./lib/auction";
 import { takeHold } from "./holds";
+import { scheduleMatch } from "./watch";
 
 const MAX_PARTICIPANTS = 50;
 const MAX_BIDS_READ = 200;
@@ -96,6 +97,7 @@ async function openAuction(
   });
   for (const slot of slots) await ctx.db.patch(slot._id, { auctionId });
   await ctx.scheduler.runAt(endsAt, internal.auctions.close, { auctionId });
+  await scheduleMatch(ctx, { slotIds: input.slotIds, reason: "auction opened" });
   await recordAudit(ctx, {
     workspaceId: billboard.workspaceId,
     traceId,

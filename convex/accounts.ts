@@ -157,9 +157,13 @@ export const removeAccount = internalMutation({
     if (!user) return { removed: false };
     const userId: Id<"users"> = user._id;
     for (const m of await ctx.db.query("workspaceMembers").withIndex("by_user", (q) => q.eq("userId", userId)).take(50)) {
+      const workspace = await ctx.db.get(m.workspaceId);
+      if (workspace?.ownerUserId === userId) await ctx.db.patch(workspace._id, { ownerUserId: undefined });
       await ctx.db.delete(m._id);
     }
     for (const m of await ctx.db.query("advertiserMembers").withIndex("by_user", (q) => q.eq("userId", userId)).take(50)) {
+      const advertiser = await ctx.db.get(m.advertiserId);
+      if (advertiser?.ownerUserId === userId) await ctx.db.patch(advertiser._id, { ownerUserId: undefined });
       await ctx.db.delete(m._id);
     }
     const profile = await getProfile(ctx, userId);
