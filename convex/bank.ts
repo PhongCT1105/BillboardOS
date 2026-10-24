@@ -4,6 +4,7 @@ import type { Id } from "./_generated/dataModel";
 import { bankSource } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { usd } from "./lib/reconcile";
+import { requestArRun, TRIGGER_NEW_LINES } from "./financeAutopilot";
 
 const MAX_LINES_PER_INGEST = 200;
 
@@ -105,7 +106,8 @@ export async function ingestBankLines(
 }
 
 /**
- * Bank feed entry point.
+ * Bank feed entry point. New lines wake the AR clerk for this workspace
+ * (debounced in financeAutopilot.requestArRun); nobody presses a button.
  * TODO(nessie): a "use node"-free action `bank.syncNessie` will fetch deposits
  * from the Nessie sandbox (key in env), map them to BankLineInput with
  * source "nessie", and call `ctx.runMutation(internal.bank.ingest, { lines })`.
@@ -119,6 +121,7 @@ export const ingest = internalMutation({
   }),
   handler: async (ctx, args) => {
     const result = await ingestBankLines(ctx, args.workspaceId, args.lines, "system:bank-feed");
+    if (result.inserted.length > 0) await requestArRun(ctx, args.workspaceId, TRIGGER_NEW_LINES);
     return {
       inserted: result.inserted.length,
       duplicates: result.duplicates,

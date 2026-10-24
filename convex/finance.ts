@@ -13,6 +13,7 @@ import { invoiceBalance } from "./lib/finance";
 import { daysOverdue } from "./lib/collections";
 import { reconciliationSummary, runReconciliationBatch } from "./reconciliation";
 import { resolveWorkspace } from "./lib/tenancy";
+import { noteArRun } from "./financeAutopilot";
 
 /** Open finance exceptions needing operator review, newest first (max 100). */
 export const openExceptions = query({
@@ -183,7 +184,8 @@ export const bankFeed = query({
 });
 
 /**
- * Operator button: run the AR clerk over unmatched bank lines now.
+ * "Reconcile now": run the AR clerk over unmatched bank lines immediately.
+ * The clerk normally runs on its own (financeAutopilot); this is the manual override.
  * Cash is applied as "agent:ar"; anything that needs a person becomes a
  * finance exception and/or an approval request.
  * Operator only.
@@ -193,6 +195,8 @@ export const runReconciliation = mutation({
   returns: reconciliationSummary,
   handler: async (ctx, args) => {
     const operator = await resolveWorkspace(ctx, args.workspaceId);
-    return await runReconciliationBatch(ctx, operator.workspaceId, operator.actor);
+    const summary = await runReconciliationBatch(ctx, operator.workspaceId, operator.actor, "Reconcile now");
+    await noteArRun(ctx, operator.workspaceId, summary.processed);
+    return summary;
   },
 });
