@@ -6,6 +6,7 @@ import { recordAudit } from "./lib/audit";
 import { ACCEPTED_PAYMENT_ASSETS, MAX_KEY_LENGTH } from "./lib/constants";
 import { scheduleBooking } from "./lib/scheduling";
 import { recordSaleHistory } from "./lib/marketHistory";
+import { markAuctionSettled } from "./auctions";
 import { requireOperator } from "./lib/operator";
 
 /**
@@ -283,7 +284,8 @@ async function applyVerifiedPayment(
 
   // Market evidence for future quotes (market-history stage).
   const booked = await ctx.db.get(bookingId);
-  if (booked) await recordSaleHistory(ctx, booked, "posted", now);
+  if (booked) await recordSaleHistory(ctx, booked, hold.auctionId ? "auction" : "posted", now);
+  await markAuctionSettled(ctx, hold, bookingId);
 
   // Creative already approved -> straight to scheduled (P0-07).
   const campaign = await ctx.db.get(quote.campaignId);

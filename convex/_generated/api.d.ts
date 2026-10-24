@@ -10,6 +10,7 @@
 
 import type * as advertisers from "../advertisers.js";
 import type * as approvals from "../approvals.js";
+import type * as auctions from "../auctions.js";
 import type * as audience from "../audience.js";
 import type * as audit from "../audit.js";
 import type * as auth from "../auth.js";
@@ -27,6 +28,7 @@ import type * as fixtures_financeAnswerKey from "../fixtures/financeAnswerKey.js
 import type * as fixtures_financeFixture from "../fixtures/financeFixture.js";
 import type * as holds from "../holds.js";
 import type * as http from "../http.js";
+import type * as lib_auction from "../lib/auction.js";
 import type * as lib_audienceWindow from "../lib/audienceWindow.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_collections from "../lib/collections.js";
@@ -63,6 +65,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   advertisers: typeof advertisers;
   approvals: typeof approvals;
+  auctions: typeof auctions;
   audience: typeof audience;
   audit: typeof audit;
   auth: typeof auth;
@@ -80,6 +83,7 @@ declare const fullApi: ApiFromModules<{
   "fixtures/financeFixture": typeof fixtures_financeFixture;
   holds: typeof holds;
   http: typeof http;
+  "lib/auction": typeof lib_auction;
   "lib/audienceWindow": typeof lib_audienceWindow;
   "lib/audit": typeof lib_audit;
   "lib/collections": typeof lib_collections;

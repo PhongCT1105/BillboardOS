@@ -8,6 +8,7 @@ import { SlotBoard } from "./SlotBoard";
 import { ExceptionList } from "./ExceptionList";
 import { CreativeQueue } from "./CreativeQueue";
 import { ActivityFeed } from "./ActivityFeed";
+import { LiveAuctions } from "../auctions/LiveAuctions";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
@@ -76,6 +77,7 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
       <KpiStrip summary={row} audience={audience} />
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex flex-col gap-10">
+          <LiveAuctions billboardId={billboardId} />
           <SlotBoard slots={slots} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />

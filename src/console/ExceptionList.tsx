@@ -9,6 +9,7 @@ const KIND_LABEL: Record<Doc<"financeExceptions">["kind"], string> = {
   short_payment: "Bank payment is short of the invoice",
   overpayment: "Bank payment is more than the invoice",
   unidentified_payment: "Bank payment from an unknown payer",
+  winner_default: "Auction winner didn't pay in time",
 };
 
 export function ExceptionList({ exceptions }: { exceptions: Doc<"financeExceptions">[] | undefined }) {

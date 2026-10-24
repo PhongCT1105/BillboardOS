@@ -83,6 +83,20 @@ export function SlotBoard({ slots }: { slots: Doc<"slots">[] | undefined }) {
 
 function SlotDetail({ slot, onClose }: { slot: Doc<"slots">; onClose: () => void }) {
   const recordManual = useMutation(api.payments.recordManual);
+  const openAuction = useMutation(api.auctions.open);
+
+  async function startAuction() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await openAuction({ slotIds: [slot._id], durationMinutes: 2, reason: "Opened from the operator console" });
+      setMessage({ tone: "ok", text: "Auction open for 2 minutes. Posted sales for this slot are paused." });
+    } catch (err) {
+      setMessage({ tone: "error", text: errorMessage(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
 
@@ -118,6 +132,16 @@ function SlotDetail({ slot, onClose }: { slot: Doc<"slots">; onClose: () => void
         )}
       </div>
       <div className="flex gap-2">
+        {slot.state === "available" && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={startAuction}
+            className="rounded-md border border-accent px-4 py-2 text-sm text-fg transition-transform active:scale-[0.98] disabled:opacity-60"
+          >
+            Open auction
+          </button>
+        )}
         {slot.state === "held" && slot.holdId && (
           <button
             type="button"

@@ -6,6 +6,7 @@ import { NET15_MS, nextInvoiceNumber } from "./lib/finance";
 import { usd } from "./lib/reconcile";
 import { scheduleBooking } from "./lib/scheduling";
 import { recordSaleHistory } from "./lib/marketHistory";
+import { markAuctionSettled } from "./auctions";
 
 /**
  * Book a held slot on credit for an advertiser on net15 terms: converts the
@@ -138,7 +139,8 @@ export const confirmOnTerms = mutation({
     });
 
     const bookedDoc = await ctx.db.get(bookingId);
-    if (bookedDoc) await recordSaleHistory(ctx, bookedDoc, "terms", now);
+    if (bookedDoc) await recordSaleHistory(ctx, bookedDoc, hold.auctionId ? "auction" : "terms", now);
+    await markAuctionSettled(ctx, hold, bookingId);
 
     if (campaign.creativeStatus === "approved") {
       const booking = await ctx.db.get(bookingId);

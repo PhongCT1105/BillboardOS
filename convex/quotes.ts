@@ -6,6 +6,7 @@ import { currency, pricingConfidence, slotPriceBreakdown } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { MAX_KEY_LENGTH, MAX_SLOTS_PER_QUOTE, QUOTE_TTL_MS } from "./lib/constants";
 import { PRICING_POLICY_VERSION } from "./lib/pricing";
+import { CONTENTION_MIN_BUYERS, CONTENTION_WINDOW_MS } from "./lib/auction";
 import { computeScreenPrice } from "./lib/screenPrice";
 import { applyCompanyMultiplier, heuristicAssessment } from "./lib/valuation";
 import { currentAssessment, gatherCompanyInputs, requestAssessment } from "./valuation";
@@ -78,6 +79,19 @@ export const create = mutation({
         code: "INVALID_INPUT",
         message: "All slots in a quote must be on the same billboard",
       });
+    }
+    // Hot slots under auction can't be bought at a posted price.
+    for (const s of slots) {
+      if (!s.auctionId) continue;
+      const auction = await ctx.db.get(s.auctionId);
+      if (auction?.status === "open") {
+        throw new ConvexError({
+          code: "AUCTION_OPEN",
+          message: "This slot is being auctioned; join the auction to bid",
+          auctionId: auction._id,
+          slotId: s._id,
+        });
+      }
     }
     const unavailable = slots.filter((s) => s.state !== "available" || s.startAt <= now);
     if (unavailable.length > 0) {
@@ -161,6 +175,23 @@ export const create = mutation({
     });
 
     await ctx.scheduler.runAt(expiresAt, internal.quotes.expire, { quoteId });
+
+    // Seller agent hand-off: a second distinct buyer quoting the same slot
+    // within 10 minutes makes it hot; check (and maybe auction) right away.
+    const recent = await ctx.db
+      .query("quotes")
+      .withIndex("by_billboard_and_expiresAt", (q) => q.eq("billboardId", billboardId).gt("expiresAt", now))
+      .take(100);
+    for (const slotId of args.slotIds) {
+      const buyers = new Set(
+        recent
+          .filter((q) => q.status === "open" && q._creationTime >= now - CONTENTION_WINDOW_MS && q.slotIds.includes(slotId))
+          .map((q) => q.campaignId),
+      );
+      if (buyers.size >= CONTENTION_MIN_BUYERS) {
+        await ctx.scheduler.runAfter(0, internal.auctions.openIfHot, { slotId });
+      }
+    }
 
     await recordAudit(ctx, {
       traceId,

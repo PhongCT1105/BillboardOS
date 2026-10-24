@@ -102,6 +102,8 @@ export const financeExceptionKind = v.union(
   v.literal("short_payment"),
   v.literal("overpayment"),
   v.literal("unidentified_payment"),
+  // Auctions
+  v.literal("winner_default"),
 );
 
 export const financeExceptionStatus = v.union(
@@ -233,6 +235,16 @@ export const auditEventType = v.union(
   v.literal("valuation.assessed"),
   v.literal("valuation.overridden"),
   v.literal("valuation.failed"),
+  v.literal("auction.opened"),
+  v.literal("auction.joined"),
+  v.literal("auction.bid"),
+  v.literal("auction.auto_bid_set"),
+  v.literal("auction.extended"),
+  v.literal("auction.closed"),
+  v.literal("auction.failed"),
+  v.literal("auction.winner_default"),
+  v.literal("auction.runner_up_offered"),
+  v.literal("auction.settled"),
   v.literal("campaign.created"),
   v.literal("quote.created"),
   v.literal("quote.expired"),
@@ -314,6 +326,8 @@ export const slotFields = {
   state: slotState,
   holdId: v.optional(v.id("holds")),
   bookingId: v.optional(v.id("bookings")),
+  /** Latest auction for this slot; while that auction is open the slot can't be sold at a posted price. */
+  auctionId: v.optional(v.id("auctions")),
 };
 
 export const advertiserFields = {
@@ -381,6 +395,8 @@ export const holdFields = {
   idempotencyKey: v.string(),
   actor: v.string(),
   traceId: v.string(),
+  /** Set when this hold was granted to an auction winner (or runner-up). */
+  auctionId: v.optional(v.id("auctions")),
 };
 
 export const bookingFields = {
@@ -597,6 +613,78 @@ export const companyAssessmentFields = {
   overriddenBy: v.optional(v.string()),
 };
 
+export const auctionStatus = v.union(
+  v.literal("open"),
+  v.literal("closed"),
+  v.literal("settled"),
+  v.literal("failed"),
+);
+
+/** Ascending auction with proxy bidding and soft close (ADR 0003 section 3). */
+export const auctionFields = {
+  billboardId: v.id("billboards"),
+  slotIds: v.array(v.id("slots")),
+  /** Screen price from the harness at open; every bidder faces the same reserve. */
+  reserveMinor: v.number(),
+  /** Current price: the leader's visible bid (reserve while nobody leads). */
+  currentMinor: v.number(),
+  leaderParticipantId: v.optional(v.id("auctionParticipants")),
+  status: auctionStatus,
+  openedAt: v.number(),
+  endsAt: v.number(),
+  /** Soft-close extensions never go past this. */
+  hardEndsAt: v.number(),
+  incrementRule: v.object({ percentBps: v.number(), minMinor: v.number() }),
+  softCloseMs: v.number(),
+  openedBy: v.string(),
+  openReason: v.string(),
+  traceId: v.string(),
+  extensions: v.number(),
+  closedAt: v.optional(v.number()),
+  /** Participant currently entitled to buy (winner, or runner-up after a default). */
+  winnerParticipantId: v.optional(v.id("auctionParticipants")),
+  winningBidMinor: v.optional(v.number()),
+  winnerHoldId: v.optional(v.id("holds")),
+  defaultedParticipantIds: v.optional(v.array(v.id("auctionParticipants"))),
+  outcomeNote: v.optional(v.string()),
+};
+
+/** A campaign registered to bid. The bidder key is stored hashed; labels are anonymized. */
+export const auctionParticipantFields = {
+  auctionId: v.id("auctions"),
+  campaignId: v.id("campaigns"),
+  /** "Bidder A", "Bidder B", ... in join order. */
+  label: v.string(),
+  keyHash: v.string(),
+  /** Highest manual bid. */
+  manualTopMinor: v.number(),
+  /** max(manual top, auto-bid max), capped by budget. PRIVATE. */
+  effectiveMaxMinor: v.number(),
+  /** When effectiveMax last increased (earliest wins ties). */
+  maxSetAt: v.number(),
+  /** Hold key granted if this participant wins (returned only via myStatus). */
+  holdKey: v.optional(v.string()),
+};
+
+export const bidFields = {
+  auctionId: v.id("auctions"),
+  campaignId: v.id("campaigns"),
+  participantId: v.id("auctionParticipants"),
+  bidderLabel: v.string(),
+  amountMinor: v.number(),
+  isAuto: v.boolean(),
+  createdAt: v.number(),
+};
+
+/** Private proxy maximum per campaign per auction. Never returned by public queries. */
+export const autoBidFields = {
+  auctionId: v.id("auctions"),
+  campaignId: v.id("campaigns"),
+  participantId: v.id("auctionParticipants"),
+  maxMinor: v.number(),
+  updatedAt: v.number(),
+};
+
 export const auditEventFields = {
   traceId: v.string(),
   /** e.g. "system", "operator", "agent:pricing", "buyer:<name>" */
@@ -643,6 +731,18 @@ export default defineSchema({
   quotes: defineTable(quoteFields)
     .index("by_campaign", ["campaignId"])
     .index("by_billboard_and_expiresAt", ["billboardId", "expiresAt"]),
+
+  auctions: defineTable(auctionFields)
+    .index("by_status_and_endsAt", ["status", "endsAt"])
+    .index("by_billboard_and_status", ["billboardId", "status"]),
+
+  auctionParticipants: defineTable(auctionParticipantFields)
+    .index("by_auction_and_campaign", ["auctionId", "campaignId"])
+    .index("by_auction", ["auctionId"]),
+
+  bids: defineTable(bidFields).index("by_auction", ["auctionId"]),
+
+  autoBids: defineTable(autoBidFields).index("by_auction_and_campaign", ["auctionId", "campaignId"]),
 
   companyAssessments: defineTable(companyAssessmentFields).index("by_advertiser_and_assessedAt", [
     "advertiserId",

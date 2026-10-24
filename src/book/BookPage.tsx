@@ -5,6 +5,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { countdown, errorMessage, money, timeOfDay } from "../lib/format";
 import { useNow } from "../lib/hooks";
+import { BidPanel } from "../auctions/BidPanel";
 
 type Quote = FunctionReturnType<typeof api.quotes.create>;
 type Hold = FunctionReturnType<typeof api.holds.create>;
@@ -70,6 +71,12 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
   const createHold = useMutation(api.holds.create);
   const releaseHold = useMutation(api.holds.release);
 
+  const auctions = useQuery(api.auctions.live, { billboardId: props.billboardId });
+  const auctionSlotIds = useMemo(
+    () => new Set((auctions ?? []).filter((a) => a.status === "open").flatMap((a) => a.slots.map((s) => s.slotId))),
+    [auctions],
+  );
+  const [auctionSlot, setAuctionSlot] = useState<Id<"slots"> | null>(null);
   const [selected, setSelected] = useState<Id<"slots">[]>([]);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [hold, setHold] = useState<Hold | null>(null);
@@ -82,6 +89,13 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
 
   function toggle(id: Id<"slots">) {
     setQuote(null);
+    if (auctionSlotIds.has(id)) {
+      // Hot slot: no posted price, bid instead.
+      setSelected([]);
+      setAuctionSlot((cur) => (cur === id ? null : id));
+      return;
+    }
+    setAuctionSlot(null);
     setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= MAX_SLOTS ? cur : [...cur, id]));
   }
 
@@ -157,11 +171,7 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
         <Stat label="Valid for" value={countdown(quote.expiresAt, now)} />
         <Stat label="Confidence" value={quote.confidence} />
       </div>
-      <ul className="mt-4 flex flex-col gap-1 text-sm text-muted">
-        {quote.pricingBasis.map((line) => (
-          <li key={line}>{line}</li>
-        ))}
-      </ul>
+      <PriceBreakdown quote={quote} />
       <button
         type="button"
         onClick={placeHold}
@@ -183,7 +193,8 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
         ) : (
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
             {available.map((s) => {
-              const on = selected.includes(s._id);
+              const on = selected.includes(s._id) || auctionSlot === s._id;
+              const hot = auctionSlotIds.has(s._id);
               return (
                 <button
                   key={s._id}
@@ -196,6 +207,7 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
                   }`}
                 >
                   <span className="tabular font-mono">{timeOfDay(s.startAt)}</span>
+                  {hot && <span className="mt-0.5 block text-[11px] font-medium text-accent">Auction</span>}
                 </button>
               );
             })}
@@ -204,7 +216,8 @@ function BookingFlow(props: { campaignId: Id<"campaigns">; billboardId: Id<"bill
       </section>
 
       <aside className="flex flex-col gap-6 lg:sticky lg:top-6 lg:self-start">
-        {!hold && (
+        {auctionSlot && !hold && <BidPanel slotId={auctionSlot} campaignId={props.campaignId} />}
+        {!hold && !auctionSlot && (
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
@@ -278,6 +291,44 @@ function Stat(props: { label: string; value: string }) {
     <div>
       <p className="text-xs text-muted">{props.label}</p>
       <p className="tabular font-mono text-xl">{props.value}</p>
+    </div>
+  );
+}
+
+const STAGE_LABEL: Record<Quote["priceBreakdown"][number]["stages"][number]["key"], string> = {
+  crowd: "Crowd",
+  time: "Time of day",
+  event: "Nearby event",
+  scarcity: "Scarcity",
+  market: "Recent sales",
+};
+
+/** Screen-price stages per slot. The account price (if any) is a single line; its reasoning stays with the operator. */
+function PriceBreakdown({ quote }: { quote: Quote }) {
+  const accountLine = quote.pricingBasis.find((l) => l.startsWith("Price for your account"));
+  return (
+    <div className="mt-4 flex flex-col gap-4">
+      {quote.priceBreakdown.map((slot) => (
+        <div key={slot.slotId} className="border-t border-line pt-3">
+          <div className="flex items-baseline justify-between text-sm">
+            <span className="font-medium">Slot at {timeOfDay(slot.slotStartAt)}</span>
+            <span className="tabular font-mono">{money(slot.screenMinor)}</span>
+          </div>
+          <ul className="mt-2 flex flex-col gap-1.5 text-sm">
+            {slot.stages.map((st) => (
+              <li key={st.key} className="grid grid-cols-[96px_56px_minmax(0,1fr)] gap-2">
+                <span className="text-muted">{STAGE_LABEL[st.key]}</span>
+                <span className={`tabular font-mono ${st.effective === 1 ? "text-faint" : "text-fg"}`}>x{st.effective.toFixed(2)}</span>
+                <span className={st.effective === 1 ? "text-faint" : "text-muted"}>{st.explanation}</span>
+              </li>
+            ))}
+          </ul>
+          {(slot.floorApplied || slot.ceilingApplied) && (
+            <p className="mt-1 text-xs text-faint">{slot.floorApplied ? "Raised to the screen's price floor." : "Capped at the screen's price ceiling."}</p>
+          )}
+        </div>
+      ))}
+      {accountLine && <p className="border-t border-line pt-3 text-sm text-fg">{accountLine}</p>}
     </div>
   );
 }

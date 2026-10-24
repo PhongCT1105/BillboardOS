@@ -8,6 +8,7 @@ import { BankFeed } from "./BankFeed";
 import { Receivables } from "./Receivables";
 import { ApprovalQueue } from "./ApprovalQueue";
 import { CollectionTasks } from "./CollectionTasks";
+import { CompanyValuations } from "./CompanyValuations";
 
 type RunSummary = FunctionReturnType<typeof api.finance.runReconciliation>;
 
@@ -71,6 +72,7 @@ export function FinancePage() {
           <BankFeed lines={bankFeed} />
           <ExceptionList exceptions={exceptions} />
           <Receivables invoices={receivables} />
+          <CompanyValuations />
         </div>
         <div className="flex flex-col gap-10 lg:sticky lg:top-6 lg:self-start">
           <ApprovalQueue approvals={approvals} />
