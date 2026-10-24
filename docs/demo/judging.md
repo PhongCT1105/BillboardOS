@@ -6,40 +6,61 @@ The official Hacker Guide requires a live demonstration, recommends ~2 minutes, 
 
 ```mermaid
 flowchart TD
-  A[Show active display and real/local audience count] --> B[Advertiser submits campaign brief]
-  B --> C[Agent chooses slot and explains quote]
-  C --> D[Buyer accepts, slot held]
-  D --> E[Payment verified or explicitly labeled mock]
-  E --> F[Booking and creative approval]
-  F --> G[Ad appears on screen]
-  G --> H[Dashboard: revenue + playback receipt]
-  H --> I[Inject conflicting booking or late-payment exception]
-  I --> J[Agent explains/reconciles or requests human approval]
+  A[Screen plays, camera counts passers-by] --> B[Advertiser picks slots with live price estimates]
+  B --> C[Quote explains its price stage by stage]
+  C --> D[Exclusive 5-minute hold]
+  D --> E[x402 payment, or manual payment labeled simulated]
+  E --> F[Booking page flips to booked on its own]
+  F --> G[Operator approves the creative, slot is scheduled]
+  G --> H[Ad plays on screen, playback receipt recorded]
+  H --> I[Finance: planted bank-feed errors and a late payment]
+  I --> J[Agent reconciles; refunds and write-offs wait for a person]
 ```
 
-## Approximate 2-minute script
+## Before judges arrive
 
-- **0–15s:** 'This screen is a billboard, the camera senses nearby traffic, and one operator runs the network.'
-- **15–40s:** Upload a new business campaign: location, audience goal and budget. Show grounded recommendation and deterministic price.
-- **40–70s:** Agent reaches an agreement and creates a temporary inventory hold. Complete a verified payment, or disclose mock checkout clearly.
-- **70–95s:** Booking status becomes confirmed, screen changes to paid creative, receipt appears.
-- **95–120s:** Inject duplicate offer or mismatched payment. Finance agent catches it, prevents bad booking, produces evidence and escalation path.
+- **Terminals:** `npm run dev:convex`, `npm run dev`, and `npm run server` if the CDP wallet is funded.
+- **Reset:** `npx convex run seed:resetBookingDemo` and `npx convex run seed:resetFinanceDemo`.
+- **Operator:** sign in on `#/console`. Teammates who create accounts get access from **Console → Operators**.
+- **Tabs:**
+  1. `#/player/<billboardId>` full screen on the monitor (the billboard). Get the id from `npx convex run billboards:list`.
+  2. `#/sensor/<billboardId>` with the camera allowed (counts only, nothing stored).
+  3. `#/book` (the advertiser).
+  4. `#/console`.
+  5. `#/finance`.
+
+## Two-minute script
+
+- **0–15s, the network.** "This screen is a billboard. The camera counts people walking past, on the device; only the count leaves. One operator runs the whole network." Point at the player and the sensor tab.
+- **15–40s, pricing.** On `#/book`, pick two slots. Each shows a live estimate (~$). Click **Get exact price**, open **Why this price**: crowd, time of day, nearby event, scarcity, recent sales, each with a reason.
+- **40–70s, hold and pay.** Click **Hold these slots**. Show the countdown, the exact USDC amount, Base Sepolia test funds, and the x402 payment request an agent can pay. Pay it:
+  - funded wallet: an x402 client pays the request, and the receipt links to BaseScan;
+  - otherwise: in the console, record the **manual payment** and say out loud that it is simulated (the audit log labels it).
+
+  The booking tab switches to **You're booked** without a refresh.
+- **70–95s, on air.** In the console, approve the creative. The slot is scheduled automatically and the screen plays the ad when the slot starts; the player records a playback receipt.
+- **95–120s, the money.** On `#/finance`, run reconciliation over the bank feed: the AR agent matches clean lines, flags short and unidentified payments, and files refund or write-off requests it is not allowed to approve. Approve one in the queue; the activity log shows the agent asked and you decided.
+
+**Backup beat (auctions):** `npm run auction:demo -- --no-pay` makes two buyer agents compete for a hot slot. The booking page marks it **Auction · bid**; the winner pays from the same checkout.
 
 ## 'The moment' for Hyphenate
 
-Two buyers simultaneously attempt to buy the same Saturday screen slot. Booking agent prevents a second confirmed sale; finance agent discovers a payment whose hold expired; owner reviews a clear exception with amount, source evidence and safe resolution. Judges see a team doing **real work**, not chatting about work.
+Two buyers want the same slot: the hold makes the second one wait, and a contested slot goes to auction instead of a race. A payment that arrives after its hold ran out is recorded but never booked; the buyer sees "under review" and the operator sees an exception with the amount, evidence and next step. Agents can request refunds and write-offs but never approve them, and nobody approves their own request. Judges see agents doing **real work** under controls, not chatting about work.
 
 ## Exhibit board: real vs simulated
 
-| Component | Current documentation-stage status | Before submitting |
+| Component | Status | What to show |
 |---|---|---|
-| Original competition guide | Real uploaded source | Keep exact original reference |
-| Camera people count | Not yet built | Mark actual or simulated in demo |
-| Quotes and booking | Designed | Demonstrate implemented state transitions |
-| Coinbase x402 | Proposed | Demonstrate actual exchange and verification to claim integration |
-| CRS | Proposed | Demonstrate genuine sandbox response to claim integration |
-| Agent reasoning | Specified | Show actual tool trace |
-| Screen playback | Proposed | Demonstrate live target device |
+| Quotes, holds, bookings, hold expiry | **Real** (Convex transactions, test suite) | The booking flow |
+| Staged pricing | **Real**; the nearby event is **seeded** | "Why this price" |
+| Camera people count | **Real** on-device detection, aggregate counts only; labeled simulated fallback | Sensor tab |
+| Coinbase x402 | **Real code on Base Sepolia**; a paid run needs a funded CDP wallet | Receipt with BaseScan link |
+| Manual payment | **Simulated**, labeled "MANUAL (simulated)" in the audit log | Say it out loud |
+| Auctions | **Real**; the two competing buyer agents are **scripted** | `npm run auction:demo` |
+| Finance (AR, reconciliation, approvals) | **Real logic** on **simulated** fixture data with planted errors | Finance page |
+| Company pricing | Claude with web search when `ANTHROPIC_API_KEY` is set, otherwise a labeled heuristic | Valuation list on the finance page |
+| Screen playback and receipts | **Real** | Player tab |
+| CRS, CREAO agents, Claude explanations | **Not built** | Don't claim them |
 
 ## Final checklist
 
