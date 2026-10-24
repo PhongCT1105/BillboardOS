@@ -41,7 +41,7 @@ flowchart TD
 - **70–95s, on air.** In the console, approve the creative. The slot is scheduled automatically and the screen plays the ad when the slot starts; the player records a playback receipt.
 - **95–120s, the money.** On `#/finance`, run reconciliation over the bank feed: the AR agent matches clean lines, flags short and unidentified payments, and files refund or write-off requests it is not allowed to approve. Approve one in the queue; the activity log shows the agent asked and you decided.
 
-**Backup beat (auctions):** `npm run auction:demo -- --no-pay` makes two buyer agents compete for a hot slot. The booking page marks it **Auction · bid**; the winner pays from the same checkout.
+**Main beat (live auction):** follow the [live moment runbook](live-moment-runbook.md): real camera counts, two companies' agents bidding with their own wallets, x402 payment, the ad plays.
 
 ## 'The moment' for Hyphenate
 
@@ -56,7 +56,7 @@ Two buyers want the same slot: the hold makes the second one wait, and a contest
 | Camera people count | **Real** on-device detection, aggregate counts only; labeled simulated fallback | Sensor tab |
 | Coinbase x402 | **Real code on Base Sepolia**; a paid run needs a funded CDP wallet | Receipt with BaseScan link |
 | Manual payment | **Simulated**, labeled "MANUAL (simulated)" in the audit log | Say it out loud |
-| Auctions | **Real**; the two competing buyer agents are **scripted** | `npm run auction:demo` |
+| Live auction | **Real**; company agents run on the server with their own testnet wallets | [Runbook](live-moment-runbook.md) |
 | Finance (AR, reconciliation, approvals) | **Real logic** on **simulated** fixture data with planted errors | Finance page |
 | Company pricing | Claude with web search when `ANTHROPIC_API_KEY` is set, otherwise a labeled heuristic | Valuation list on the finance page |
 | Screen playback and receipts | **Real** | Player tab |

@@ -48,12 +48,13 @@ npx convex login                # once
 npm run dev:convex              # Convex dev deployment (writes .env.local)
 npm run seed                    # billboard, slots, advertisers, campaigns, conference event, Nvidia campaign
 npx convex run seed:finance     # invoices + bank feed with planted errors
+npx convex run seed:liveVenue   # screen, slots and the seeded event for the live auction (no demo companies or agents)
 
 npm run dev                     # web app at http://localhost:5173 (payments and seller agents run on Convex)
 npm run deploy:web              # serve the built site from the Convex deployment at https://<deployment>.convex.site
 npx convex run seed:demoAgentKeys  # prints demo agent keys once; put them in .env
+# Developer tools, outside the demo path (real x402 from a laptop; they use seed:demoAgentKeys)
 npm run buyer -- --hold-only    # advertiser buying agent (pays when CDP wallet is funded)
-npm run auction:demo -- --no-pay  # two buyer agents compete in a live auction for a hot slot
 npm run a2a:demo                # Nvidia's agent buys a report from the host's seller agent, negotiates, pays over x402
 npm run webhook:listen          # local receiver for signed watch-rule alerts (needs a public tunnel URL)
 
@@ -71,7 +72,11 @@ npm run typecheck               # web, convex and server
 | `#/console` | Operator console: inventory, revenue, exceptions, creative approvals, activity |
 | `#/finance` | AR clerk and collections: bank feed, reconciliation, approvals, receivables |
 | `#/book` | Advertiser booking: quote, hold, creative upload |
-| `#/player/<billboardId>` | Fullscreen billboard screen |
+| `#/player/<billboardId>` | Fullscreen billboard screen. Add `?camera=1` to count people with the device camera. Shows announce, live auction, negotiation, settling and playing |
+| `#/customer/agent` | Advertiser: set up the company agent, its wallet, limits and live feed |
+| `#/moment` | Presenter: devices, queue, live bids, host pricing and event, company top-ups |
+
+Running the live auction on a real deployment: [production runbook](docs/demo/live-moment-runbook.md).
 
 The x402 payment endpoints, seller agents (`/a2a/hosts/<workspaceId>/...`) and the agent API (`/api/agent/...`) are served by Convex at `https://<deployment>.convex.site`. Payments need `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET` and `X402_PAY_TO` (or `CDP_WALLET_SECRET`) set with `npx convex env set`.
 
@@ -88,15 +93,19 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Slot inventory, quotes, exclusive holds, hold expiry, bookings | **Real** (Convex transactions, 69 tests) |
 | Staged pricing (crowd, time, event, scarcity, market history) with floor and ceiling | **Real**; the conference event is **seeded** |
 | Company-specific pricing | **Real** guardrails; assessment by **Claude with web search** when `ANTHROPIC_API_KEY` is set on Convex, otherwise a labeled **heuristic** |
-| Ascending auctions, proxy bidding, soft close, winner default | **Real** (Convex, 100 tests); the two competing buyer agents are **scripted** demo agents |
+| Ascending auctions, proxy bidding, soft close, winner default (booking auctions) | **Real** (Convex) |
+| Live auction: announce on real camera counts, 2 s join window, 12 s bidding (two 3 s extensions), negotiation, award, queue and re-offers | **Real** (Convex); the participants are real companies' agents |
+| Live price: audience x plays x CPM x match, host minimum and host-set CPM | **Real**; the host sets CPM and minimum, and enters the event. The seeded venue event from `seed:liveVenue` is **seeded** |
+| Company agents: one per advertiser, run on the server with their own CDP wallet, rule-based tactics, webhooks signed and verified | **Real**; wallets hold **testnet** USDC |
+| Wallet funding | **Real** transfers from the operator wallet plus the CDP faucet (1 USDC per claim, 10 USDC per rolling 24 h per project); testnet money only |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
-| Agent-to-agent commerce: seller agent per host, paid audience reports, negotiation, x402 to the host's wallet | **Real** protocol and policies; the demo buyer is a **scripted** agent; paid runs need a funded wallet |
+| Agent-to-agent commerce: seller agent per host, paid audience reports, negotiation, x402 to the host's wallet | **Real** protocol and policies; `npm run a2a:demo` is a **developer tool** (a scripted buyer on a laptop); paid runs need a funded wallet |
 | Watch rules, alerts, signed agent webhooks | **Real** |
-| Manual payment button in the console | **Simulated** fallback, labeled "MANUAL (simulated)" in the audit log |
+| Payment for a live-auction win | **Real** x402 on Base Sepolia by the winner's agent; shown as paid only with a settlement transaction hash. There is no manual or rehearsal payment |
 | Invoices, reconciliation, approvals, collections planning | **Real logic** on **simulated** fixture data with planted errors and an answer key |
 | Bank feed | **Simulated** fixture today; Capital One Nessie sandbox next |
-| Audience counts | **Real** on-device person detection (MediaPipe) sending aggregate counts only; labeled **simulated** fallback button |
+| Audience counts | **Real** on-device person detection (MediaPipe) on the display with `?camera=1`, sending aggregate counts only. There is no simulated crowd |
 | Operator sign-in and approvals by identity | **Real** (Convex Auth, email + password) |
 | CRS risk screening, CREAO agents, Claude explanations | **Not built yet** |
 
