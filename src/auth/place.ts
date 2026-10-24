@@ -55,3 +55,8 @@ export function randomHostName(): string {
 export function randomCompanyName(): string {
   return `${pick(ADJECTIVES)} ${pick(COMPANY_NOUNS)} ${suffix()}`;
 }
+
+/** Screen names are unique across the platform, so the starter screen gets a number too. */
+export function randomScreenName(city: string): string {
+  return `${city} street screen ${suffix()}`;
+}

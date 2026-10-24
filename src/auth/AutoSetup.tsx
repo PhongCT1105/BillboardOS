@@ -7,7 +7,7 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { errorMessage } from "../lib/format";
 import { CreateCompany, CreateWorkspace, RoleChooser } from "./Onboarding";
 import { PENDING_ROLE_KEY, readPendingRole, type AccountType } from "./SignInPage";
-import { detectPlace, randomCompanyName, randomHostName } from "./place";
+import { detectPlace, randomCompanyName, randomHostName, randomScreenName } from "./place";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 type Step = { label: string; done: boolean };
@@ -80,16 +80,24 @@ function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone:
             const name = randomHostName();
             const workspaceId = await createWorkspace({ name, city: place.city });
             tick(1, `Created ${name}`);
-            await createScreen({
-              workspaceId,
-              name: `${place.city} street screen`,
-              city: place.city,
-              locationLabel: place.locationLabel,
-              utcOffsetMinutes: place.utcOffsetMinutes,
-              // Testnet-friendly prices: a busy spot stays under a faucet claim of test USDC.
-              baseRateMinor: 300,
-              reserveFloorMinor: 100,
-            });
+            let screenId;
+            for (let attempt = 0; attempt < 4 && !screenId; attempt++) {
+              try {
+                screenId = await createScreen({
+                  workspaceId,
+                  name: randomScreenName(place.city),
+                  city: place.city,
+                  locationLabel: place.locationLabel,
+                  utcOffsetMinutes: place.utcOffsetMinutes,
+                  // Testnet-friendly prices: a busy spot stays under a faucet claim of test USDC.
+                  baseRateMinor: 300,
+                  reserveFloorMinor: 100,
+                });
+              } catch (err) {
+                if (codeOf(err) !== "NAME_TAKEN") throw err;
+              }
+            }
+            if (!screenId) throw new Error("Could not pick a free screen name; add one from the console.");
             tick(2, `Screen on ${place.locationLabel}`);
           }
         } else if (me.companies.length === 0) {
