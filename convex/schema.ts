@@ -296,6 +296,13 @@ export const auditEventType = v.union(
   v.literal("playback.observed"),
   v.literal("playback.failed"),
   v.literal("operator.approved"),
+  // agent-to-agent commerce (ADR 0005)
+  v.literal("negotiation.opened"),
+  v.literal("negotiation.message"),
+  v.literal("negotiation.agreed"),
+  v.literal("negotiation.closed"),
+  v.literal("workspace.policy_changed"),
+  v.literal("data_sale.recorded"),
 );
 
 /** Small structured payload for audit events: primitives or string lists (e.g. slot ids). */
@@ -763,6 +770,94 @@ export const auditEventFields = {
 
 export const agentScope = v.union(v.literal("quote"), v.literal("hold"), v.literal("bid"), v.literal("pay"));
 
+// ---------------------------------------------------------------------------
+// Agent-to-agent negotiation and data sales (ADR 0005)
+// ---------------------------------------------------------------------------
+
+export const negotiationStatus = v.union(
+  v.literal("open"),
+  v.literal("agreed"),
+  v.literal("rejected"),
+  v.literal("expired"),
+  v.literal("failed"),
+);
+export const negotiationParty = v.union(v.literal("buyer"), v.literal("seller"), v.literal("system"));
+export const negotiationMessageKind = v.union(
+  v.literal("ask"),
+  v.literal("offer"),
+  v.literal("counter"),
+  v.literal("accept"),
+  v.literal("reject"),
+  v.literal("agreement"),
+  v.literal("expired"),
+  v.literal("failed"),
+);
+
+export const negotiationFields = {
+  workspaceId: v.id("workspaces"),
+  billboardId: v.id("billboards"),
+  advertiserId: v.id("advertisers"),
+  campaignId: v.id("campaigns"),
+  agentKeyId: v.id("agentKeys"),
+  slotIds: v.array(v.id("slots")),
+  status: negotiationStatus,
+  /** Sum of screen prices when the negotiation opened. */
+  screenMinor: v.number(),
+  /** Seller's opening ask (posted price for this company, never below the floor). */
+  askMinor: v.number(),
+  /** Seller never agrees below this: max(screen x floor ratio, reserve floor x slots). Not shown to the buyer. */
+  floorMinor: v.number(),
+  /** Seller's current position (last ask or counter). */
+  sellerMinor: v.number(),
+  /** Buyer's last offer, if any. */
+  buyerMinor: v.optional(v.number()),
+  /** Buyer offers made so far. */
+  rounds: v.number(),
+  maxRounds: v.number(),
+  offerTtlMs: v.number(),
+  /** The seller's current position is valid until then. */
+  offerExpiresAt: v.number(),
+  agreedMinor: v.optional(v.number()),
+  quoteId: v.optional(v.id("quotes")),
+  holdId: v.optional(v.id("holds")),
+  closedReason: v.optional(v.string()),
+  traceId: v.string(),
+  updatedAt: v.number(),
+};
+
+export const negotiationMessageFields = {
+  negotiationId: v.id("negotiations"),
+  workspaceId: v.id("workspaces"),
+  advertiserId: v.id("advertisers"),
+  from: negotiationParty,
+  /** Audit identity, e.g. "agent:Nvidia/demo-agent" or "seller-agent:Moscone Media". */
+  actor: v.string(),
+  kind: negotiationMessageKind,
+  amountMinor: v.optional(v.number()),
+  /** Deterministic reasoning (code decides every number). */
+  reasoning: v.string(),
+  /** Optional prose rewrite of `reasoning` (Claude narrate hook); never changes numbers. */
+  narration: v.optional(v.string()),
+  createdAt: v.number(),
+};
+
+export const dataProduct = v.literal("audience_report");
+
+/** Pay-per-call data sold by a host's seller agent over x402 (ADR 0005). */
+export const dataSaleFields = {
+  workspaceId: v.id("workspaces"),
+  advertiserId: v.id("advertisers"),
+  agentKeyId: v.id("agentKeys"),
+  billboardId: v.id("billboards"),
+  product: dataProduct,
+  amountMinor: v.number(),
+  /** Settlement transaction hash (unique: replays don't double count). */
+  txHash: v.string(),
+  network: v.string(),
+  payer: v.optional(v.string()),
+  recordedAt: v.number(),
+};
+
 export const watchTrigger = v.union(
   v.literal("available"),
   v.literal("price_drop"),
@@ -860,6 +955,10 @@ export default defineSchema({
     ownerUserId: v.optional(v.id("users")),
     /** x402 payouts for this workspace's sales (EVM address). */
     payoutAddress: v.optional(v.string()),
+    /** Seller agent policy (ADR 0005). Missing = defaults in lib/negotiation.ts. */
+    negotiationFloorRatio: v.optional(v.number()),
+    negotiationMaxRounds: v.optional(v.number()),
+    negotiationOfferTtlMs: v.optional(v.number()),
   }).index("by_name", ["name"]),
 
   workspaceMembers: defineTable({
@@ -923,6 +1022,18 @@ export default defineSchema({
     fired: v.array(watchTrigger),
     updatedAt: v.number(),
   }).index("by_rule_and_slot", ["ruleId", "slotId"]),
+
+  negotiations: defineTable(negotiationFields)
+    .index("by_workspace", ["workspaceId"])
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_agentKey_and_status", ["agentKeyId", "status"]),
+
+  negotiationMessages: defineTable(negotiationMessageFields).index("by_negotiation", ["negotiationId"]),
+
+  dataSales: defineTable(dataSaleFields)
+    .index("by_workspace", ["workspaceId"])
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_txHash", ["txHash"]),
 
   alerts: defineTable(alertFields)
     .index("by_advertiser", ["advertiserId"])

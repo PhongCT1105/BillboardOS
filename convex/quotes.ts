@@ -55,6 +55,54 @@ export const create = mutation({
  * Quote business rules, shared by the signed-in customer path and the agent
  * API. Callers must already have authorized the campaign.
  */
+/**
+ * The posted price for this campaign's company: screen price (crowd, time,
+ * event, scarcity, market) with the company multiplier folded in per slot.
+ * Shared by quotes and the seller agent's opening ask (ADR 0005).
+ */
+export async function priceForCampaign(
+  ctx: MutationCtx,
+  campaign: Doc<"campaigns">,
+  billboard: Doc<"billboards">,
+  slots: Doc<"slots">[],
+  now: number,
+) {
+  // Screen price: crowd (trailing 15 min), time, event, scarcity, market.
+  const { price, audienceAggregateId } = await computeScreenPrice(ctx.db, billboard, slots, now, {
+    excludeCampaignId: campaign._id,
+  });
+  const screenBreakdown = price.slotPrices.map((p, i) => ({
+    slotId: slots[i]._id,
+    slotStartAt: p.slotStartAt,
+    computedMinor: p.computedMinor,
+    screenMinor: p.amountMinor,
+    floorApplied: p.floorApplied,
+    ceilingApplied: p.ceilingApplied,
+    stages: p.stages,
+  }));
+
+  // Company valuation (posted quotes only; hidden from the buyer). Never
+  // blocks: use the latest assessment, or an inline heuristic, and schedule
+  // a refresh when stale.
+  const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now, billboard.workspaceId);
+  let companyMultiplier = 1;
+  let companyMethod: "claude" | "heuristic" | "override" | "inline_heuristic" = "inline_heuristic";
+  if (valuation.assessment) {
+    companyMultiplier = valuation.assessment.multiplier;
+    companyMethod = valuation.assessment.method;
+  } else {
+    companyMultiplier = heuristicAssessment(await gatherCompanyInputs(ctx.db, campaign.advertiserId)).multiplier;
+  }
+  if (!valuation.fresh) {
+    await requestAssessment(ctx, campaign.advertiserId, "quote requested without a fresh assessment");
+  }
+  const finalAmountMinor = screenBreakdown.reduce(
+    (sum, b) => sum + applyCompanyMultiplier(b.screenMinor, companyMultiplier, billboard.reserveFloorMinor, price.ceilingMinor),
+    0,
+  );
+  return { price, audienceAggregateId, screenBreakdown, valuation, companyMultiplier, companyMethod, finalAmountMinor };
+}
+
 export async function createQuoteCore(
   ctx: MutationCtx,
   args: { campaignId: Id<"campaigns">; slotIds: Id<"slots">[]; actor: string; agentKeyId?: Id<"agentKeys"> },
@@ -132,40 +180,9 @@ export async function createQuoteCore(
     });
   }
 
-  // Screen price: crowd (trailing 15 min), time, event, scarcity, market.
-  const { price, audienceAggregateId } = await computeScreenPrice(ctx.db, billboard, slots, now, {
-    excludeCampaignId: args.campaignId,
-  });
-  const screenBreakdown = price.slotPrices.map((p, i) => ({
-    slotId: slots[i]._id,
-    slotStartAt: p.slotStartAt,
-    computedMinor: p.computedMinor,
-    screenMinor: p.amountMinor,
-    floorApplied: p.floorApplied,
-    ceilingApplied: p.ceilingApplied,
-    stages: p.stages,
-  }));
+  const { price, audienceAggregateId, screenBreakdown, valuation, companyMultiplier, companyMethod, finalAmountMinor } =
+    await priceForCampaign(ctx, campaign, billboard, slots, now);
   const priceBreakdown = screenBreakdown;
-
-  // Company valuation (posted quotes only; hidden from the buyer). Never
-  // blocks: use the latest assessment, or an inline heuristic, and schedule
-  // a refresh when stale.
-  const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now, billboard.workspaceId);
-  let companyMultiplier = 1;
-  let companyMethod: "claude" | "heuristic" | "override" | "inline_heuristic" = "inline_heuristic";
-  if (valuation.assessment) {
-    companyMultiplier = valuation.assessment.multiplier;
-    companyMethod = valuation.assessment.method;
-  } else {
-    companyMultiplier = heuristicAssessment(await gatherCompanyInputs(ctx.db, campaign.advertiserId)).multiplier;
-  }
-  if (!valuation.fresh) {
-    await requestAssessment(ctx, campaign.advertiserId, "quote requested without a fresh assessment");
-  }
-  const finalAmountMinor = screenBreakdown.reduce(
-    (sum, b) => sum + applyCompanyMultiplier(b.screenMinor, companyMultiplier, billboard.reserveFloorMinor, price.ceilingMinor),
-    0,
-  );
   const pricingBasis =
     finalAmountMinor === price.amountMinor
       ? price.pricingBasis

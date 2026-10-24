@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query, type MutationCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { agentScope } from "./schema";
 import { recordAudit } from "./lib/audit";
@@ -198,5 +198,64 @@ export const revoke = mutation({
       reason: `Agent key "${key.name}" (${key.prefix}) revoked`,
     });
     return null;
+  },
+});
+
+/**
+ * CLI only: issue a key for a company by name (demos and QA). Prints the key once.
+ *   npx convex run agentKeys:issueForCompany '{"company":"Nvidia","name":"a2a-demo","budgetCapMinor":500000}'
+ */
+export const issueForCompany = internalMutation({
+  args: {
+    company: v.string(),
+    name: v.string(),
+    budgetCapMinor: v.number(),
+    scopes: v.optional(v.array(agentScope)),
+    expiresInDays: v.optional(v.number()),
+  },
+  returns: issuedKey,
+  handler: async (ctx, args) => {
+    const advertiser = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", args.company))
+      .first();
+    if (!advertiser) throw new ConvexError({ code: "NOT_FOUND", message: `No company named ${args.company}` });
+    return await issueAgentKey(ctx, {
+      advertiserId: advertiser._id,
+      name: args.name,
+      scopes: args.scopes ?? ["quote", "hold", "bid", "pay"],
+      budgetCapMinor: args.budgetCapMinor,
+      expiresInDays: args.expiresInDays ?? 1,
+      createdBy: "system:cli",
+    });
+  },
+});
+
+/** CLI only: revoke a key by its public prefix (e.g. "bos_agent_3f9a1c2e"). */
+export const revokeByPrefix = internalMutation({
+  args: { company: v.string(), prefix: v.string() },
+  returns: v.object({ revoked: v.boolean() }),
+  handler: async (ctx, args) => {
+    const advertiser = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", args.company))
+      .first();
+    if (!advertiser) throw new ConvexError({ code: "NOT_FOUND", message: `No company named ${args.company}` });
+    const key = (
+      await ctx.db
+        .query("agentKeys")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
+        .take(200)
+    ).find((k) => k.prefix === args.prefix);
+    if (!key || key.revokedAt !== undefined) return { revoked: false };
+    await ctx.db.patch(key._id, { revokedAt: Date.now() });
+    await recordAudit(ctx, {
+      traceId: `company:${advertiser._id}`,
+      actor: "system:cli",
+      type: "agent_key.revoked",
+      subjectId: key._id,
+      reason: `Agent key "${key.name}" (${key.prefix}) revoked from the CLI`,
+    });
+    return { revoked: true };
   },
 });

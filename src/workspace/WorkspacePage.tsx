@@ -27,6 +27,7 @@ export function WorkspacePage() {
         </p>
       </div>
       <Screens />
+      <SellerPolicy workspace={workspace} />
       <Team workspace={workspace} />
       <Payout workspace={workspace} />
     </main>
@@ -203,6 +204,96 @@ function Payout({ workspace }: { workspace: Workspace }) {
       {!owner && <p className="text-sm text-muted">Only owners can change the payout address.</p>}
       <ErrorLine error={error} />
       {saved && <p role="status" className="text-sm text-muted">Saved.</p>}
+    </Section>
+  );
+}
+
+/** Seller agent negotiation policy (ADR 0005). Owners edit; everyone sees it. */
+function SellerPolicy({ workspace }: { workspace: Workspace }) {
+  const policy = useQuery(api.a2a.negotiationPolicy, { workspaceId: workspace.workspaceId });
+  if (policy === undefined) return <Skeleton h="h-40" />;
+  return <SellerPolicyForm key={`${policy.floorRatio}:${policy.maxRounds}:${policy.offerTtlSeconds}`} workspace={workspace} policy={policy} />;
+}
+
+function SellerPolicyForm({
+  workspace,
+  policy,
+}: {
+  workspace: Workspace;
+  policy: { floorRatio: number; maxRounds: number; offerTtlSeconds: number; isDefault: boolean };
+}) {
+  const save = useMutation(api.a2a.setNegotiationPolicy);
+  const [floor, setFloor] = useState(Math.round(policy.floorRatio * 100));
+  const [rounds, setRounds] = useState(String(policy.maxRounds));
+  const [ttl, setTtl] = useState(String(policy.offerTtlSeconds));
+  const [saved, setSaved] = useState(false);
+  const { busy, error, run } = useAction();
+  const owner = workspace.myRole === "owner";
+  const dirty = floor !== Math.round(policy.floorRatio * 100) || rounds !== String(policy.maxRounds) || ttl !== String(policy.offerTtlSeconds);
+  return (
+    <Section
+      title="Seller agent"
+      lead="Your seller agent negotiates with customers' buying agents. It never agrees below the floor (a share of the live screen price, and never below each screen's price floor); its concessions shrink every round."
+    >
+      <form
+        className="flex flex-col gap-4"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setSaved(false);
+          const ok = await run(async () => {
+            await save({ workspaceId: workspace.workspaceId, floorRatio: floor / 100, maxRounds: Number(rounds), offerTtlSeconds: Number(ttl) });
+            return true;
+          });
+          if (ok) setSaved(true);
+        }}
+      >
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <Field label={`Floor: ${floor}% of screen price`}>
+            <input
+              type="range"
+              min={50}
+              max={100}
+              step={1}
+              value={floor}
+              disabled={!owner}
+              onChange={(e) => {
+                setFloor(Number(e.target.value));
+                setSaved(false);
+              }}
+              className="mt-2 accent-[var(--color-accent)]"
+            />
+          </Field>
+          <Field label="Max offers per negotiation">
+            <select value={rounds} disabled={!owner} onChange={(e) => setRounds(e.target.value)} className={inputCls}>
+              {Array.from({ length: 10 }, (_, i) => String(i + 1)).map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Each position valid for">
+            <select value={ttl} disabled={!owner} onChange={(e) => setTtl(e.target.value)} className={inputCls}>
+              {["30", "60", "120", "300", "600", "1800"].map((s) => (
+                <option key={s} value={s}>
+                  {Number(s) < 60 ? `${s} seconds` : `${Number(s) / 60} minute${s === "60" ? "" : "s"}`}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        {owner && (
+          <button type="submit" disabled={busy || !dirty} className={`${primaryBtn} self-start`}>
+            Save policy
+          </button>
+        )}
+      </form>
+      <p className="text-xs text-faint">
+        {policy.isDefault ? "Using defaults (90%, 4 offers, 2 minutes). " : ""}Buyer agents see the round limit and offer validity on your agent card; the floor stays private.
+      </p>
+      {!owner && <p className="text-sm text-muted">Only owners can change the seller agent's policy.</p>}
+      <ErrorLine error={error} />
+      {saved && <p role="status" className="text-sm text-muted">Saved. New negotiations use it.</p>}
     </Section>
   );
 }

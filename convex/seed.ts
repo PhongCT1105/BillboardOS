@@ -731,6 +731,19 @@ export const addDemoCustomer = internalMutation({
 });
 
 const DEMO_WEBHOOK_KEY_NAME = "demo-webhook";
+
+/** https and not localhost / loopback / private-looking hosts. */
+function isPublicHttpsUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url.trim());
+    if (u.protocol !== "https:") return false;
+    const host = u.hostname.toLowerCase();
+    return !(host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "0.0.0.0" || host === "[::1]");
+  } catch {
+    return false;
+  }
+}
 const DEMO_RULE_NAMES = ["Morning coffee crowd", "Developer screens for GTC"];
 
 /**
@@ -738,9 +751,11 @@ const DEMO_RULE_NAMES = ["Morning coffee crowd", "Developer screens for GTC"];
  * seed:pricingDemo):
  *   npx convex run seed:demoWatchRules '{"webhookUrl":"https://<tunnel>/alerts"}'
  *  - Golden Gate Coffee: inbox alerts for SF morning slots under $60.
- *  - Nvidia: inbox + agent webhook for software-heavy screens under $150,
- *    including auctions. Issues a fresh "demo-webhook" agent key (earlier ones
- *    are revoked) and prints its webhook secret ONCE for `npm run webhook:listen`.
+ *  - Nvidia: software-heavy screens under $150, including auctions. Inbox
+ *    only by default; with a public https `webhookUrl` (e.g. a tunnel) it also
+ *    delivers to the agent: issues a fresh "demo-webhook" agent key (earlier
+ *    ones are revoked) and prints its webhook secret ONCE for
+ *    `npm run webhook:listen`.
  * Idempotent: earlier demo rules with the same names are replaced (and their
  * alerts deleted). `clearAlerts: true` also empties both companies' inboxes.
  */
@@ -748,19 +763,25 @@ export const demoWatchRules = internalMutation({
   args: { webhookUrl: v.optional(v.string()), clearAlerts: v.optional(v.boolean()) },
   returns: v.object({
     rules: v.array(v.object({ company: v.string(), ruleId: v.id("watchRules"), summary: v.string() })),
-    webhook: v.object({
-      company: v.string(),
-      url: v.string(),
-      keyPrefix: v.string(),
-      key: v.string(),
-      webhookSecret: v.string(),
-      envVar: v.string(),
-    }),
+    /** Null when Nvidia's rule is inbox-only (no public https webhook URL given). */
+    webhook: v.union(
+      v.null(),
+      v.object({
+        company: v.string(),
+        url: v.string(),
+        keyPrefix: v.string(),
+        key: v.string(),
+        webhookSecret: v.string(),
+        envVar: v.string(),
+      }),
+    ),
     replacedRules: v.number(),
     deletedAlerts: v.number(),
   }),
   handler: async (ctx, args) => {
-    const webhookUrl = args.webhookUrl?.trim() || "http://localhost:8787/alerts";
+    // Agent delivery only to a public https URL: Convex cloud can't reach a
+    // laptop's localhost, and those deliveries would fail forever (ADR 0005 §4).
+    const webhookUrl = isPublicHttpsUrl(args.webhookUrl) ? args.webhookUrl!.trim() : null;
     const companyCampaign = async (displayName: string) => {
       const advertiser = await ctx.db
         .query("advertisers")
@@ -816,16 +837,18 @@ export const demoWatchRules = internalMutation({
       .take(100)) {
       if (k.name === DEMO_WEBHOOK_KEY_NAME && k.revokedAt === undefined) await ctx.db.patch(k._id, { revokedAt: Date.now() });
     }
-    const key = await issueAgentKey(ctx, {
-      advertiserId: nvidia.advertiser._id,
-      name: DEMO_WEBHOOK_KEY_NAME,
-      scopes: ["quote", "hold", "bid"],
-      campaignIds: [nvidia.campaign._id],
-      budgetCapMinor: 200_000,
-      expiresInDays: 30,
-      webhookUrl,
-      createdBy: "system:seed",
-    });
+    const key = webhookUrl
+      ? await issueAgentKey(ctx, {
+          advertiserId: nvidia.advertiser._id,
+          name: DEMO_WEBHOOK_KEY_NAME,
+          scopes: ["quote", "hold", "bid"],
+          campaignIds: [nvidia.campaign._id],
+          budgetCapMinor: 200_000,
+          expiresInDays: 30,
+          webhookUrl,
+          createdBy: "system:seed",
+        })
+      : null;
 
     const coffeeRule = await insertRule(
       ctx,
@@ -852,8 +875,8 @@ export const demoWatchRules = internalMutation({
         minMatch: 0.5,
         maxPriceMinor: 15_000,
         triggers: ["available", "price_drop", "auction_open"],
-        delivery: ["inbox", "agent"],
-        agentKeyId: key.agentKeyId,
+        delivery: key ? ["inbox", "agent"] : ["inbox"],
+        agentKeyId: key?.agentKeyId,
       },
       "system:seed",
     );
@@ -862,14 +885,17 @@ export const demoWatchRules = internalMutation({
         { company: coffee.advertiser.displayName, ...coffeeRule },
         { company: nvidia.advertiser.displayName, ...nvidiaRule },
       ],
-      webhook: {
-        company: nvidia.advertiser.displayName,
-        url: webhookUrl,
-        keyPrefix: key.prefix,
-        key: key.key,
-        webhookSecret: key.webhookSecret,
-        envVar: "WEBHOOK_SECRET",
-      },
+      webhook:
+        key && webhookUrl
+          ? {
+              company: nvidia.advertiser.displayName,
+              url: webhookUrl,
+              keyPrefix: key.prefix,
+              key: key.key,
+              webhookSecret: key.webhookSecret,
+              envVar: "WEBHOOK_SECRET",
+            }
+          : null,
       replacedRules,
       deletedAlerts,
     };

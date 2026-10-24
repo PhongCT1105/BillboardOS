@@ -30,14 +30,14 @@ async function errorCode(promise: Promise<unknown>): Promise<string> {
   throw new Error("expected promise to reject");
 }
 
-/** Independent verifier: what a receiver does with the raw body and its secret. */
-async function verifySignature(secret: string, rawBody: string, header: string): Promise<boolean> {
+/** Independent verifier: what a receiver does with the timestamp, raw body and its secret. */
+async function verifySignature(secret: string, timestamp: string, rawBody: string, header: string): Promise<boolean> {
   const m = /^sha256=([0-9a-f]{64})$/.exec(header);
   if (!m) return false;
   const bytes = new Uint8Array(m[1].match(/../g)!.map((h) => parseInt(h, 16)));
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  return await crypto.subtle.verify("HMAC", key, bytes, enc.encode(rawBody));
+  return await crypto.subtle.verify("HMAC", key, bytes, enc.encode(`${timestamp}.${rawBody}`));
 }
 
 async function world() {
@@ -276,10 +276,19 @@ describe("agent delivery", () => {
     expect(calls[0].url).toBe("https://agent.example/hook");
     const headers = calls[0].init.headers as Record<string, string>;
     const raw = calls[0].init.body as string;
-    expect(await verifySignature(key.webhookSecret, raw, headers["X-BillboardOS-Signature"])).toBe(true);
-    expect(await verifySignature("whsec_wrong", raw, headers["X-BillboardOS-Signature"])).toBe(false);
-    expect(await verifySignature(key.webhookSecret, raw + " ", headers["X-BillboardOS-Signature"])).toBe(false);
-    expect(Number(headers["X-BillboardOS-Timestamp"])).toBeGreaterThan(0);
+    const ts = headers["X-BillboardOS-Timestamp"];
+    const sig = headers["X-BillboardOS-Signature"];
+    expect(Number(ts)).toBeGreaterThan(0);
+    expect(await verifySignature(key.webhookSecret, ts, raw, sig)).toBe(true);
+    expect(await verifySignature("whsec_wrong", ts, raw, sig)).toBe(false);
+    expect(await verifySignature(key.webhookSecret, ts, raw + " ", sig)).toBe(false);
+    // Replay with a fresh timestamp fails: the signature is bound to the original one.
+    expect(await verifySignature(key.webhookSecret, String(Number(ts) + 60_000), raw, sig)).toBe(false);
+    // Body-only HMAC (the old format) is not accepted.
+    const enc = new TextEncoder();
+    const k = await crypto.subtle.importKey("raw", enc.encode(key.webhookSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const bodyOnly = [...new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(raw)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(sig).not.toBe(`sha256=${bodyOnly}`);
     const payload = JSON.parse(raw);
     expect(payload).toMatchObject({
       trigger: "available",
@@ -386,10 +395,14 @@ describe("demo seed", () => {
     await w.t.mutation(internal.seed.pricingDemo, {});
     const first = await w.t.mutation(internal.seed.demoWatchRules, {});
     expect(first.rules.map((r) => r.company)).toEqual(["Golden Gate Coffee Co.", "Nvidia"]);
-    expect(first.webhook).toMatchObject({ url: "http://localhost:8787/alerts", envVar: "WEBHOOK_SECRET" });
-    expect(first.webhook.webhookSecret).toMatch(/^whsec_/);
+    // No public webhook URL: Nvidia's rule is inbox-only and no key is issued.
+    expect(first.webhook).toBeNull();
+    expect((await w.t.mutation(internal.seed.demoWatchRules, { webhookUrl: "http://localhost:8787/alerts" })).webhook).toBeNull();
+    expect((await w.t.mutation(internal.seed.demoWatchRules, { webhookUrl: "https://localhost:8787/alerts" })).webhook).toBeNull();
     const second = await w.t.mutation(internal.seed.demoWatchRules, { webhookUrl: "https://example.trycloudflare.com/alerts" });
     expect(second.replacedRules).toBe(2);
+    expect(second.webhook).toMatchObject({ url: "https://example.trycloudflare.com/alerts", envVar: "WEBHOOK_SECRET" });
+    expect(second.webhook?.webhookSecret).toMatch(/^whsec_/);
     expect(await w.custA.query(api.watchRules.list, {})).toHaveLength(1);
   });
 });
@@ -437,5 +450,27 @@ describe("customer portal", () => {
     expect(await w.custB.query(api.customerPortal.bookings, {})).toEqual([]);
     expect(await w.custB.query(api.customerPortal.invoices, {})).toEqual([]);
     expect(await errorCode(w.custB.query(api.customerPortal.bookings, { advertiserId: w.seed.advertiserIds[0] }))).toBe("NOT_COMPANY_MEMBER");
+  });
+});
+
+describe("stopping deliveries", () => {
+  test("stopPending marks pending agent deliveries failed and no retry runs", async () => {
+    const w = await world();
+    const fetchMock = vi.fn(async () => new Response("down", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const key = await w.custA.mutation(api.agentKeys.create, {
+      name: "watcher",
+      scopes: ["quote"],
+      budgetCapMinor: 100,
+      webhookUrl: "http://localhost:8787/alerts",
+    });
+    await w.custA.mutation(api.watchRules.create, rule(w, { hourStart: 10, hourEnd: 11, delivery: ["agent"], agentKeyId: key.agentKeyId }));
+    await flush(w); // first run -> alert
+    await flush(w); // attempt 1 fails -> retry scheduled
+    expect((await inbox(w.custA)).alerts[0].agent).toMatchObject({ status: "pending", attempts: 1 });
+    expect(await w.t.mutation(internal.watchDelivery.stopPending, { reason: "localhost webhook" })).toEqual({ scanned: 1, stopped: 1 });
+    await w.t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((await inbox(w.custA)).alerts[0].agent).toMatchObject({ status: "failed", lastError: "Stopped: localhost webhook" });
   });
 });

@@ -10,6 +10,7 @@ import { CreativeQueue } from "./CreativeQueue";
 import { ActivityFeed } from "./ActivityFeed";
 import { AddScreenForm } from "../auth/Onboarding";
 import { LiveAuctions } from "../auctions/LiveAuctions";
+import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
@@ -71,6 +72,8 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
   const exceptions = useQuery(api.finance.openExceptions, {});
   const pending = useQuery(api.creatives.pendingReview, {});
   const activity = useQuery(api.audit.recent, {});
+  const negotiations = useQuery(api.negotiations.forWorkspace, {});
+  const dataSales = useQuery(api.a2a.dataSalesForWorkspace, {});
 
   const row = summary?.billboards.find((b) => b.billboardId === billboardId);
 
@@ -83,6 +86,20 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
           <SlotBoard slots={slots} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />
+          <section aria-labelledby="negotiations-heading" className="flex flex-col gap-4">
+            <div>
+              <h2 id="negotiations-heading" className="text-lg font-semibold">
+                Seller agent
+              </h2>
+              <p className="mt-1 text-sm text-muted">Buyer agents negotiating with your seller agent, and data they bought, paid over x402.</p>
+            </div>
+            <NegotiationTimeline
+              items={negotiations}
+              sales={dataSales?.recent}
+              perspective="host"
+              empty="No agent conversations yet. Buyer agents find your seller agent at /a2a/hosts/<workspace>/agent.json on the x402 server."
+            />
+          </section>
         </div>
         <ActivityFeed events={activity} />
       </div>

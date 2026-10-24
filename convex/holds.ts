@@ -355,6 +355,8 @@ export const getForPayment = internalQuery({
       payTo: v.union(v.string(), v.null()),
       /** Correlates server logs with the audit trail (quote -> hold -> payment -> booking). */
       traceId: v.string(),
+      /** Host workspace selling the hold (ADR 0005 per-host purchase route checks it). */
+      workspaceId: v.union(v.id("workspaces"), v.null()),
     }),
   ),
   handler: async (ctx, args) => {
@@ -372,6 +374,7 @@ export const getForPayment = internalQuery({
       payable: hold.status === "active" && Date.now() < hold.expiresAt,
       payTo: hold.workspaceId ? ((await ctx.db.get(hold.workspaceId))?.payoutAddress ?? null) : null,
       traceId: hold.traceId,
+      workspaceId: hold.workspaceId ?? null,
     };
   },
 });

@@ -7,9 +7,11 @@
  * `npx convex run seed:demoWatchRules` or shown once when you create a key),
  * WEBHOOK_PORT (default 8787), WEBHOOK_MAX_SKEW_SECONDS (default 300).
  *
- * Verifies `X-BillboardOS-Signature: sha256=<hex HMAC-SHA256(raw body, secret)>`
- * in constant time, rejects stale `X-BillboardOS-Timestamp`s, prints the alert
- * and answers 200 so BillboardOS records it as delivered.
+ * Verifies `X-BillboardOS-Signature: sha256=<hex HMAC-SHA256("<timestamp>.<raw body>", secret)>`
+ * (timestamp = the `X-BillboardOS-Timestamp` header, unix ms) in constant
+ * time, rejects timestamps outside the skew window (so captured deliveries
+ * can't be replayed), prints the alert and answers 200 so BillboardOS records
+ * it as delivered.
  *
  * Convex cloud cannot reach your laptop's localhost: expose this with a tunnel
  * (e.g. `cloudflared tunnel --url http://localhost:8787`) and use the https
@@ -24,10 +26,10 @@ const port = Number(env("WEBHOOK_PORT") ?? 8787);
 const maxSkewMs = Number(env("WEBHOOK_MAX_SKEW_SECONDS") ?? 300) * 1000;
 const MAX_BODY_BYTES = 256 * 1024;
 
-export function verify(rawBody: string, signatureHeader: string | undefined, key: string): boolean {
+export function verify(timestamp: string, rawBody: string, signatureHeader: string | undefined, key: string): boolean {
   const match = /^sha256=([0-9a-f]{64})$/.exec(signatureHeader ?? "");
-  if (!match) return false;
-  const expected = createHmac("sha256", key).update(rawBody, "utf8").digest();
+  if (!match || !/^\d{1,16}$/.test(timestamp)) return false;
+  const expected = createHmac("sha256", key).update(`${timestamp}.${rawBody}`, "utf8").digest();
   const given = Buffer.from(match[1], "hex");
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
@@ -74,11 +76,13 @@ const server = createServer((req, res) => {
   req.on("end", () => {
     const raw = Buffer.concat(chunks).toString("utf8");
     const signature = req.headers["x-billboardos-signature"];
-    if (!verify(raw, Array.isArray(signature) ? signature[0] : signature, secret)) {
+    const tsHeader = req.headers["x-billboardos-timestamp"];
+    const timestamp = (Array.isArray(tsHeader) ? tsHeader[0] : tsHeader) ?? "";
+    if (!verify(timestamp, raw, Array.isArray(signature) ? signature[0] : signature, secret)) {
       console.warn(`[${new Date().toLocaleTimeString()}] rejected: bad signature`);
       return reply(401, { error: "bad signature" });
     }
-    const ts = Number(req.headers["x-billboardos-timestamp"]);
+    const ts = Number(timestamp);
     if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > maxSkewMs) {
       console.warn(`[${new Date().toLocaleTimeString()}] rejected: stale timestamp`);
       return reply(401, { error: "stale timestamp" });

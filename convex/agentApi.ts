@@ -115,6 +115,8 @@ export const inventory = internalMutation({
     screens: v.array(
       v.object({
         billboardId: v.id("billboards"),
+        /** Host workspace: its seller agent lives at /a2a/hosts/{workspaceId} on the x402 server (ADR 0005). */
+        workspaceId: v.union(v.id("workspaces"), v.null()),
         name: v.string(),
         city: v.string(),
         locationLabel: v.string(),
@@ -194,6 +196,7 @@ export const inventory = internalMutation({
       }
       screens.push({
         billboardId: r.billboardId,
+        workspaceId: billboard.workspaceId ?? null,
         name: r.name,
         city: r.city,
         locationLabel: r.locationLabel,

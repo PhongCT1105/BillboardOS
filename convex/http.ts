@@ -167,6 +167,8 @@ const STATUS_FOR_CODE: Record<string, number> = {
   IDEMPOTENCY_KEY_CONFLICT: 409,
   CAMPAIGN_CLOSED: 409,
   BILLBOARD_OFFLINE: 409,
+  NEGOTIATION_CLOSED: 409,
+  MAX_ROUNDS: 409,
 };
 
 function agentError(status: number, code: string, message: string, extra: Record<string, unknown> = {}): Response {
@@ -309,6 +311,117 @@ const agentPost = httpAction(async (ctx, request) => {
     return errorResponse(error);
   }
 });
+
+/**
+ * Seller agent back end for the x402 server (ADR 0005). Bearer
+ * INTERNAL_API_SECRET; the buyer's agent key travels in the body/query as
+ * `agentKey` and is checked here. Errors as { error: { code, message } }.
+ *
+ *   GET  /internal/a2a/agent-card?workspaceId=
+ *   POST /internal/a2a/reports/authorize   { agentKey, workspaceId, billboardId }
+ *   GET  /internal/a2a/reports/audience?workspaceId=&billboardId=
+ *   POST /internal/a2a/data-sales          { agentKey, workspaceId, billboardId, amountMinor, txHash, network, payer? }
+ *   POST /internal/a2a/negotiations        { agentKey, workspaceId, campaignId, slotIds[], amountMinor?, reasoning? }
+ *   POST /internal/a2a/negotiations/get    { agentKey, workspaceId, negotiationId }
+ *   POST /internal/a2a/negotiations/messages { agentKey, workspaceId, negotiationId, kind, amountMinor?, reasoning? }
+ */
+const a2aGet = httpAction(async (ctx, request) => {
+  const denied = checkAuth(request);
+  if (denied) return denied;
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/^\/internal\/a2a\//, "").replace(/\/$/, "");
+  const q = url.searchParams;
+  try {
+    const workspaceId = q.get("workspaceId");
+    if (!workspaceId) return missing(["workspaceId"]);
+    if (path === "agent-card") return json(200, await ctx.runQuery(internal.a2a.agentCard, { workspaceId }));
+    if (path === "reports/audience") {
+      const billboardId = q.get("billboardId");
+      if (!billboardId) return missing(["billboardId"]);
+      return json(200, await ctx.runQuery(internal.a2a.audienceReport, { workspaceId, billboardId }));
+    }
+    return agentError(404, "NOT_FOUND", `No endpoint GET /internal/a2a/${path}`);
+  } catch (error) {
+    return errorResponse(error);
+  }
+});
+
+const a2aPost = httpAction(async (ctx, request) => {
+  const denied = checkAuth(request);
+  if (denied) return denied;
+  const path = new URL(request.url).pathname.replace(/^\/internal\/a2a\//, "").replace(/\/$/, "");
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const token = str(body.agentKey);
+  const workspaceId = str(body.workspaceId);
+  if (!token || !workspaceId) return missing(["agentKey", "workspaceId"]);
+  try {
+    if (path === "reports/authorize") {
+      const billboardId = str(body.billboardId);
+      if (!billboardId) return missing(["billboardId"]);
+      return json(200, await ctx.runMutation(internal.a2a.authorizeReport, { token, workspaceId, billboardId }));
+    }
+    if (path === "data-sales") {
+      const billboardId = str(body.billboardId);
+      const amountMinor = num(body.amountMinor);
+      const txHash = str(body.txHash);
+      const network = str(body.network);
+      if (!billboardId || amountMinor === undefined || !txHash || !network) {
+        return missing(["billboardId", "amountMinor", "txHash", "network"]);
+      }
+      return json(
+        200,
+        await ctx.runMutation(internal.a2a.recordDataSale, { token, workspaceId, billboardId, amountMinor, txHash, network, payer: str(body.payer) }),
+      );
+    }
+    if (path === "negotiations") {
+      const campaignId = str(body.campaignId);
+      const slotIds = Array.isArray(body.slotIds) && body.slotIds.every((x) => typeof x === "string") ? (body.slotIds as string[]) : undefined;
+      if (!campaignId || !slotIds) return missing(["campaignId", "slotIds[]"]);
+      if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
+      return json(
+        201,
+        await ctx.runMutation(internal.negotiations.open, {
+          token,
+          workspaceId,
+          campaignId,
+          slotIds,
+          amountMinor: num(body.amountMinor),
+          reasoning: str(body.reasoning),
+        }),
+      );
+    }
+    const negotiationId = str(body.negotiationId);
+    if (path === "negotiations/get") {
+      if (!negotiationId) return missing(["negotiationId"]);
+      return json(200, await ctx.runMutation(internal.negotiations.get, { token, workspaceId, negotiationId }));
+    }
+    if (path === "negotiations/messages") {
+      const kind = str(body.kind);
+      if (!negotiationId || (kind !== "offer" && kind !== "accept" && kind !== "reject")) {
+        return missing(["negotiationId", "kind (offer | accept | reject)"]);
+      }
+      if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.negotiations.post, {
+          token,
+          workspaceId,
+          negotiationId,
+          kind,
+          amountMinor: num(body.amountMinor),
+          reasoning: str(body.reasoning),
+        }),
+      );
+    }
+    return agentError(404, "NOT_FOUND", `No endpoint POST /internal/a2a/${path}`);
+  } catch (error) {
+    return errorResponse(error);
+  }
+});
+
+http.route({ pathPrefix: "/internal/a2a/", method: "GET", handler: a2aGet });
+http.route({ pathPrefix: "/internal/a2a/", method: "POST", handler: a2aPost });
 
 http.route({ pathPrefix: "/api/agent/", method: "GET", handler: agentGet });
 http.route({ pathPrefix: "/api/agent/", method: "POST", handler: agentPost });

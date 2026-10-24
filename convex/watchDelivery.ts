@@ -30,6 +30,8 @@ export const webhookPayload = v.object({
   alertId: v.id("alerts"),
   trigger: v.string(),
   campaignId: v.id("campaigns"),
+  /** Host workspace selling the slots (its seller agent: /a2a/hosts/{workspaceId}, ADR 0005). */
+  workspaceId: v.optional(v.id("workspaces")),
   billboard: v.object({
     billboardId: v.id("billboards"),
     name: v.string(),
@@ -57,6 +59,7 @@ export function alertPayload(alert: Doc<"alerts">, billboard: Doc<"billboards"> 
     alertId: alert._id,
     trigger: alert.trigger,
     campaignId: alert.campaignId,
+    ...(alert.workspaceId ? { workspaceId: alert.workspaceId } : {}),
     billboard: {
       billboardId: alert.billboardId,
       name: billboard?.name ?? "Unknown screen",
@@ -167,7 +170,8 @@ export const deliver = internalAction({
     }
     if (job.attempts >= MAX_DELIVERY_ATTEMPTS) return null;
     const body = JSON.stringify(job.payload);
-    const signature = await signWebhook(job.secret, body);
+    const timestamp = String(Date.now());
+    const signature = await signWebhook(job.secret, timestamp, body);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
     let ok = false;
@@ -179,7 +183,7 @@ export const deliver = internalAction({
           "Content-Type": "application/json",
           "User-Agent": "BillboardOS-Webhooks/1",
           [SIGNATURE_HEADER]: signature,
-          [TIMESTAMP_HEADER]: String(Date.now()),
+          [TIMESTAMP_HEADER]: timestamp,
         },
         body,
         signal: controller.signal,
@@ -197,3 +201,28 @@ export const deliver = internalAction({
 });
 
 export type AlertPayload = ReturnType<typeof alertPayload>;
+
+/**
+ * Stop agent deliveries that are still pending (e.g. pointed at a localhost
+ * URL Convex cloud can't reach): mark them failed so no retry runs.
+ *   npx convex run watchDelivery:stopPending '{"reason":"localhost webhook"}'
+ * Scans the newest `limit` alerts (default 500).
+ */
+export const stopPending = internalMutation({
+  args: { reason: v.optional(v.string()), limit: v.optional(v.number()) },
+  returns: v.object({ scanned: v.number(), stopped: v.number() }),
+  handler: async (ctx, args) => {
+    const limit = Math.max(1, Math.min(2000, Math.floor(args.limit ?? 500)));
+    const rows = await ctx.db.query("alerts").order("desc").take(limit);
+    let stopped = 0;
+    const now = Date.now();
+    for (const a of rows) {
+      if (a.agent?.status !== "pending") continue;
+      await ctx.db.patch(a._id, {
+        agent: { ...a.agent, status: "failed", lastAttemptAt: now, lastError: `Stopped: ${(args.reason ?? "delivery cancelled by operator").slice(0, 200)}` },
+      });
+      stopped++;
+    }
+    return { scanned: rows.length, stopped };
+  },
+});

@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as a2a from "../a2a.js";
 import type * as accounts from "../accounts.js";
 import type * as advertisers from "../advertisers.js";
 import type * as agentApi from "../agentApi.js";
@@ -43,6 +44,7 @@ import type * as lib_finance from "../lib/finance.js";
 import type * as lib_inventory from "../lib/inventory.js";
 import type * as lib_marketHistory from "../lib/marketHistory.js";
 import type * as lib_match from "../lib/match.js";
+import type * as lib_negotiation from "../lib/negotiation.js";
 import type * as lib_pricing from "../lib/pricing.js";
 import type * as lib_reconcile from "../lib/reconcile.js";
 import type * as lib_scheduling from "../lib/scheduling.js";
@@ -54,6 +56,7 @@ import type * as lib_valuation from "../lib/valuation.js";
 import type * as lib_watch from "../lib/watch.js";
 import type * as lib_webhook from "../lib/webhook.js";
 import type * as migrations from "../migrations.js";
+import type * as negotiations from "../negotiations.js";
 import type * as payments from "../payments.js";
 import type * as playback from "../playback.js";
 import type * as player from "../player.js";
@@ -75,6 +78,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  a2a: typeof a2a;
   accounts: typeof accounts;
   advertisers: typeof advertisers;
   agentApi: typeof agentApi;
@@ -110,6 +114,7 @@ declare const fullApi: ApiFromModules<{
   "lib/inventory": typeof lib_inventory;
   "lib/marketHistory": typeof lib_marketHistory;
   "lib/match": typeof lib_match;
+  "lib/negotiation": typeof lib_negotiation;
   "lib/pricing": typeof lib_pricing;
   "lib/reconcile": typeof lib_reconcile;
   "lib/scheduling": typeof lib_scheduling;
@@ -121,6 +126,7 @@ declare const fullApi: ApiFromModules<{
   "lib/watch": typeof lib_watch;
   "lib/webhook": typeof lib_webhook;
   migrations: typeof migrations;
+  negotiations: typeof negotiations;
   payments: typeof payments;
   playback: typeof playback;
   player: typeof player;

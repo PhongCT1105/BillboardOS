@@ -5,12 +5,14 @@ import { WatchRulesPanel } from "./WatchRulesPanel";
 import { AlertsPanel } from "./AlertsPanel";
 import { AgentKeysPanel } from "./AgentKeysPanel";
 import { BookingsPanel } from "./BookingsPanel";
+import { NegotiationsPanel } from "./NegotiationsPanel";
 
 export const CUSTOMER_TABS = [
   { key: "alerts", label: "Alerts" },
   { key: "watch", label: "Watch rules" },
   { key: "campaigns", label: "Campaigns" },
   { key: "agents", label: "Agent keys" },
+  { key: "negotiations", label: "Negotiations" },
   { key: "bookings", label: "Bookings & invoices" },
 ] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number]["key"];
@@ -46,6 +48,7 @@ export function CustomerPage({ tab, companyName }: { tab: CustomerTab; companyNa
         {tab === "watch" && <WatchRulesPanel />}
         {tab === "campaigns" && <CampaignsPanel />}
         {tab === "agents" && <AgentKeysPanel />}
+        {tab === "negotiations" && <NegotiationsPanel />}
         {tab === "bookings" && <BookingsPanel />}
       </div>
     </main>

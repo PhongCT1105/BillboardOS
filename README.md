@@ -54,6 +54,8 @@ npm run server                  # x402 payment server at http://localhost:4021
 npx convex run seed:demoAgentKeys  # prints demo agent keys once; put them in .env
 npm run buyer -- --hold-only    # advertiser buying agent (pays when CDP wallet is funded)
 npm run auction:demo -- --no-pay  # two buyer agents compete in a live auction for a hot slot
+npm run a2a:demo                # Nvidia's agent buys a report from the host's seller agent, negotiates, pays over x402
+npm run webhook:listen          # local receiver for signed watch-rule alerts (needs a public tunnel URL)
 
 npm test                        # convex-test suite
 
@@ -87,6 +89,8 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Ascending auctions, proxy bidding, soft close, winner default | **Real** (Convex, 100 tests); the two competing buyer agents are **scripted** demo agents |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
+| Agent-to-agent commerce: seller agent per host, paid audience reports, negotiation, x402 to the host's wallet | **Real** protocol and policies; the demo buyer is a **scripted** agent; paid runs need a funded wallet |
+| Watch rules, alerts, signed agent webhooks | **Real** |
 | Manual payment button in the console | **Simulated** fallback, labeled "MANUAL (simulated)" in the audit log |
 | Invoices, reconciliation, approvals, collections planning | **Real logic** on **simulated** fixture data with planted errors and an answer key |
 | Bank feed | **Simulated** fixture today; Capital One Nessie sandbox next |
