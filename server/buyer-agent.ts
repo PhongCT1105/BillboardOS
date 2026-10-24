@@ -18,14 +18,10 @@
  *   --server <url>   x402 server (default http://localhost:$X402_SERVER_PORT)
  */
 import { randomUUID } from "node:crypto";
-import { ConvexHttpClient } from "convex/browser";
-import { ConvexError } from "convex/values";
 import { CdpClient } from "@coinbase/cdp-sdk";
 import { CdpX402Client } from "@coinbase/cdp-sdk/x402";
 import { wrapFetchWithPayment, decodePaymentResponseHeader } from "@x402/fetch";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
-import { api } from "../convex/_generated/api.js";
-import type { Doc, Id } from "../convex/_generated/dataModel.js";
 import {
   atomicToCents,
   cdpNetworkName,
@@ -36,7 +32,8 @@ import {
   explorerTxUrl,
   presence,
   requireEnv,
-  signInCustomer,
+  agentApi,
+  AgentApiError,
 } from "./lib.ts";
 
 // ---------------------------------------------------------------- args
@@ -78,13 +75,6 @@ const fail = (msg: string, code = 1): never => {
   process.exit(code);
 };
 
-function convexErrorMessage(error: unknown): string {
-  if (error instanceof ConvexError) {
-    const data = error.data as { code?: string; message?: string } | string;
-    return typeof data === "string" ? data : `${data.code ?? "ERROR"}: ${data.message ?? ""}`;
-  }
-  return error instanceof Error ? error.message : String(error);
-}
 
 function makeCdpClient(): CdpX402Client {
   return new CdpX402Client({
@@ -160,97 +150,113 @@ if (!Number.isInteger(slotCount) || slotCount < 1 || slotCount > 16) {
   fail("slots must be an integer 1..16");
 }
 
-const convex = new ConvexHttpClient(requireEnv("CONVEX_URL", "public Convex API URL"));
-const BUYER_EMAIL = env("BUYER_EMAIL") ?? "coffee@demo.billboardos.dev";
-try {
-  await signInCustomer(
-    convex,
-    api.auth.signIn,
-    BUYER_EMAIL,
-    requireEnv("DEMO_CUSTOMER_PASSWORD", "password for the demo customer accounts (seed:demoCustomers)"),
-  );
-  info(`signed in as customer ${BUYER_EMAIL}`);
-} catch (error) {
-  fail(
-    `Could not sign in as ${BUYER_EMAIL}: ${error instanceof Error ? error.message : String(error)}\n` +
-      `  Create the demo buyers once: npx convex run seed:demoCustomers '{"password":"<DEMO_CUSTOMER_PASSWORD>"}'`,
-  );
+// The agent acts for its customer company with a scoped agent key (ADR 0004).
+const AGENT_KEY = requireEnv("BUYER_AGENT_KEY", "agent key from the customer dashboard or `npx convex run seed:demoAgentKeys`");
+const agent = agentApi(requireEnv("CONVEX_SITE_URL", "Convex HTTP actions base URL (agent API)"), AGENT_KEY);
+
+function apiErrorMessage(error: unknown): string {
+  if (error instanceof AgentApiError) return `${error.code}: ${error.message.replace(/^[A-Z_]+: /, "")}`;
+  return error instanceof Error ? error.message : String(error);
 }
+
+type Me = {
+  company: { advertiserId: string; displayName: string };
+  key: { name: string; prefix: string; scopes: string[]; budgetCapMinor: number; committedMinor: number; expiresAt: number };
+  campaigns: { campaignId: string; brief: string; budgetMinor: number; status: string }[];
+};
+type Inventory = {
+  screens: {
+    billboardId: string;
+    name: string;
+    city: string;
+    explanation: string;
+    slots: { slotId: string; startAt: number; endAt: number; screenPriceMinor: number; auction: unknown }[];
+  }[];
+};
+type Quote = { quoteId: string; amountMinor: number; confidence: string; traceId: string; pricingBasis: string[] };
+type Hold = { holdId: string; amountMinor: number; expiresAt: number; traceId: string; replayed: boolean };
 
 // ---------------------------------------------------------------- 1. campaign
 
-step(1, "Choosing campaign");
+step(1, "Checking the agent key and choosing a campaign");
+let me: Me;
+try {
+  me = await agent.get<Me>("me");
+} catch (error) {
+  fail(`Agent key rejected: ${apiErrorMessage(error)}\n  Issue demo keys with: npx convex run seed:demoAgentKeys`);
+}
+me = me!;
+info(
+  `${me.company.displayName} · key "${me.key.name}" (${me.key.prefix}) · scopes ${me.key.scopes.join(", ")} · committed ${centsToUsd(Math.max(1, me.key.committedMinor))} of ${centsToUsd(me.key.budgetCapMinor)} cap`,
+);
 const campaignArg = flag("campaign") ?? positional[0];
-const campaigns = await convex.query(api.campaigns.list, {});
-const open = campaigns.filter((c) => c.status === "active" || c.status === "draft");
+const open = me.campaigns.filter((c) => c.status === "active" || c.status === "draft");
 let campaign = campaignArg
-  ? (campaigns.find((c) => c._id === campaignArg) ??
-    open.find((c) =>
-      `${c.brief} ${c.advertiserName}`.toLowerCase().includes(campaignArg.toLowerCase()),
-    ))
-  : (open.find((c) => c.status === "active") ?? open[0]);
+  ? (open.find((c) => c.campaignId === campaignArg) ??
+    open.find((c) => c.brief.toLowerCase().includes(campaignArg.toLowerCase())))
+  : open[0];
 if (!campaign) {
   fail(
     campaignArg
-      ? `No open campaign matches "${campaignArg}". Open campaigns:\n${open.map((c) => `      ${c._id}  ${c.advertiserName}: ${c.brief.slice(0, 60)}`).join("\n")}`
-      : "No open campaigns. Seed demo data with `npm run seed`.",
+      ? `No open campaign matches "${campaignArg}". Open campaigns:\n${open.map((c) => `      ${c.campaignId}  ${c.brief.slice(0, 60)}`).join("\n")}`
+      : "This key has no open campaigns. Seed demo data with `npm run seed`.",
   );
 }
 campaign = campaign!;
-info(`${campaign.advertiserName}: "${campaign.brief.slice(0, 80)}" (${campaign._id})`);
+info(`"${campaign.brief.slice(0, 80)}" (${campaign.campaignId})`);
+const remainingCap = me.key.budgetCapMinor - me.key.committedMinor;
+if (remainingCap < budgetMinor) {
+  info(`key cap leaves ${centsToUsd(Math.max(1, remainingCap))}; using that as the budget`);
+  budgetMinor = Math.max(1, remainingCap);
+}
 info(`budget cap for this purchase: ${centsToUsd(budgetMinor)} USDC`);
 
 // ---------------------------------------------------------------- 2. inventory
 
-step(2, `Finding ${slotCount} upcoming available slot(s)`);
-const billboards = (await convex.query(api.billboards.list, {})).filter(
-  (b) => b.deviceStatus === "online" && (!flag("billboard") || b._id === flag("billboard")),
-);
-if (billboards.length === 0) fail("No online billboards.");
+step(2, `Finding ${slotCount} upcoming available slot(s) (GET /api/agent/inventory)`);
+const query = new URLSearchParams({ campaignId: campaign.campaignId, hours: "24" });
+if (flag("billboard")) query.set("billboardId", flag("billboard")!);
+const inventory = await agent.get<Inventory>(`inventory?${query}`);
+if (inventory.screens.length === 0) fail("No screens on the marketplace.");
 
-const now = Date.now();
-type Candidate = { billboard: Doc<"billboards">; slotIds: Id<"slots">[]; startAt: number };
+type Candidate = { billboard: Inventory["screens"][number]; slotIds: string[]; startAt: number; screenMinor: number };
 const candidates: Candidate[] = [];
-for (const billboard of billboards) {
-  const slots = await convex.query(api.slots.listForBillboard, {
-    billboardId: billboard._id,
-    from: now + 60_000,
-    to: now + 24 * 60 * 60 * 1000,
-  });
-  const available = slots.filter((s) => s.state === "available");
-  // Runs of `slotCount` back-to-back available slots; sample a few spread across the day.
+for (const billboard of inventory.screens) {
+  // Auctioned slots can't be bought at a posted price.
+  const available = billboard.slots.filter((s) => !s.auction);
   const runs: Candidate[] = [];
   for (let i = 0; i + slotCount <= available.length; i++) {
     const run = available.slice(i, i + slotCount);
     const contiguous = run.every((s, j) => j === 0 || s.startAt - run[j - 1].startAt === SLOT_MS);
-    if (contiguous) runs.push({ billboard, slotIds: run.map((s) => s._id), startAt: run[0].startAt });
+    if (contiguous) {
+      runs.push({
+        billboard,
+        slotIds: run.map((s) => s.slotId),
+        startAt: run[0].startAt,
+        screenMinor: run.reduce((sum, s) => sum + s.screenPriceMinor, 0),
+      });
+    }
   }
-  const stride = Math.max(1, Math.floor(runs.length / CANDIDATE_SETS));
-  for (let i = 0, n = 0; i < runs.length && n < CANDIDATE_SETS; i += stride, n++) {
-    candidates.push(runs[i]);
-  }
-  info(`${billboard.name}: ${available.length} available slot(s) in the next 24h`);
+  // Cheapest screen-price runs first, then a few spread across the day.
+  runs.sort((a, b) => a.screenMinor - b.screenMinor);
+  candidates.push(...runs.slice(0, CANDIDATE_SETS));
+  info(`${billboard.name}: ${available.length} available slot(s) · ${billboard.explanation}`);
 }
 if (candidates.length === 0) fail(`No run of ${slotCount} consecutive available slot(s) found.`);
 
 // ---------------------------------------------------------------- 3. quotes
 
-step(3, `Requesting ${candidates.length} quote(s) and picking the cheapest`);
-type Quote = Awaited<ReturnType<typeof convex.mutation<typeof api.quotes.create>>>;
+step(3, `Requesting ${candidates.length} quote(s) and picking the cheapest (POST /api/agent/quotes)`);
 let best: { quote: Quote; candidate: Candidate } | null = null;
 for (const candidate of candidates) {
   try {
-    const quote = await convex.mutation(api.quotes.create, {
-      campaignId: campaign._id,
-      slotIds: candidate.slotIds,
-      actor: `agent:${WALLET_NAME}`,
-    });
+    const quote = await agent.post<Quote>("quotes", { campaignId: campaign.campaignId, slotIds: candidate.slotIds });
     info(
       `${new Date(candidate.startAt).toISOString()}  ${candidate.billboard.name}  ${centsToUsd(quote.amountMinor)}  (${quote.confidence})`,
     );
     if (!best || quote.amountMinor < best.quote.amountMinor) best = { quote, candidate };
   } catch (error) {
-    info(`${new Date(candidate.startAt).toISOString()}  quote failed: ${convexErrorMessage(error)}`);
+    info(`${new Date(candidate.startAt).toISOString()}  quote failed: ${apiErrorMessage(error)}`);
   }
 }
 if (!best) fail("Could not obtain any quote.");
@@ -269,17 +275,13 @@ info(`within budget (${centsToUsd(quote.amountMinor)} <= ${centsToUsd(budgetMino
 
 // ---------------------------------------------------------------- 4. hold
 
-step(4, "Placing exclusive hold");
+step(4, "Placing exclusive hold (POST /api/agent/holds)");
 const idempotencyKey = `agent:${WALLET_NAME}:${randomUUID()}`;
-let hold;
+let hold: Hold;
 try {
-  hold = await convex.mutation(api.holds.create, {
-    quoteId: quote.quoteId,
-    idempotencyKey,
-    actor: `agent:${WALLET_NAME}`,
-  });
+  hold = await agent.post<Hold>("holds", { quoteId: quote.quoteId, idempotencyKey });
 } catch (error) {
-  fail(`Hold failed: ${convexErrorMessage(error)}`);
+  fail(`Hold failed: ${apiErrorMessage(error)}`);
 }
 hold = hold!;
 info(`hold ${hold.holdId} · ${centsToUsd(hold.amountMinor)} · expires ${new Date(hold.expiresAt).toISOString()}`);
@@ -290,14 +292,16 @@ if (flags.has("hold-only") || !env("CDP_WALLET_SECRET")) {
   if (!env("CDP_WALLET_SECRET")) {
     info("CDP_WALLET_SECRET is not set, so the agent cannot sign a payment. Stopping after the hold.");
   }
-  info(`See the x402 challenge: curl -i -X POST ${purchaseUrl}`);
+  info(`See the x402 challenge: curl -i -X POST -H "Authorization: Bearer $BUYER_AGENT_KEY" ${purchaseUrl}`);
   process.exit(0);
 }
 
 // ---------------------------------------------------------------- 5. challenge
 
 step(5, `Requesting ${purchaseUrl} (expect HTTP 402)`);
-const probe = await fetch(purchaseUrl, { method: "POST" });
+// The x402 server checks that this agent key has the "pay" scope for the hold's company.
+const purchaseInit = { method: "POST", headers: { Authorization: `Bearer ${AGENT_KEY}` } };
+const probe = await fetch(purchaseUrl, purchaseInit);
 if (probe.status !== 402) fail(`Expected 402, got ${probe.status}: ${await probe.text()}`);
 const requiredHeader = probe.headers.get("PAYMENT-REQUIRED");
 if (!requiredHeader) fail("402 without a PAYMENT-REQUIRED header");
@@ -320,7 +324,7 @@ info(`payer ${evmAddress} · balance ${await usdcBalance(evmAddress)}`);
 const fetchWithPayment = wrapFetchWithPayment(globalThis.fetch, client);
 let response: Response;
 try {
-  response = await fetchWithPayment(purchaseUrl, { method: "POST" });
+  response = await fetchWithPayment(purchaseUrl, purchaseInit);
 } catch (error) {
   fail(
     `Payment failed: ${error instanceof Error ? error.message : String(error)}\n` +

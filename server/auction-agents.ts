@@ -21,12 +21,11 @@
  */
 import { randomUUID } from "node:crypto";
 import { ConvexHttpClient } from "convex/browser";
-import { ConvexError } from "convex/values";
 import { CdpX402Client } from "@coinbase/cdp-sdk/x402";
 import { wrapFetchWithPayment } from "@x402/fetch";
 import { api } from "../convex/_generated/api.js";
 import type { Id } from "../convex/_generated/dataModel.js";
-import { centsToAtomic, centsToUsd, env, presence, requireEnv, signInCustomer } from "./lib.ts";
+import { agentApi, AgentApiError, centsToAtomic, centsToUsd, env, presence, requireEnv } from "./lib.ts";
 
 // ---------------------------------------------------------------- config
 
@@ -55,8 +54,8 @@ type AgentSpec = {
   /** Start below the full valuation and raise once if outbid. */
   openingShareOfValuation: number;
   wallet: string;
-  /** Customer account the agent signs in as (ADR 0004 step 1; agent keys come in step 2). */
-  email: string;
+  /** Env var holding this agent's key (issued by its company; `npx convex run seed:demoAgentKeys`). */
+  keyEnv: string;
 };
 
 const AGENTS: AgentSpec[] = [
@@ -68,7 +67,7 @@ const AGENTS: AgentSpec[] = [
     maxBidPerSlotMinor: 15_000,
     openingShareOfValuation: 1,
     wallet: env("AUCTION_COFFEE_WALLET") ?? "auction-coffee-agent",
-    email: env("AUCTION_COFFEE_EMAIL") ?? "coffee@demo.billboardos.dev",
+    keyEnv: "AUCTION_COFFEE_AGENT_KEY",
   },
   {
     name: "Nvidia agent",
@@ -78,7 +77,7 @@ const AGENTS: AgentSpec[] = [
     maxBidPerSlotMinor: 40_000,
     openingShareOfValuation: 0.7,
     wallet: env("AUCTION_NVIDIA_WALLET") ?? env("BUYER_WALLET_NAME") ?? "advertiser-agent-1",
-    email: env("AUCTION_NVIDIA_EMAIL") ?? "nvidia@demo.billboardos.dev",
+    keyEnv: "AUCTION_NVIDIA_AGENT_KEY",
   },
 ];
 
@@ -91,15 +90,11 @@ const fail = (msg: string): never => {
 };
 
 function errorText(error: unknown): string {
-  if (error instanceof ConvexError) {
-    const data = error.data as { code?: string; message?: string } | string;
-    return typeof data === "string" ? data : `${data.code ?? "ERROR"}: ${data.message ?? ""}`;
-  }
   return error instanceof Error ? error.message : String(error);
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error instanceof ConvexError ? (error.data as { code?: string }).code : undefined;
+  return error instanceof AgentApiError ? error.code : undefined;
 }
 
 /**
@@ -117,8 +112,9 @@ console.log("BillboardOS auction demo: two buyer agents, one hot slot (TEST FUND
 console.log(`  ANTHROPIC_API_KEY ${presence("ANTHROPIC_API_KEY")} (reasoning is deterministic either way; narrate() is the Claude hook)`);
 
 type Agent = AgentSpec & {
-  /** Signed in as this agent's customer account; acts only for its own company. */
-  client: ConvexHttpClient;
+  /** Agent API client with this agent's key; acts only for its own company. */
+  api: ReturnType<typeof agentApi>;
+  key: string;
   campaignId: Id<"campaigns">;
   budgetMinor: number;
   bidderKey: string;
@@ -126,31 +122,60 @@ type Agent = AgentSpec & {
   maxMinor: number;
   raised: boolean;
 };
-const password = requireEnv("DEMO_CUSTOMER_PASSWORD", "password for the demo customer accounts (seed:demoCustomers)");
+type Me = { company: { displayName: string }; key: { name: string; prefix: string; budgetCapMinor: number }; campaigns: { campaignId: string; status: string; budgetMinor: number }[] };
+type Screen = {
+  billboardId: Id<"billboards">;
+  name: string;
+  explanation: string;
+  matchScore: number | null;
+  expectedAudiencePer15Min: number;
+  audienceBasis: "measured" | "normal_traffic";
+};
+const siteUrl = requireEnv("CONVEX_SITE_URL", "Convex HTTP actions base URL (agent API)");
 const agents: Agent[] = [];
 for (const spec of AGENTS) {
-  const client = new ConvexHttpClient(requireEnv("CONVEX_URL", "public Convex API URL"));
+  const key = requireEnv(spec.keyEnv, `${spec.advertiser}'s agent key (npx convex run seed:demoAgentKeys)`);
+  const client = agentApi(siteUrl, key);
+  let me: Me;
   try {
-    await signInCustomer(client, api.auth.signIn, spec.email, password);
+    me = await client.get<Me>("me");
   } catch (error) {
-    fail(
-      `${spec.name} could not sign in as ${spec.email}: ${errorText(error)}\n` +
-        `  Create the demo buyers once: npx convex run seed:demoCustomers '{"password":"<DEMO_CUSTOMER_PASSWORD>"}'`,
-    );
+    fail(`${spec.name}: agent key rejected (${errorText(error)}). Issue fresh demo keys: npx convex run seed:demoAgentKeys`);
   }
-  const campaigns = await client.query(api.campaigns.list, {});
-  const c = campaigns.find((x) => x.advertiserName === spec.advertiser && (x.status === "active" || x.status === "draft"));
-  if (!c) fail(`No active campaign for ${spec.advertiser} visible to ${spec.email}. Run: npm run seed, then seed:demoCustomers`);
-  say(spec.name, `signed in as customer ${spec.email}`);
-  agents.push({ ...spec, client, campaignId: c!._id, budgetMinor: c!.budgetMinor, bidderKey: `${randomUUID()}${randomUUID()}`.replace(/-/g, ""), valuationMinor: 0, maxMinor: 0, raised: false });
+  me = me!;
+  if (me.company.displayName !== spec.advertiser) fail(`${spec.keyEnv} belongs to ${me.company.displayName}, expected ${spec.advertiser}`);
+  const c = me.campaigns.find((x) => x.status === "active" || x.status === "draft");
+  if (!c) fail(`No active campaign for ${spec.advertiser}. Run: npm run seed`);
+  say(spec.name, `agent key "${me.key.name}" (${me.key.prefix}) for ${me.company.displayName}, cap ${centsToUsd(me.key.budgetCapMinor)}`);
+  agents.push({
+    ...spec,
+    api: client,
+    key,
+    campaignId: c!.campaignId as Id<"campaigns">,
+    budgetMinor: Math.min(c!.budgetMinor, me.key.budgetCapMinor),
+    bidderKey: `${randomUUID()}${randomUUID()}`.replace(/-/g, ""),
+    valuationMinor: 0,
+    maxMinor: 0,
+    raised: false,
+  });
 }
+
+type BidOutcome = { leading: boolean; leaderLabel: string | null; currentMinor: number; minNextBidMinor: number; endsAt: number };
+type MyStatus = {
+  bidderLabel: string;
+  outcome: "leading" | "outbid" | "not_bidding" | "won" | "lost" | "defaulted" | "failed";
+  minNextBidMinor: number;
+  holdId: Id<"holds"> | null;
+  holdExpiresAt: number | null;
+  amountMinor: number | null;
+};
 
 // ---------------------------------------------------------------- 1. screens
 
 section("1. Each agent ranks screens for its audience");
-const recs = new Map<string, Awaited<ReturnType<typeof convex.query<typeof api.billboards.recommend>>>>();
+const recs = new Map<string, Screen[]>();
 for (const a of agents) {
-  const rows = await a.client.query(api.billboards.recommend, { campaignId: a.campaignId });
+  const rows = (await a.api.get<{ screens: Screen[] }>(`inventory?campaignId=${a.campaignId}&hours=1`)).screens;
   recs.set(a.name, rows);
   const top = rows[0];
   if (!top) fail("No billboards. Run: npm run seed");
@@ -179,7 +204,7 @@ console.log(`  slot ${slotId}`);
 
 for (const a of agents) {
   try {
-    const q = await a.client.mutation(api.quotes.create, { campaignId: a.campaignId, slotIds: [slotId!], actor: `agent:${a.name}` });
+    const q = await a.api.post<{ amountMinor: number }>("quotes", { campaignId: a.campaignId, slotIds: [slotId!] });
     say(a.name, `posted quote ${centsToUsd(q.amountMinor)}`);
   } catch (error) {
     say(a.name, errorCode(error) === "AUCTION_OPEN" ? "slot is already being auctioned" : `quote failed: ${errorText(error)}`);
@@ -229,12 +254,12 @@ for (const a of agents) {
 
 section("5. Bidding (proxy bids raise each agent one step at a time, up to its private max)");
 for (const a of agents) {
-  const joined = await a.client.mutation(api.auctions.join, { auctionId, campaignId: a.campaignId, clientKey: a.bidderKey });
+  const joined = await a.api.post<{ bidderLabel: string }>(`auctions/${auctionId}/join`, { campaignId: a.campaignId, clientKey: a.bidderKey });
   say(a.name, `joined as ${joined.bidderLabel}`);
 }
 for (const a of agents) {
   try {
-    const r = await a.client.mutation(api.auctions.setAutoBid, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: a.maxMinor });
+    const r = await a.api.post<BidOutcome>(`auctions/${auctionId}/auto-bid`, { campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: a.maxMinor });
     say(a.name, `auto-bid set; ${r.leading ? "leading" : `outbid, ${r.leaderLabel} leads`} at ${centsToUsd(r.currentMinor)}`);
   } catch (error) {
     say(a.name, `could not set auto-bid: ${errorText(error)}`);
@@ -253,7 +278,7 @@ for (;;) {
   if (view!.status !== "open") break;
   for (const a of agents) {
     if (a.raised || a.openingShareOfValuation >= 1) continue;
-    const mine = await a.client.query(api.auctions.myStatus, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey });
+    const mine = await a.api.get<MyStatus>(`auctions/${auctionId}/status?campaignId=${a.campaignId}`, { "X-Bidder-Key": a.bidderKey });
     if (mine.outcome !== "outbid") continue;
     const full = Math.min(a.valuationMinor, a.maxBidPerSlotMinor * view!.slots.length, a.budgetMinor);
     a.raised = true;
@@ -268,7 +293,7 @@ for (;;) {
       say(a.name, line);
     }
     try {
-      const r = await a.client.mutation(api.auctions.setAutoBid, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: full });
+      const r = await a.api.post<BidOutcome>(`auctions/${auctionId}/auto-bid`, { campaignId: a.campaignId, bidderKey: a.bidderKey, maxMinor: full });
       a.maxMinor = full;
       say(a.name, `${r.leading ? "now leading" : "still outbid"} at ${centsToUsd(r.currentMinor)}`);
     } catch (error) {
@@ -292,7 +317,7 @@ for (const b of final.ladder) console.log(`    ${b.bidderLabel.padEnd(9)} ${cent
 
 let winner: { agent: Agent; holdId: Id<"holds">; amountMinor: number; expiresAt: number } | null = null;
 for (const a of agents) {
-  const mine = await a.client.query(api.auctions.myStatus, { auctionId, campaignId: a.campaignId, bidderKey: a.bidderKey });
+  const mine = await a.api.get<MyStatus>(`auctions/${auctionId}/status?campaignId=${a.campaignId}`, { "X-Bidder-Key": a.bidderKey });
   say(a.name, `${mine.bidderLabel}: ${mine.outcome}${mine.outcome === "won" && mine.amountMinor !== null ? ` at ${centsToUsd(mine.amountMinor)}` : ""}`);
   if (mine.outcome === "won" && mine.holdId && mine.amountMinor !== null && mine.holdExpiresAt) {
     winner = { agent: a, holdId: mine.holdId, amountMinor: mine.amountMinor, expiresAt: mine.holdExpiresAt };
@@ -329,7 +354,8 @@ const client = new CdpX402Client({
 });
 const fetchWithPayment = wrapFetchWithPayment(globalThis.fetch, client);
 try {
-  const res = await fetchWithPayment(purchaseUrl, { method: "POST" });
+  // The agent key proves this agent may pay for its company (x402 itself uses PAYMENT-SIGNATURE).
+  const res = await fetchWithPayment(purchaseUrl, { method: "POST", headers: { Authorization: `Bearer ${w.agent.key}` } });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   console.log(`  HTTP ${res.status} ${JSON.stringify(body)}`);
   if (res.status === 200 && body.outcome === "booked") {

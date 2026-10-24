@@ -46,6 +46,7 @@ nav:
       - Agent protocol: architecture/agents.md
       - Payments & risk: architecture/payments-and-risk.md
       - Data model: architecture/data-model.md
+      - Agent API: architecture/agent-api.md
   - Development:
       - Kickoff checklist: development/kickoff-checklist.md
       - Getting started: development/getting-started.md

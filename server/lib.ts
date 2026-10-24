@@ -94,22 +94,43 @@ export function cdpNetworkName(network: string): "base-sepolia" | "base" {
   throw new Error(`Unsupported network ${network}; use eip155:84532 (Base Sepolia)`);
 }
 
+/** Structured error from the BillboardOS agent API ({ error: { code, message, ... } }). */
+export class AgentApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(`${code}: ${message}`);
+  }
+}
+
 /**
- * Sign a ConvexHttpClient in as a customer (email + password, Convex Auth).
- * Until agent keys exist (ADR 0004 step 2), scripts act as real customer
- * accounts created by `npx convex run seed:demoCustomers '{"password":"..."}'`.
+ * Minimal client for the BillboardOS agent HTTP API (ADR 0004):
+ * `Authorization: Bearer bos_agent_...`, JSON in and out.
  */
-export async function signInCustomer(
-  client: { action: (ref: never, args: never) => Promise<unknown>; setAuth: (token: string) => void },
-  signInRef: unknown,
-  email: string,
-  password: string,
-): Promise<void> {
-  const result = (await client.action(signInRef as never, {
-    provider: "password",
-    params: { email, password, flow: "signIn" },
-  } as never)) as { tokens?: { token: string } | null };
-  const token = result?.tokens?.token;
-  if (!token) throw new Error(`Sign-in for ${email} returned no token`);
-  client.setAuth(token);
+export function agentApi(siteUrl: string, key: string) {
+  const base = `${siteUrl.replace(/\/$/, "")}/api/agent/`;
+  async function request<T>(method: "GET" | "POST", path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
+    const res = await fetch(base + path.replace(/^\//, ""), {
+      method,
+      headers: {
+        Authorization: `Bearer ${key}`,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...headers,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const json = (await res.json().catch(() => ({}))) as { error?: { code?: string; message?: string } & Record<string, unknown> };
+    if (!res.ok) {
+      const err = json.error ?? {};
+      throw new AgentApiError(res.status, err.code ?? `HTTP_${res.status}`, err.message ?? res.statusText, err);
+    }
+    return json as T;
+  }
+  return {
+    get: <T>(path: string, headers?: Record<string, string>) => request<T>("GET", path, undefined, headers),
+    post: <T>(path: string, body: unknown) => request<T>("POST", path, body),
+  };
 }

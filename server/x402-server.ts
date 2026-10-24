@@ -10,6 +10,8 @@
  * because the middleware settles AFTER the handler and we need the settlement
  * tx hash BEFORE recording the payment):
  *
+ *   0. agent key            -> Authorization: Bearer bos_agent_... with the "pay" scope for the
+ *                              hold's company (checked by Convex); 401/403 otherwise
  *   1. look up hold         -> 404 unknown, 409 not payable (no challenge issued)
  *   2. processHTTPRequest   -> 402 challenge, or facilitator VERIFY of the signed payload
  *   3. re-check hold        -> 409 and cancel (no money moves) if it lapsed
@@ -79,7 +81,35 @@ type HoldForPayment = {
   payable: boolean;
   /** Present once Convex exposes it; otherwise we trace by hold id. */
   traceId?: string;
+  /** The hold's workspace payout address (null -> this server's default payTo). */
+  payTo?: string | null;
 };
+
+type AgentPayCheck =
+  | { ok: true; actor: string; agentKeyId: string }
+  | { ok: false; status: number; code: string; message: string };
+
+/** Ask Convex whether this agent key may pay this hold ("pay" scope, same company). */
+async function verifyAgentKey(agentKey: string, holdId: string): Promise<AgentPayCheck> {
+  const res = await fetch(`${CONVEX_SITE_URL}/internal/agent-keys/verify-payment`, {
+    method: "POST",
+    headers: convexHeaders,
+    body: JSON.stringify({ agentKey, holdId }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    actor?: string;
+    agentKeyId?: string;
+    error?: { code?: string; message?: string };
+  };
+  if (res.ok && body.actor && body.agentKeyId) return { ok: true, actor: body.actor, agentKeyId: body.agentKeyId };
+  if (res.status >= 500) throw new Error(`Convex verify-payment -> HTTP ${res.status}`);
+  return {
+    ok: false,
+    status: res.status === 404 ? 404 : res.status === 401 ? 401 : 403,
+    code: body.error?.code ?? `HTTP_${res.status}`,
+    message: body.error?.message ?? "Agent key not allowed to pay this hold",
+  };
+}
 
 type RecordVerifiedResult =
   | { outcome: "booked"; paymentId: string; bookingId: string; replayed: boolean }
@@ -142,6 +172,9 @@ const traceOf = (hold: HoldForPayment | null, holdId: string) =>
 
 // ---------------------------------------------------------------- x402 server
 
+/** Fallback receiver for holds whose workspace has no payout address (set after the server is built). */
+let defaultPayTo = PAY_TO ?? "";
+
 /** Carries the hold looked up for this request into the dynamic price function. */
 class HoldRequestAdapter extends ExpressAdapter {
   constructor(
@@ -156,8 +189,13 @@ const route: RouteConfig = {
   accepts: {
     scheme: "exact",
     network: NETWORK,
-    // "" = filled by createX402Server with the provisioned CDP receiver wallet.
-    payTo: PAY_TO ?? "",
+    // Per request: the hold's workspace payout address (ADR 0004: customer agents pay the host),
+    // else X402_PAY_TO / the provisioned CDP receiver wallet.
+    payTo: (context: HTTPRequestContext) => {
+      const adapter = context.adapter;
+      const hold = adapter instanceof HoldRequestAdapter ? adapter.hold : null;
+      return hold?.payTo ?? defaultPayTo;
+    },
     // Per-request price: exactly the hold's amount (USD cents -> "$12.34" -> USDC atomic, string math).
     price: (context: HTTPRequestContext) => {
       const adapter = context.adapter;
@@ -229,12 +267,13 @@ function sendInstructions(res: Response, response: HTTPResponseInstructions): vo
 
 const x402 = await buildX402Server();
 const payTo = x402.payToEvmAddress ?? PAY_TO;
+defaultPayTo = payTo ?? "";
 
 const app = express();
 app.use(
   cors({
     origin: CORS_ORIGIN,
-    allowedHeaders: ["Content-Type", "PAYMENT-SIGNATURE", "X-PAYMENT"],
+    allowedHeaders: ["Content-Type", "Authorization", "PAYMENT-SIGNATURE", "X-PAYMENT"],
     exposedHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "X-PAYMENT-RESPONSE"],
   }),
 );
@@ -261,6 +300,27 @@ app.post("/purchases/:holdId", async (req: Request<{ holdId: string }>, res: Res
     return;
   }
 
+  // 0. Agent key: only the hold's company (with the "pay" scope) may pay.
+  //    x402 uses PAYMENT-SIGNATURE / X-PAYMENT, so Authorization is free for the key.
+  const auth = /^Bearer (bos_agent_\S+)$/.exec(req.header("authorization") ?? "");
+  if (!auth) {
+    res.status(401).json({ error: "AGENT_KEY_REQUIRED", message: "Send Authorization: Bearer <agent key with the pay scope>" });
+    return;
+  }
+  let keyCheck: AgentPayCheck;
+  try {
+    keyCheck = await verifyAgentKey(auth[1], holdId);
+  } catch (error) {
+    log(`hold:${holdId}`, "agent_key.check_failed", { error: String(error) });
+    res.status(502).json({ error: "CONVEX_UNAVAILABLE" });
+    return;
+  }
+  if (!keyCheck.ok) {
+    log(`hold:${holdId}`, "agent_key.refused", { code: keyCheck.code });
+    res.status(keyCheck.status).json({ error: keyCheck.code, message: keyCheck.message });
+    return;
+  }
+
   // 1. Hold lookup (before any payment is requested).
   let hold: HoldForPayment | null;
   try {
@@ -272,7 +332,7 @@ app.post("/purchases/:holdId", async (req: Request<{ holdId: string }>, res: Res
   }
   const traceId = traceOf(hold, holdId);
   const paymentHeader = req.header("payment-signature") ?? req.header("x-payment");
-  log(traceId, "request", { holdId, paid: Boolean(paymentHeader) });
+  log(traceId, "request", { holdId, paid: Boolean(paymentHeader), agent: keyCheck.actor });
 
   if (!hold) {
     log(traceId, "hold.not_found");
@@ -347,7 +407,7 @@ async function purchase(
         amountMinor: hold.amountMinor,
         price: centsToUsd(hold.amountMinor),
         network: NETWORK,
-        payTo,
+        payTo: hold.payTo ?? defaultPayTo,
       });
     }
     sendInstructions(res, result.response);

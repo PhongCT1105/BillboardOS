@@ -1,7 +1,6 @@
 import { ConvexError, v } from "convex/values";
-import { internalAction, internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
-import { internal } from "./_generated/api";
-import { createAccount } from "@convex-dev/auth/server";
+import { internalMutation, type MutationCtx } from "./_generated/server";
+import { issueAgentKey } from "./agentKeys";
 import type { Doc, Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
 import { ensureUpcomingSlots } from "./lib/inventory";
@@ -573,84 +572,70 @@ export const pricingDemo = internalMutation({
   },
 });
 
-/** Demo buyer accounts used by `npm run buyer` and `npm run auction:demo` until agent keys (ADR 0004 step 2). */
-export const DEMO_CUSTOMERS = [
-  { email: "coffee@demo.billboardos.dev", company: "Golden Gate Coffee Co." },
-  { email: "nvidia@demo.billboardos.dev", company: "Nvidia" },
+/** Demo buying agents (one per demo company); the scripts use these keys. */
+export const DEMO_AGENTS = [
+  { company: "Golden Gate Coffee Co.", budgetCapMinor: 30_000, envVar: "BUYER_AGENT_KEY / AUCTION_COFFEE_AGENT_KEY" },
+  { company: "Nvidia", budgetCapMinor: 500_000, envVar: "AUCTION_NVIDIA_AGENT_KEY" },
 ] as const;
-
-/** Is there already a sign-in account for this email? */
-export const demoAccountExists = internalQuery({
-  args: { email: v.string() },
-  returns: v.boolean(),
-  handler: async (ctx, args) => {
-    const user = await ctx.db
-      .query("users")
-      .withIndex("email", (q) => q.eq("email", args.email))
-      .first();
-    return user !== null;
-  },
-});
-
-/** Customer profile + company membership for a demo buyer (idempotent). */
-export const attachDemoCustomer = internalMutation({
-  args: { email: v.string(), company: v.string() },
-  returns: v.object({ advertiserId: v.union(v.id("advertisers"), v.null()) }),
-  handler: async (ctx, args) => {
-    const user = await ctx.db
-      .query("users")
-      .withIndex("email", (q) => q.eq("email", args.email))
-      .first();
-    const advertiser = await ctx.db
-      .query("advertisers")
-      .withIndex("by_displayName", (q) => q.eq("displayName", args.company))
-      .first();
-    if (!user || !advertiser) return { advertiserId: null };
-    const profile = await ctx.db
-      .query("profiles")
-      .withIndex("by_userId", (q) => q.eq("userId", user._id))
-      .unique();
-    if (!profile) await ctx.db.insert("profiles", { userId: user._id, accountType: "customer" });
-    const member = await ctx.db
-      .query("advertiserMembers")
-      .withIndex("by_advertiser_and_user", (q) => q.eq("advertiserId", advertiser._id).eq("userId", user._id))
-      .unique();
-    if (!member) {
-      await ctx.db.insert("advertiserMembers", { advertiserId: advertiser._id, userId: user._id, email: args.email, role: "member" });
-    }
-    return { advertiserId: advertiser._id };
-  },
-});
+const DEMO_KEY_NAME = "demo-agent";
 
 /**
- * Create password sign-ins for the demo buyers and attach them to Golden Gate
- * Coffee and Nvidia (run after seed:demo and seed:pricingDemo):
- *   npx convex run seed:demoCustomers '{"password":"<at least 8 chars>"}'
- * Existing accounts keep their password. The scripts sign in with
- * DEMO_CUSTOMER_PASSWORD from .env.
+ * Issue fresh agent keys for the two demo companies (run after seed:demo and
+ * seed:pricingDemo) and print them ONCE:
+ *   npx convex run seed:demoAgentKeys
+ * Idempotent in effect: earlier "demo-agent" keys of those companies are
+ * revoked first, so only the printed keys work.
  */
-export const demoCustomers = internalAction({
-  args: { password: v.string() },
-  returns: v.array(v.object({ email: v.string(), company: v.string(), created: v.boolean(), attached: v.boolean() })),
-  handler: async (ctx, args): Promise<{ email: string; company: string; created: boolean; attached: boolean }[]> => {
-    if (args.password.length < 8) {
-      throw new ConvexError({ code: "INVALID_INPUT", message: "Password must be at least 8 characters" });
-    }
-    const out: { email: string; company: string; created: boolean; attached: boolean }[] = [];
-    for (const spec of DEMO_CUSTOMERS) {
-      const exists: boolean = await ctx.runQuery(internal.seed.demoAccountExists, { email: spec.email });
-      if (!exists) {
-        await createAccount(ctx, {
-          provider: "password",
-          account: { id: spec.email, secret: args.password },
-          profile: { email: spec.email },
-        });
+export const demoAgentKeys = internalMutation({
+  args: {},
+  returns: v.array(
+    v.object({
+      company: v.string(),
+      envVar: v.string(),
+      key: v.string(),
+      prefix: v.string(),
+      webhookSecret: v.string(),
+      budgetCapMinor: v.number(),
+      revokedPrevious: v.number(),
+    }),
+  ),
+  handler: async (ctx) => {
+    const out = [];
+    for (const spec of DEMO_AGENTS) {
+      const advertiser = await ctx.db
+        .query("advertisers")
+        .withIndex("by_displayName", (q) => q.eq("displayName", spec.company))
+        .first();
+      if (!advertiser) {
+        throw new ConvexError({ code: "NOT_SEEDED", message: `${spec.company} not found; run seed:demo and seed:pricingDemo first` });
       }
-      const r: { advertiserId: Id<"advertisers"> | null } = await ctx.runMutation(internal.seed.attachDemoCustomer, {
-        email: spec.email,
-        company: spec.company,
+      let revokedPrevious = 0;
+      for (const k of await ctx.db
+        .query("agentKeys")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
+        .take(100)) {
+        if (k.name === DEMO_KEY_NAME && k.revokedAt === undefined) {
+          await ctx.db.patch(k._id, { revokedAt: Date.now() });
+          revokedPrevious++;
+        }
+      }
+      const issued = await issueAgentKey(ctx, {
+        advertiserId: advertiser._id,
+        name: DEMO_KEY_NAME,
+        scopes: ["quote", "hold", "bid", "pay"],
+        budgetCapMinor: spec.budgetCapMinor,
+        expiresInDays: 30,
+        createdBy: "system:seed",
       });
-      out.push({ email: spec.email, company: spec.company, created: !exists, attached: r.advertiserId !== null });
+      out.push({
+        company: spec.company,
+        envVar: spec.envVar,
+        key: issued.key,
+        prefix: issued.prefix,
+        webhookSecret: issued.webhookSecret,
+        budgetCapMinor: spec.budgetCapMinor,
+        revokedPrevious,
+      });
     }
     return out;
   },

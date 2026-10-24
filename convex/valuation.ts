@@ -260,6 +260,9 @@ export const override = mutation({
     if (reason.length === 0) throw new ConvexError({ code: "INVALID_INPUT", message: "A reason is required" });
     const advertiser = await ctx.db.get(args.advertiserId);
     if (!advertiser) throw new ConvexError({ code: "NOT_FOUND", message: "Advertiser not found" });
+    if (!(await visibleCompanies(ctx.db, operator.workspaceId)).includes(args.advertiserId)) {
+      throw new ConvexError({ code: "NOT_FOUND", message: "No relationship with this company in your workspace" });
+    }
     const now = Date.now();
     const previous = await currentAssessment(ctx.db, args.advertiserId, now, operator.workspaceId);
     const multiplier = clampMultiplier(args.multiplier);
@@ -303,6 +306,39 @@ export const reassess = mutation({
   },
 });
 
+/**
+ * Companies this workspace has a relationship with: they quoted (and so may
+ * have held or booked) its screens, or joined one of its auctions. Hosts only
+ * see valuations for these; assessments themselves stay platform-level.
+ */
+async function visibleCompanies(db: QueryCtx["db"], workspaceId: Id<"workspaces">): Promise<Id<"advertisers">[]> {
+  const campaignIds = new Set<Id<"campaigns">>();
+  const quotes = await db
+    .query("quotes")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .order("desc")
+    .take(500);
+  for (const q of quotes) campaignIds.add(q.campaignId);
+  const auctions = await db
+    .query("auctions")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .order("desc")
+    .take(100);
+  for (const a of auctions) {
+    const parts = await db
+      .query("auctionParticipants")
+      .withIndex("by_auction", (q) => q.eq("auctionId", a._id))
+      .take(50);
+    for (const p of parts) campaignIds.add(p.campaignId);
+  }
+  const companies = new Set<Id<"advertisers">>();
+  for (const id of campaignIds) {
+    const c = await db.get(id);
+    if (c) companies.add(c.advertiserId);
+  }
+  return [...companies].slice(0, 50);
+}
+
 const assessmentView = v.object({
   _id: v.id("companyAssessments"),
   _creationTime: v.number(),
@@ -310,7 +346,7 @@ const assessmentView = v.object({
   fresh: v.boolean(),
 });
 
-/** Host view: every customer company with the assessment that applies in this workspace (max 50). */
+/** Host view: companies that have quoted or bid on this workspace's screens, with the assessment that applies here (max 50). */
 export const list = query({
   args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
@@ -324,9 +360,10 @@ export const list = query({
   handler: async (ctx, args) => {
     const me = await resolveWorkspace(ctx, args.workspaceId);
     const now = Date.now();
-    const advertisers = await ctx.db.query("advertisers").take(50);
     const rows = [];
-    for (const a of advertisers) {
+    for (const advertiserId of await visibleCompanies(ctx.db, me.workspaceId)) {
+      const a = await ctx.db.get(advertiserId);
+      if (!a) continue;
       const { assessment, fresh } = await currentAssessment(ctx.db, a._id, now, me.workspaceId);
       rows.push({
         advertiserId: a._id,
@@ -345,6 +382,9 @@ export const history = query({
   returns: v.array(assessmentView),
   handler: async (ctx, args) => {
     const me = await resolveWorkspace(ctx, args.workspaceId);
+    if (!(await visibleCompanies(ctx.db, me.workspaceId)).includes(args.advertiserId)) {
+      throw new ConvexError({ code: "NOT_FOUND", message: "No relationship with this company in your workspace" });
+    }
     const now = Date.now();
     const rows = await ctx.db
       .query("companyAssessments")

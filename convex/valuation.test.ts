@@ -134,6 +134,8 @@ describe("company pricing on posted quotes", () => {
       await errorCode(t.mutation(api.valuation.override, { advertiserId: demo.nvidiaAdvertiserId, multiplier: 2, reason: "x" })),
     ).toBe("INVALID_INPUT");
 
+    // Hosts can only price companies that have quoted their screens.
+    await t.mutation(api.quotes.create, { campaignId: demo.nvidiaCampaignId, slotIds: [slots[19]._id] });
     await t.mutation(api.valuation.override, {
       advertiserId: demo.nvidiaAdvertiserId,
       multiplier: 1.4,
@@ -176,7 +178,7 @@ describe("Claude company analyst (mocked API)", () => {
   });
 
   test("web search + structured output, pause_turn continuation, clamp, sources, request shape", async () => {
-    const { t, demo } = await world();
+    const { t, demo, slots } = await world();
     process.env.ANTHROPIC_API_KEY = "test-key";
     const bodies: Record<string, unknown>[] = [];
     const headers: Headers[] = [];
@@ -238,6 +240,7 @@ describe("Claude company analyst (mocked API)", () => {
     // No personal data: the request carries company-level inputs only.
     expect(JSON.stringify(first)).toContain("Nvidia");
 
+    await t.mutation(api.quotes.create, { campaignId: demo.nvidiaCampaignId, slotIds: [slots[19]._id] });
     const list = await t.query(api.valuation.list, {});
     const a = list.find((x) => x.displayName === "Nvidia")!.assessment!;
     expect(a).toMatchObject({ method: "claude", multiplier: 1.5, brandTier: "enterprise", model: "claude-opus-5-5" });

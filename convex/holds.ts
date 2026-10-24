@@ -13,7 +13,7 @@ import { HOLD_TTL_MS, MAX_KEY_LENGTH } from "./lib/constants";
 import { assertBoundedString } from "./lib/validators";
 import { requireCampaignAccess } from "./lib/tenancy";
 
-const holdResult = v.object({
+export const holdResult = v.object({
   holdId: v.id("holds"),
   quoteId: v.id("quotes"),
   slotIds: v.array(v.id("slots")),
@@ -26,7 +26,7 @@ const holdResult = v.object({
   replayed: v.boolean(),
 });
 
-function toResult(hold: Doc<"holds">, replayed: boolean) {
+export function toResult(hold: Doc<"holds">, replayed: boolean) {
   return {
     holdId: hold._id,
     quoteId: hold.quoteId,
@@ -62,7 +62,20 @@ export const create = mutation({
     // Only the quoting company may hold it.
     const { customer } = await requireCampaignAccess(ctx, quoteForAccess.campaignId);
     const actor = `${customer.actor} via ${args.actor}`;
+    return await createHoldCore(ctx, { quoteId: args.quoteId, idempotencyKey: args.idempotencyKey, actor });
+  },
+});
 
+/**
+ * Hold business rules, shared by the signed-in customer path and the agent
+ * API: idempotency, quote validity, then the exclusive hold. Callers must
+ * already have authorized the quote's campaign.
+ */
+export async function createHoldCore(
+  ctx: MutationCtx,
+  args: { quoteId: Id<"quotes">; idempotencyKey: string; actor: string; agentKeyId?: Id<"agentKeys"> },
+): Promise<ReturnType<typeof toResult>> {
+  {
     const existing = await ctx.db
       .query("holds")
       .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", args.idempotencyKey))
@@ -89,10 +102,10 @@ export const create = mutation({
       });
     }
 
-    const hold = await takeHold(ctx, quote, args.idempotencyKey, actor);
+    const hold = await takeHold(ctx, quote, args.idempotencyKey, args.actor, { agentKeyId: args.agentKeyId });
     return toResult(hold, false);
-  },
-});
+  }
+}
 
 /**
  * Take an exclusive hold on every slot of `quote` (all must be available and
@@ -103,7 +116,7 @@ export async function takeHold(
   quote: Doc<"quotes">,
   idempotencyKey: string,
   actor: string,
-  opts: { auctionId?: Id<"auctions"> } = {},
+  opts: { auctionId?: Id<"auctions">; agentKeyId?: Id<"agentKeys"> } = {},
 ): Promise<Doc<"holds">> {
   const now = Date.now();
   const slots: Doc<"slots">[] = [];
@@ -143,6 +156,7 @@ export async function takeHold(
     actor,
     traceId: quote.traceId,
     auctionId: opts.auctionId,
+    agentKeyId: opts.agentKeyId,
   });
 
   for (const slot of slots) {

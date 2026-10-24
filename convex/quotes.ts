@@ -1,5 +1,5 @@
-import { ConvexError, v } from "convex/values";
-import { internalMutation, mutation } from "./_generated/server";
+import { ConvexError, v, type Infer } from "convex/values";
+import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currency, pricingConfidence, slotPriceBreakdown } from "./schema";
@@ -18,14 +18,8 @@ import { requireCampaignAccess } from "./lib/tenancy";
  * billboard. A quote is NOT a booking and does not reserve inventory; call
  * `holds.create` to take an exclusive hold.
  */
-export const create = mutation({
-  args: {
-    campaignId: v.id("campaigns"),
-    slotIds: v.array(v.id("slots")),
-    /** Client label for the audit log (e.g. "web", "agent:buyer"); the identity comes from the session. */
-    actor: v.optional(v.string()),
-  },
-  returns: v.object({
+/** Shape returned to buyers (session and agent API alike). */
+export const quoteResult = v.object({
     quoteId: v.id("quotes"),
     billboardId: v.id("billboards"),
     slotIds: v.array(v.id("slots")),
@@ -38,201 +32,222 @@ export const create = mutation({
     traceId: v.string(),
     /** Screen-price stages per slot (crowd, time, event, scarcity, market). */
     priceBreakdown: v.array(slotPriceBreakdown),
-  }),
-  handler: async (ctx, args) => {
-    const now = Date.now();
+  });
+
+export const create = mutation({
+  args: {
+    campaignId: v.id("campaigns"),
+    slotIds: v.array(v.id("slots")),
+    /** Client label for the audit log (e.g. "web", "agent:buyer"); the identity comes from the session. */
+    actor: v.optional(v.string()),
+  },
+  returns: quoteResult,
+  handler: async (ctx, args): Promise<Infer<typeof quoteResult>> => {
     if (args.actor !== undefined) assertBoundedString("actor", args.actor, MAX_KEY_LENGTH);
     // Customers quote only for their own company's campaigns.
     const { customer } = await requireCampaignAccess(ctx, args.campaignId);
     const actor = args.actor ? `${customer.actor} via ${args.actor}` : customer.actor;
+    return await createQuoteCore(ctx, { campaignId: args.campaignId, slotIds: args.slotIds, actor });
+  },
+});
 
-    if (args.slotIds.length === 0 || args.slotIds.length > MAX_SLOTS_PER_QUOTE) {
-      throw new ConvexError({
-        code: "INVALID_INPUT",
-        message: `A quote needs 1..${MAX_SLOTS_PER_QUOTE} slots`,
-      });
-    }
-    if (new Set(args.slotIds).size !== args.slotIds.length) {
-      throw new ConvexError({ code: "INVALID_INPUT", message: "Duplicate slot ids" });
-    }
+/**
+ * Quote business rules, shared by the signed-in customer path and the agent
+ * API. Callers must already have authorized the campaign.
+ */
+export async function createQuoteCore(
+  ctx: MutationCtx,
+  args: { campaignId: Id<"campaigns">; slotIds: Id<"slots">[]; actor: string; agentKeyId?: Id<"agentKeys"> },
+): Promise<Infer<typeof quoteResult>> {
+  const now = Date.now();
+  const actor = args.actor;
 
-    const campaign = await ctx.db.get(args.campaignId);
-    if (!campaign) {
-      throw new ConvexError({ code: "NOT_FOUND", message: "Campaign not found" });
-    }
-    if (campaign.status === "completed" || campaign.status === "cancelled") {
-      throw new ConvexError({
-        code: "CAMPAIGN_CLOSED",
-        message: `Campaign is ${campaign.status}`,
-      });
-    }
-
-    const slots: Doc<"slots">[] = [];
-    for (const slotId of args.slotIds) {
-      const slot = await ctx.db.get(slotId);
-      if (!slot) {
-        throw new ConvexError({ code: "NOT_FOUND", message: `Slot ${slotId} not found` });
-      }
-      slots.push(slot);
-    }
-
-    const billboardId = slots[0].billboardId;
-    if (slots.some((s) => s.billboardId !== billboardId)) {
-      throw new ConvexError({
-        code: "INVALID_INPUT",
-        message: "All slots in a quote must be on the same billboard",
-      });
-    }
-    // Hot slots under auction can't be bought at a posted price.
-    for (const s of slots) {
-      if (!s.auctionId) continue;
-      const auction = await ctx.db.get(s.auctionId);
-      if (auction?.status === "open") {
-        throw new ConvexError({
-          code: "AUCTION_OPEN",
-          message: "This slot is being auctioned; join the auction to bid",
-          auctionId: auction._id,
-          slotId: s._id,
-        });
-      }
-    }
-    const unavailable = slots.filter((s) => s.state !== "available" || s.startAt <= now);
-    if (unavailable.length > 0) {
-      throw new ConvexError({
-        code: "SLOT_UNAVAILABLE",
-        message: "One or more slots are not available",
-        slotIds: unavailable.map((s) => s._id),
-      });
-    }
-
-    const billboard = await ctx.db.get(billboardId);
-    if (!billboard) {
-      throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
-    }
-    if (billboard.deviceStatus !== "online") {
-      throw new ConvexError({
-        code: "BILLBOARD_OFFLINE",
-        message: "Billboard device is offline; not selling airtime",
-      });
-    }
-
-    // Screen price: crowd (trailing 15 min), time, event, scarcity, market.
-    const { price, audienceAggregateId } = await computeScreenPrice(ctx.db, billboard, slots, now, {
-      excludeCampaignId: args.campaignId,
+  if (args.slotIds.length === 0 || args.slotIds.length > MAX_SLOTS_PER_QUOTE) {
+    throw new ConvexError({
+      code: "INVALID_INPUT",
+      message: `A quote needs 1..${MAX_SLOTS_PER_QUOTE} slots`,
     });
-    const screenBreakdown = price.slotPrices.map((p, i) => ({
-      slotId: slots[i]._id,
-      slotStartAt: p.slotStartAt,
-      computedMinor: p.computedMinor,
-      screenMinor: p.amountMinor,
-      floorApplied: p.floorApplied,
-      ceilingApplied: p.ceilingApplied,
-      stages: p.stages,
-    }));
-    const priceBreakdown = screenBreakdown;
+  }
+  if (new Set(args.slotIds).size !== args.slotIds.length) {
+    throw new ConvexError({ code: "INVALID_INPUT", message: "Duplicate slot ids" });
+  }
 
-    // Company valuation (posted quotes only; hidden from the buyer). Never
-    // blocks: use the latest assessment, or an inline heuristic, and schedule
-    // a refresh when stale.
-    const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now, billboard.workspaceId);
-    let companyMultiplier = 1;
-    let companyMethod: "claude" | "heuristic" | "override" | "inline_heuristic" = "inline_heuristic";
-    if (valuation.assessment) {
-      companyMultiplier = valuation.assessment.multiplier;
-      companyMethod = valuation.assessment.method;
-    } else {
-      companyMultiplier = heuristicAssessment(await gatherCompanyInputs(ctx.db, campaign.advertiserId)).multiplier;
+  const campaign = await ctx.db.get(args.campaignId);
+  if (!campaign) {
+    throw new ConvexError({ code: "NOT_FOUND", message: "Campaign not found" });
+  }
+  if (campaign.status === "completed" || campaign.status === "cancelled") {
+    throw new ConvexError({
+      code: "CAMPAIGN_CLOSED",
+      message: `Campaign is ${campaign.status}`,
+    });
+  }
+
+  const slots: Doc<"slots">[] = [];
+  for (const slotId of args.slotIds) {
+    const slot = await ctx.db.get(slotId);
+    if (!slot) {
+      throw new ConvexError({ code: "NOT_FOUND", message: `Slot ${slotId} not found` });
     }
-    if (!valuation.fresh) {
-      await requestAssessment(ctx, campaign.advertiserId, "quote requested without a fresh assessment");
+    slots.push(slot);
+  }
+
+  const billboardId = slots[0].billboardId;
+  if (slots.some((s) => s.billboardId !== billboardId)) {
+    throw new ConvexError({
+      code: "INVALID_INPUT",
+      message: "All slots in a quote must be on the same billboard",
+    });
+  }
+  // Hot slots under auction can't be bought at a posted price.
+  for (const s of slots) {
+    if (!s.auctionId) continue;
+    const auction = await ctx.db.get(s.auctionId);
+    if (auction?.status === "open") {
+      throw new ConvexError({
+        code: "AUCTION_OPEN",
+        message: "This slot is being auctioned; join the auction to bid",
+        auctionId: auction._id,
+        slotId: s._id,
+      });
     }
-    const finalAmountMinor = screenBreakdown.reduce(
-      (sum, b) => sum + applyCompanyMultiplier(b.screenMinor, companyMultiplier, billboard.reserveFloorMinor, price.ceilingMinor),
-      0,
+  }
+  const unavailable = slots.filter((s) => s.state !== "available" || s.startAt <= now);
+  if (unavailable.length > 0) {
+    throw new ConvexError({
+      code: "SLOT_UNAVAILABLE",
+      message: "One or more slots are not available",
+      slotIds: unavailable.map((s) => s._id),
+    });
+  }
+
+  const billboard = await ctx.db.get(billboardId);
+  if (!billboard) {
+    throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
+  }
+  if (billboard.deviceStatus !== "online") {
+    throw new ConvexError({
+      code: "BILLBOARD_OFFLINE",
+      message: "Billboard device is offline; not selling airtime",
+    });
+  }
+
+  // Screen price: crowd (trailing 15 min), time, event, scarcity, market.
+  const { price, audienceAggregateId } = await computeScreenPrice(ctx.db, billboard, slots, now, {
+    excludeCampaignId: args.campaignId,
+  });
+  const screenBreakdown = price.slotPrices.map((p, i) => ({
+    slotId: slots[i]._id,
+    slotStartAt: p.slotStartAt,
+    computedMinor: p.computedMinor,
+    screenMinor: p.amountMinor,
+    floorApplied: p.floorApplied,
+    ceilingApplied: p.ceilingApplied,
+    stages: p.stages,
+  }));
+  const priceBreakdown = screenBreakdown;
+
+  // Company valuation (posted quotes only; hidden from the buyer). Never
+  // blocks: use the latest assessment, or an inline heuristic, and schedule
+  // a refresh when stale.
+  const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now, billboard.workspaceId);
+  let companyMultiplier = 1;
+  let companyMethod: "claude" | "heuristic" | "override" | "inline_heuristic" = "inline_heuristic";
+  if (valuation.assessment) {
+    companyMultiplier = valuation.assessment.multiplier;
+    companyMethod = valuation.assessment.method;
+  } else {
+    companyMultiplier = heuristicAssessment(await gatherCompanyInputs(ctx.db, campaign.advertiserId)).multiplier;
+  }
+  if (!valuation.fresh) {
+    await requestAssessment(ctx, campaign.advertiserId, "quote requested without a fresh assessment");
+  }
+  const finalAmountMinor = screenBreakdown.reduce(
+    (sum, b) => sum + applyCompanyMultiplier(b.screenMinor, companyMultiplier, billboard.reserveFloorMinor, price.ceilingMinor),
+    0,
+  );
+  const pricingBasis =
+    finalAmountMinor === price.amountMinor
+      ? price.pricingBasis
+      : [...price.pricingBasis, `Price for your account: $${(finalAmountMinor / 100).toFixed(2)}`];
+
+  const expiresAt = now + QUOTE_TTL_MS;
+  const traceId = `trace_${crypto.randomUUID()}`;
+  const quoteId: Id<"quotes"> = await ctx.db.insert("quotes", {
+    workspaceId: billboard.workspaceId,
+    campaignId: args.campaignId,
+    billboardId,
+    slotIds: args.slotIds,
+    amountMinor: finalAmountMinor,
+    currency: "USD",
+    expiresAt,
+    pricingBasis,
+    confidence: price.confidence,
+    audienceAggregateId,
+    policyVersion: PRICING_POLICY_VERSION,
+    status: "open",
+    traceId,
+    priceBreakdown,
+    screenAmountMinor: price.amountMinor,
+    companyMultiplier,
+    companyAssessmentId: valuation.assessment?._id,
+    companyMethod,
+  });
+
+  await ctx.scheduler.runAt(expiresAt, internal.quotes.expire, { quoteId });
+
+  // Seller agent hand-off: a second distinct buyer quoting the same slot
+  // within 10 minutes makes it hot; check (and maybe auction) right away.
+  const recent = await ctx.db
+    .query("quotes")
+    .withIndex("by_billboard_and_expiresAt", (q) => q.eq("billboardId", billboardId).gt("expiresAt", now))
+    .take(100);
+  for (const slotId of args.slotIds) {
+    const buyers = new Set(
+      recent
+        .filter((q) => q.status === "open" && q._creationTime >= now - CONTENTION_WINDOW_MS && q.slotIds.includes(slotId))
+        .map((q) => q.campaignId),
     );
-    const pricingBasis =
-      finalAmountMinor === price.amountMinor
-        ? price.pricingBasis
-        : [...price.pricingBasis, `Price for your account: $${(finalAmountMinor / 100).toFixed(2)}`];
+    if (buyers.size >= CONTENTION_MIN_BUYERS) {
+      await ctx.scheduler.runAfter(0, internal.auctions.openIfHot, { slotId });
+    }
+  }
 
-    const expiresAt = now + QUOTE_TTL_MS;
-    const traceId = `trace_${crypto.randomUUID()}`;
-    const quoteId: Id<"quotes"> = await ctx.db.insert("quotes", {
-      workspaceId: billboard.workspaceId,
+  await recordAudit(ctx, {
+    workspaceId: billboard.workspaceId,
+    traceId,
+    actor,
+    type: "quote.created",
+    subjectId: quoteId,
+    reason: `Quoted ${args.slotIds.length} slot(s) at ${finalAmountMinor} USD minor units (screen ${price.amountMinor}, company x${companyMultiplier.toFixed(2)} ${companyMethod}; ${price.confidence} confidence)`,
+    data: {
       campaignId: args.campaignId,
       billboardId,
       slotIds: args.slotIds,
       amountMinor: finalAmountMinor,
-      currency: "USD",
-      expiresAt,
-      pricingBasis,
-      confidence: price.confidence,
-      audienceAggregateId,
-      policyVersion: PRICING_POLICY_VERSION,
-      status: "open",
-      traceId,
-      priceBreakdown,
       screenAmountMinor: price.amountMinor,
       companyMultiplier,
-      companyAssessmentId: valuation.assessment?._id,
       companyMethod,
-    });
-
-    await ctx.scheduler.runAt(expiresAt, internal.quotes.expire, { quoteId });
-
-    // Seller agent hand-off: a second distinct buyer quoting the same slot
-    // within 10 minutes makes it hot; check (and maybe auction) right away.
-    const recent = await ctx.db
-      .query("quotes")
-      .withIndex("by_billboard_and_expiresAt", (q) => q.eq("billboardId", billboardId).gt("expiresAt", now))
-      .take(100);
-    for (const slotId of args.slotIds) {
-      const buyers = new Set(
-        recent
-          .filter((q) => q.status === "open" && q._creationTime >= now - CONTENTION_WINDOW_MS && q.slotIds.includes(slotId))
-          .map((q) => q.campaignId),
-      );
-      if (buyers.size >= CONTENTION_MIN_BUYERS) {
-        await ctx.scheduler.runAfter(0, internal.auctions.openIfHot, { slotId });
-      }
-    }
-
-    await recordAudit(ctx, {
-      workspaceId: billboard.workspaceId,
-      traceId,
-      actor,
-      type: "quote.created",
-      subjectId: quoteId,
-      reason: `Quoted ${args.slotIds.length} slot(s) at ${finalAmountMinor} USD minor units (screen ${price.amountMinor}, company x${companyMultiplier.toFixed(2)} ${companyMethod}; ${price.confidence} confidence)`,
-      data: {
-        campaignId: args.campaignId,
-        billboardId,
-        slotIds: args.slotIds,
-        amountMinor: finalAmountMinor,
-        screenAmountMinor: price.amountMinor,
-        companyMultiplier,
-        companyMethod,
-        confidence: price.confidence,
-        policyVersion: PRICING_POLICY_VERSION,
-        expiresAt,
-      },
-    });
-
-    return {
-      quoteId,
-      billboardId,
-      slotIds: args.slotIds,
-      amountMinor: finalAmountMinor,
-      currency: "USD" as const,
-      expiresAt,
-      pricingBasis,
       confidence: price.confidence,
       policyVersion: PRICING_POLICY_VERSION,
-      traceId,
-      priceBreakdown,
-    };
-  },
-});
+      expiresAt,
+    },
+  });
+
+  return {
+    quoteId,
+    billboardId,
+    slotIds: args.slotIds,
+    amountMinor: finalAmountMinor,
+    currency: "USD" as const,
+    expiresAt,
+    pricingBasis,
+    confidence: price.confidence,
+    policyVersion: PRICING_POLICY_VERSION,
+    traceId,
+    priceBreakdown,
+  };
+}
 
 /**
  * Scheduled at quote expiry. No-op unless the quote is still open and has no

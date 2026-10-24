@@ -217,7 +217,9 @@ describe("host isolation", () => {
     const r = await controllerA.mutation(api.approvals.decide, { approvalId: req.approvalId, decision: "approved", note: "ok" });
     expect(r.status).toBe("approved");
 
-    // Host B pins Golden Gate at x1.5 in ITS workspace; host A's quotes don't change.
+    // Host B pins Golden Gate at x1.5 in ITS workspace (after Golden Gate quoted B); host A's quotes don't change.
+    const slotsB0 = await m.anon.query(api.slots.listForBillboard, { billboardId: m.billboardB, from: START, to: START + 24 * 60 * MIN });
+    await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slotsB0[7]._id] });
     await m.hostB.mutation(api.valuation.override, { advertiserId: m.seed.advertiserIds[0], multiplier: 1.5, reason: "B only" });
     const qa = await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [m.slotsA[8]._id] });
     expect(qa.amountMinor).toBe(qa.priceBreakdown[0].screenMinor);

@@ -51,6 +51,7 @@ npx convex run seed:finance     # invoices + bank feed with planted errors
 
 npm run dev                     # web app at http://localhost:5173
 npm run server                  # x402 payment server at http://localhost:4021
+npx convex run seed:demoAgentKeys  # prints demo agent keys once; put them in .env
 npm run buyer -- --hold-only    # advertiser buying agent (pays when CDP wallet is funded)
 npm run auction:demo -- --no-pay  # two buyer agents compete in a live auction for a hot slot
 

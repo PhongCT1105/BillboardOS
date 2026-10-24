@@ -1,5 +1,5 @@
-import { ConvexError, v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { ConvexError, v, type Infer } from "convex/values";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { audienceTags } from "./schema";
 import { describeOverlap, matchScore, validateTags } from "./lib/match";
 import { loadTrailingAudience } from "./lib/audienceWindow";
@@ -71,12 +71,7 @@ export const setAudienceBaseline = mutation({
  * agents can use it to choose screens and value bids. Matching never changes
  * the posted screen price.
  */
-export const recommend = query({
-  args: {
-    campaignId: v.optional(v.id("campaigns")),
-    targetAudience: v.optional(audienceTags),
-  },
-  returns: v.array(
+export const recommendation = v.array(
     v.object({
       billboardId: v.id("billboards"),
       name: v.string(),
@@ -90,7 +85,14 @@ export const recommend = query({
       relevantViewersPer15Min: v.number(),
       explanation: v.string(),
     }),
-  ),
+  );
+
+export const recommend = query({
+  args: {
+    campaignId: v.optional(v.id("campaigns")),
+    targetAudience: v.optional(audienceTags),
+  },
+  returns: recommendation,
   handler: async (ctx, args) => {
     let target = args.targetAudience;
     if (!target && args.campaignId) {
@@ -101,39 +103,47 @@ export const recommend = query({
     if (target && validateTags(target)) {
       throw new ConvexError({ code: "INVALID_INPUT", message: validateTags(target)! });
     }
-    const now = Date.now();
-    const billboards = await ctx.db.query("billboards").take(50);
-    const rows = [];
-    for (const b of billboards) {
-      const { sample } = await loadTrailingAudience(ctx.db, b._id, now);
-      const normal = effectiveBaseline(b.audienceBaselinePerBucket);
-      const measured = sample !== null && (sample.window?.coverage ?? 0) >= 0.5;
-      const expected = measured ? sample!.countEstimate : normal;
-      const score = matchScore(b.audienceTags, target);
-      // Unknown match counts as half relevant, and says so.
-      const effectiveScore = score ?? 0.5;
-      const relevant = Math.round(expected * effectiveScore * 10) / 10;
-      const matchText =
-        score === null
-          ? "No audience profile to match against (assumed 50%)"
-          : `Match ${Math.round(score * 100)}%. ${describeOverlap(b.audienceTags, target)}`;
-      rows.push({
-        billboardId: b._id,
-        name: b.name,
-        city: b.city,
-        locationLabel: b.locationLabel,
-        audienceTags: b.audienceTags,
-        matchScore: score,
-        expectedAudiencePer15Min: expected,
-        audienceBasis: measured ? ("measured" as const) : ("normal_traffic" as const),
-        relevantViewersPer15Min: relevant,
-        explanation: `${matchText}. ${measured ? `${expected} people in the last 15 min (camera)` : `${expected} people per 15 min is normal here`}, so about ${relevant} relevant viewers per 15 min.`,
-      });
-    }
-    rows.sort((a, b) => b.relevantViewersPer15Min - a.relevantViewersPer15Min || a.name.localeCompare(b.name));
-    return rows;
+    return await rankScreens(ctx.db, target, Date.now());
   },
 });
+
+/** Screens ranked by audience match x expected audience (shared with the agent inventory API). */
+export async function rankScreens(
+  db: QueryCtx["db"],
+  target: Record<string, number> | undefined,
+  now: number,
+): Promise<Infer<typeof recommendation>> {
+  const billboards = await db.query("billboards").take(50);
+  const rows = [];
+  for (const b of billboards) {
+    const { sample } = await loadTrailingAudience(db, b._id, now);
+    const normal = effectiveBaseline(b.audienceBaselinePerBucket);
+    const measured = sample !== null && (sample.window?.coverage ?? 0) >= 0.5;
+    const expected = measured ? sample!.countEstimate : normal;
+    const score = matchScore(b.audienceTags, target);
+    // Unknown match counts as half relevant, and says so.
+    const effectiveScore = score ?? 0.5;
+    const relevant = Math.round(expected * effectiveScore * 10) / 10;
+    const matchText =
+      score === null
+        ? "No audience profile to match against (assumed 50%)"
+        : `Match ${Math.round(score * 100)}%. ${describeOverlap(b.audienceTags, target)}`;
+    rows.push({
+      billboardId: b._id,
+      name: b.name,
+      city: b.city,
+      locationLabel: b.locationLabel,
+      audienceTags: b.audienceTags,
+      matchScore: score,
+      expectedAudiencePer15Min: expected,
+      audienceBasis: measured ? ("measured" as const) : ("normal_traffic" as const),
+      relevantViewersPer15Min: relevant,
+      explanation: `${matchText}. ${measured ? `${expected} people in the last 15 min (camera)` : `${expected} people per 15 min is normal here`}, so about ${relevant} relevant viewers per 15 min.`,
+    });
+  }
+  rows.sort((a, b) => b.relevantViewersPer15Min - a.relevantViewersPer15Min || a.name.localeCompare(b.name));
+  return rows;
+}
 
 /** Operator: set who is likely in front of this screen (used for matching, not price). */
 export const setAudienceTags = mutation({

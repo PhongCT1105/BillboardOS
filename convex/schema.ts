@@ -230,6 +230,8 @@ export const auditEventType = v.union(
   v.literal("workspace.member_added"),
   v.literal("workspace.payout_changed"),
   v.literal("company.created"),
+  v.literal("agent_key.created"),
+  v.literal("agent_key.revoked"),
   v.literal("tenancy.migrated"),
   v.literal("operator.granted"),
   v.literal("demo.reset"),
@@ -396,6 +398,8 @@ export const quoteFields = {
   status: quoteStatus,
   /** Correlates every audit event in this quote -> hold -> payment -> booking chain. */
   traceId: v.string(),
+  /** Set when an agent key created this quote. */
+  agentKeyId: v.optional(v.id("agentKeys")),
   /** Structured screen-price stages per slot (buyer-visible explanation). */
   priceBreakdown: v.optional(v.array(slotPriceBreakdown)),
   /** Sum of screen prices before company valuation (operator-only). */
@@ -422,6 +426,8 @@ export const holdFields = {
   traceId: v.string(),
   /** Set when this hold was granted to an auction winner (or runner-up). */
   auctionId: v.optional(v.id("auctions")),
+  /** Set when an agent key took this hold (counts against the key's budget cap). */
+  agentKeyId: v.optional(v.id("agentKeys")),
 };
 
 export const bookingFields = {
@@ -715,6 +721,8 @@ export const auctionParticipantFields = {
   maxSetAt: v.number(),
   /** Hold key granted if this participant wins (returned only via myStatus). */
   holdKey: v.optional(v.string()),
+  /** Set when an agent key joined (its leading bid counts against the key's budget cap). */
+  agentKeyId: v.optional(v.id("agentKeys")),
 };
 
 export const bidFields = {
@@ -751,6 +759,8 @@ export const auditEventFields = {
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
+
+export const agentScope = v.union(v.literal("quote"), v.literal("hold"), v.literal("bid"), v.literal("pay"));
 
 export const accountType = v.union(v.literal("host"), v.literal("customer"));
 export const workspaceRole = v.union(v.literal("owner"), v.literal("operator"));
@@ -798,6 +808,34 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_advertiser_and_user", ["advertiserId", "userId"]),
 
+  /**
+   * Customer-issued agent keys (ADR 0004). The key itself is shown once and
+   * stored only as a SHA-256 hash; the webhook secret signs alerts (step 3).
+   */
+  agentKeys: defineTable({
+    advertiserId: v.id("advertisers"),
+    name: v.string(),
+    /** Public part shown in lists, e.g. "bos_agent_3f9a1c2e". */
+    prefix: v.string(),
+    keyHash: v.string(),
+    scopes: v.array(agentScope),
+    /** If set, the key may only act for these campaigns. */
+    campaignIds: v.optional(v.array(v.id("campaigns"))),
+    /** Max committed spend: active holds + bookings from this key + leading auction bids. */
+    budgetCapMinor: v.number(),
+    expiresAt: v.number(),
+    revokedAt: v.optional(v.number()),
+    webhookUrl: v.optional(v.string()),
+    webhookSecret: v.string(),
+    lastUsedAt: v.optional(v.number()),
+    createdBy: v.string(),
+    /** Fixed-window rate limit state. */
+    rateWindowStart: v.optional(v.number()),
+    rateWindowCount: v.optional(v.number()),
+  })
+    .index("by_hash", ["keyHash"])
+    .index("by_advertiser", ["advertiserId"]),
+
   /** LEGACY (pre ADR 0004): read once by the tenancy migration, then unused. */
   operators: defineTable({
     userId: v.id("users"),
@@ -825,15 +863,18 @@ export default defineSchema({
 
   quotes: defineTable(quoteFields)
     .index("by_campaign", ["campaignId"])
-    .index("by_billboard_and_expiresAt", ["billboardId", "expiresAt"]),
+    .index("by_billboard_and_expiresAt", ["billboardId", "expiresAt"])
+    .index("by_workspace", ["workspaceId"]),
 
   auctions: defineTable(auctionFields)
     .index("by_status_and_endsAt", ["status", "endsAt"])
-    .index("by_billboard_and_status", ["billboardId", "status"]),
+    .index("by_billboard_and_status", ["billboardId", "status"])
+    .index("by_workspace", ["workspaceId"]),
 
   auctionParticipants: defineTable(auctionParticipantFields)
     .index("by_auction_and_campaign", ["auctionId", "campaignId"])
-    .index("by_auction", ["auctionId"]),
+    .index("by_auction", ["auctionId"])
+    .index("by_agentKey", ["agentKeyId"]),
 
   bids: defineTable(bidFields).index("by_auction", ["auctionId"]),
 
@@ -853,7 +894,8 @@ export default defineSchema({
   holds: defineTable(holdFields)
     .index("by_idempotencyKey", ["idempotencyKey"])
     .index("by_quote_and_status", ["quoteId", "status"])
-    .index("by_billboard_and_status", ["billboardId", "status"]),
+    .index("by_billboard_and_status", ["billboardId", "status"])
+    .index("by_agentKey_and_status", ["agentKeyId", "status"]),
 
   bookings: defineTable(bookingFields)
     .index("by_hold", ["holdId"])
