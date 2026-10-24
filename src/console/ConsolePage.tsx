@@ -11,6 +11,7 @@ import { ActivityFeed } from "./ActivityFeed";
 import { AddScreenForm } from "../auth/Onboarding";
 import { LiveAuctions } from "../auctions/LiveAuctions";
 import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
+import { AutopilotPanel } from "../autopilot/AutopilotPanel";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
@@ -37,7 +38,7 @@ export function ConsolePage() {
       <div className="flex flex-wrap items-end justify-between gap-4 pt-8 pb-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Operator console</h1>
-          <p className="mt-1 text-sm text-muted">Live inventory, money and agent activity for your network.</p>
+          <p className="mt-1 text-sm text-muted">Your seller agent sells the next 12 hours; the live auction sells the current spot. Watch them work.</p>
         </div>
         {billboards.length > 1 && (
           <label className="flex flex-col gap-1 text-sm">
@@ -56,18 +57,23 @@ export function ConsolePage() {
           </label>
         )}
       </div>
+      <div className="mb-10">
+        <AutopilotPanel />
+      </div>
       {billboardId && <ConsoleBody billboardId={billboardId} />}
     </main>
   );
 }
 
 function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
-  const now = useNow(60_000);
-  const from = Math.floor(now / QUARTER_HOUR) * QUARTER_HOUR - QUARTER_HOUR;
-  const to = from + 12 * 60 * 60 * 1000;
+  const now = useNow(5_000);
+  const minute = Math.floor(now / 60_000) * 60_000;
+  // Two hours of history, the current slot and the next 12 hours.
+  const from = Math.floor(minute / QUARTER_HOUR) * QUARTER_HOUR - 8 * QUARTER_HOUR;
+  const to = from + 14 * 60 * 60 * 1000;
 
   const summary = useQuery(api.dashboard.summary, {});
-  const slots = useQuery(api.slots.listForBillboard, { billboardId, from, to });
+  const outlook = useQuery(api.autopilot.outlook, { billboardId, from, to, atMinute: minute });
   const audience = useQuery(api.audience.recentForBillboard, { billboardId });
   const exceptions = useQuery(api.finance.openExceptions, {});
   const pending = useQuery(api.creatives.pendingReview, {});
@@ -83,7 +89,7 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex flex-col gap-10">
           <LiveAuctions billboardId={billboardId} />
-          <SlotBoard slots={slots} />
+          <SlotBoard outlook={outlook} now={now} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />
           <section aria-labelledby="negotiations-heading" className="flex flex-col gap-4">

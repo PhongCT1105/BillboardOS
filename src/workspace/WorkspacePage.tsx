@@ -2,7 +2,9 @@ import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
-import { money } from "../lib/format";
+import { money, timeOfDay } from "../lib/format";
+import { useNow } from "../lib/hooks";
+import type { Id } from "../../convex/_generated/dataModel";
 import { AddScreenForm } from "../auth/Onboarding";
 import { Card, CopyButton, Empty, ErrorLine, Field, Pill, Section, Skeleton, inputCls, primaryBtn, secondaryBtn, useAction } from "../customer/ui";
 
@@ -26,6 +28,7 @@ export function WorkspacePage() {
           Workspace settings · {workspace.city} · you are {workspace.myRole === "owner" ? "an owner" : "an operator"}
         </p>
       </div>
+      <AutopilotControls workspace={workspace} />
       <Screens />
       <ReadyCreatives />
       <SellerPolicy workspace={workspace} />
@@ -329,6 +332,7 @@ function ReadyCreatives() {
                 <div className="min-w-0">
                   <p className="font-medium">{r.advertiserName}</p>
                   <p className="truncate text-xs text-faint">{r.brief}</p>
+                  {r.agentNote && <p className="text-xs text-muted">{r.agentNote}</p>}
                 </div>
                 <Pill tone={r.ready ? "ok" : "muted"}>{r.ready ? "ready" : "not ready"}</Pill>
               </div>
@@ -345,6 +349,132 @@ function ReadyCreatives() {
         </div>
       )}
       <ErrorLine error={error} />
+    </Section>
+  );
+}
+
+/**
+ * Autopilot emergency controls (ADR 0007): pause the seller agent, or sell one
+ * slot right now at the fully decayed price. Owners only; operators see the state.
+ */
+function AutopilotControls({ workspace }: { workspace: Workspace }) {
+  const minute = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const status = useQuery(api.autopilot.status, { workspaceId: workspace.workspaceId, atMinute: minute });
+  const screens = useQuery(api.billboards.mine, {});
+  const setEnabled = useMutation(api.autopilot.setEnabled);
+  const sellNow = useMutation(api.autopilot.sellNow);
+  const [screenId, setScreenId] = useState<Id<"billboards"> | null>(null);
+  const [slotId, setSlotId] = useState<Id<"slots"> | "">("");
+  const [note, setNote] = useState<string | null>(null);
+  const { busy, error, run } = useAction();
+  const owner = workspace.myRole === "owner";
+  const billboardId = screenId ?? screens?.[0]?._id ?? null;
+  const outlook = useQuery(
+    api.autopilot.outlook,
+    billboardId ? { billboardId, from: minute, to: minute + 12 * 60 * 60_000, atMinute: minute } : "skip",
+  );
+  const sellable = (outlook?.slots ?? []).filter((s) => s.state === "available" && !s.inAuction && s.startAt > minute + 60_000);
+
+  if (status === undefined) return <Skeleton h="h-40" />;
+  return (
+    <Section
+      title="Autopilot"
+      lead="On by default: every minute the seller agent prices the next 12 hours from its forecast and offers each unsold slot to the company agents that fit. These are emergency controls."
+    >
+      <Card className="flex flex-col gap-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">Seller agent</span>
+              {status.enabled ? <Pill tone="ok">On</Pill> : <Pill tone="danger">Paused</Pill>}
+            </div>
+            <p className="text-sm text-muted">{status.doing}</p>
+          </div>
+          {owner && (
+            <button
+              type="button"
+              disabled={busy}
+              className={status.enabled ? secondaryBtn : primaryBtn}
+              onClick={async () => {
+                setNote(null);
+                const ok = await run(async () => {
+                  await setEnabled({ workspaceId: workspace.workspaceId, enabled: !status.enabled });
+                  return true;
+                });
+                if (ok) setNote(status.enabled ? "Paused: open offers were withdrawn." : "Back on: planning the next 12 hours now.");
+              }}
+            >
+              {status.enabled ? "Pause autopilot" : "Turn autopilot back on"}
+            </button>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-line pt-5">
+          <div>
+            <p className="font-medium">Sell this slot now</p>
+            <p className="text-sm text-muted">
+              Offers one slot right away to every company agent that fits, at the lowest price the autopilot would reach (never below the screen's floor). First agent to accept gets it. Works while paused.
+            </p>
+          </div>
+          {owner ? (
+            <form
+              className="flex flex-wrap items-end gap-3"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!slotId) return;
+                setNote(null);
+                const r = await run(() => sellNow({ slotId }));
+                if (r) {
+                  setNote(`Offered at ${money(r.priceMinor)} to ${r.companies} compan${r.companies === 1 ? "y" : "ies"}.`);
+                  setSlotId("");
+                }
+              }}
+            >
+              {screens && screens.length > 1 && (
+                <Field label="Screen">
+                  <select
+                    className={inputCls}
+                    value={billboardId ?? ""}
+                    onChange={(e) => {
+                      setScreenId(e.target.value as Id<"billboards">);
+                      setSlotId("");
+                    }}
+                  >
+                    {screens.map((b) => (
+                      <option key={b._id} value={b._id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              <Field label="Slot" className="min-w-[220px]">
+                <select className={inputCls} value={slotId} onChange={(e) => setSlotId(e.target.value as Id<"slots">)}>
+                  <option value="">{outlook === undefined ? "Loading slots..." : sellable.length === 0 ? "No unsold slots" : "Pick an unsold slot"}</option>
+                  {sellable.map((s) => (
+                    <option key={s.slotId} value={s.slotId}>
+                      {timeOfDay(s.startAt)}
+                      {s.priceMinor !== null ? ` · listed ${money(s.priceMinor)}` : ""}
+                      {s.expectedPeople !== null ? ` · ~${Math.round(s.expectedPeople)} people` : ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <button type="submit" disabled={busy || !slotId} className={primaryBtn}>
+                Sell this slot now
+              </button>
+            </form>
+          ) : (
+            <p className="text-sm text-muted">Only owners can pause the autopilot or sell a slot now.</p>
+          )}
+        </div>
+        <ErrorLine error={error} />
+        {note && (
+          <p role="status" className="text-sm text-muted">
+            {note}
+          </p>
+        )}
+      </Card>
     </Section>
   );
 }

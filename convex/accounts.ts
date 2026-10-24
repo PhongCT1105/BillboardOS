@@ -5,6 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import { accountType, companyRole, companySize, workspaceRole } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { getProfile, requireUser, requireWorkspaceMember } from "./lib/tenancy";
+import { requestKnowledgeBuild } from "./knowledge";
 
 /**
  * Who is signed in, which side they chose, their workspaces (hosts) and
@@ -130,6 +131,7 @@ export const createCompany = mutation({
       size: args.size,
     });
     await ctx.db.insert("advertiserMembers", { advertiserId, userId: user.userId, email: user.email, role: "owner" });
+    await requestKnowledgeBuild(ctx, advertiserId, "company created");
     await recordAudit(ctx, {
       traceId: `company:${advertiserId}`,
       actor: `customer:${user.email}`,

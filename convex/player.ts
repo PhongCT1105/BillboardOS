@@ -4,7 +4,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { computeScreenPrice } from "./lib/screenPrice";
-import { creativeReady, onMomentFirstFrame } from "./lib/momentHooks";
+import { onMomentFirstFrame } from "./lib/momentHooks";
+import { YOUTUBE_CONTENT_TYPE, hasCreative } from "./lib/youtube";
 import { explorerTxUrl } from "./lib/x402/money";
 import { screenModeOf } from "./lib/moment";
 
@@ -27,7 +28,33 @@ const slotView = v.object({
   /** Present only when the slot is scheduled/played with an approved creative. */
   creativeUrl: v.optional(v.string()),
   contentType: v.optional(v.string()),
+  /** YouTube creative (contentType "youtube"): play it with the official embed. */
+  youtubeVideoId: v.optional(v.string()),
+  creativeTitle: v.optional(v.string()),
 });
+
+/**
+ * A campaign's creative can play on this host's screens: approved
+ * platform-wide or by this host. Same rule as momentHooks.creativeReady,
+ * plus YouTube creatives (which have no storage file).
+ */
+async function creativePlayable(ctx: QueryCtx, campaign: Doc<"campaigns">, workspaceId: Id<"workspaces"> | undefined) {
+  if (!hasCreative(campaign)) return false;
+  if (campaign.creativeStatus === "approved") return true;
+  if (!workspaceId) return false;
+  const approval = await ctx.db
+    .query("creativeApprovals")
+    .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId).eq("campaignId", campaign._id))
+    .first();
+  return approval !== null;
+}
+
+async function youtubeOf(ctx: QueryCtx, campaignId: Id<"campaigns">) {
+  return await ctx.db
+    .query("youtubeCreatives")
+    .withIndex("by_campaign", (q) => q.eq("campaignId", campaignId))
+    .unique();
+}
 
 async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
   const view: {
@@ -40,6 +67,8 @@ async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
     advertiserName?: string;
     creativeUrl?: string;
     contentType?: string;
+    youtubeVideoId?: string;
+    creativeTitle?: string;
   } = { slotId: slot._id, startAt: slot.startAt, endAt: slot.endAt, state: slot.state };
   if (!slot.bookingId) return view;
   const booking = await ctx.db.get(slot.bookingId);
@@ -51,11 +80,21 @@ async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
   const advertiser = await ctx.db.get(campaign.advertiserId);
   if (advertiser) view.advertiserName = advertiser.displayName;
   const playable = slot.state === "scheduled" || slot.state === "played";
-  if (playable && campaign.creativeStorageId && (await creativeReady(ctx, campaign, slot.workspaceId))) {
-    const url = await ctx.storage.getUrl(campaign.creativeStorageId);
-    if (url) {
-      view.creativeUrl = url;
-      view.contentType = campaign.creativeContentType;
+  if (playable && (await creativePlayable(ctx, campaign, slot.workspaceId))) {
+    if (campaign.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+      const yt = await youtubeOf(ctx, campaign._id);
+      if (yt) {
+        view.creativeUrl = yt.url;
+        view.contentType = YOUTUBE_CONTENT_TYPE;
+        view.youtubeVideoId = yt.videoId;
+        if (yt.title) view.creativeTitle = yt.title;
+      }
+    } else if (campaign.creativeStorageId) {
+      const url = await ctx.storage.getUrl(campaign.creativeStorageId);
+      if (url) {
+        view.creativeUrl = url;
+        view.contentType = campaign.creativeContentType;
+      }
     }
   }
   return view;
@@ -264,7 +303,15 @@ export const recordPlayback = mutation({
  */
 export const readyCreatives = query({
   args: { billboardId: v.id("billboards") },
-  returns: v.array(v.object({ campaignId: v.id("campaigns"), url: v.string(), contentType: v.union(v.string(), v.null()) })),
+  returns: v.array(
+    v.object({
+      campaignId: v.id("campaigns"),
+      /** File URL, or the thumbnail for a YouTube creative (warmed, not the video). */
+      url: v.string(),
+      contentType: v.union(v.string(), v.null()),
+      youtubeVideoId: v.optional(v.string()),
+    }),
+  ),
   handler: async (ctx, args) => {
     const billboard = await ctx.db.get(args.billboardId);
     if (!billboard?.workspaceId) return [];
@@ -276,7 +323,13 @@ export const readyCreatives = query({
     const out = [];
     for (const a of approvals) {
       const campaign = await ctx.db.get(a.campaignId);
-      if (!campaign?.creativeStorageId || campaign.status !== "active") continue;
+      if (!campaign || !hasCreative(campaign) || campaign.status !== "active") continue;
+      if (campaign.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+        const yt = await youtubeOf(ctx, campaign._id);
+        if (yt) out.push({ campaignId: campaign._id, url: yt.thumbnailUrl, contentType: YOUTUBE_CONTENT_TYPE, youtubeVideoId: yt.videoId });
+        continue;
+      }
+      if (!campaign.creativeStorageId) continue;
       const url = await ctx.storage.getUrl(campaign.creativeStorageId);
       if (url) out.push({ campaignId: campaign._id, url, contentType: campaign.creativeContentType ?? null });
     }
@@ -322,6 +375,14 @@ export const screenState = query({
         wonAtMinor: v.number(),
         txShort: v.union(v.string(), v.null()),
         txUrl: v.union(v.string(), v.null()),
+        /** The winner's creative: a YouTube video plays through the official embed. */
+        creative: v.optional(
+          v.object({
+            provider: v.union(v.literal("file"), v.literal("youtube")),
+            youtubeVideoId: v.union(v.string(), v.null()),
+            title: v.union(v.string(), v.null()),
+          }),
+        ),
       }),
     ),
   }),
@@ -361,7 +422,13 @@ export const screenState = query({
       closesAt: null as number | null,
       spotEndAt: moment.spotEndAt as number | null,
       ladder: [] as { company: string; amountMinor: number; at: number; leading: boolean }[],
-      nowPlaying: null as null | { company: string; wonAtMinor: number; txShort: string | null; txUrl: string | null },
+      nowPlaying: null as null | {
+        company: string;
+        wonAtMinor: number;
+        txShort: string | null;
+        txUrl: string | null;
+        creative?: { provider: "file" | "youtube"; youtubeVideoId: string | null; title: string | null };
+      },
     };
 
     if (moment.status === "offering") return { mode: screenModeOf("offering"), ...base };
@@ -408,6 +475,14 @@ export const screenState = query({
       const settled = moment.status !== "awarded";
       // Only a settlement transaction hash counts as proof of payment.
       const tx = settled ? (moment.paymentTx ?? null) : null;
+      const campaign = winner ? await ctx.db.get(winner.campaignId) : null;
+      let creative: { provider: "file" | "youtube"; youtubeVideoId: string | null; title: string | null } | undefined;
+      if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+        const yt = await youtubeOf(ctx, campaign._id);
+        if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
+      } else if (campaign?.creativeStorageId) {
+        creative = { provider: "file", youtubeVideoId: null, title: null };
+      }
       return {
         mode: screenModeOf(moment.status),
         ...base,
@@ -417,6 +492,7 @@ export const screenState = query({
           wonAtMinor: moment.paidMinor ?? hold?.amountMinor ?? winner?.replyAmountMinor ?? moment.currentMinor ?? moment.priceMinor,
           txShort: tx ? (tx.length > 14 ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : tx) : null,
           txUrl: tx && moment.paymentNetwork ? (explorerTxUrl(moment.paymentNetwork, tx) ?? null) : null,
+          ...(creative ? { creative } : {}),
         },
       };
     }

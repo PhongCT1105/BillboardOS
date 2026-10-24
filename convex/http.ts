@@ -738,6 +738,39 @@ http.route({
   }),
 });
 
+/**
+ * POST /api/autopilot/offers/{offerId}/accept (agent key, hold scope): take a
+ * host autopilot's forward offer at its price (ADR 0007). Body (optional):
+ * { campaignId }. 200 { status: "held", holdId, amountMinor, purchaseUrl, ... }
+ * or { status: "pending", decideAt } during a first look.
+ */
+http.route({
+  pathPrefix: "/api/autopilot/offers/",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const m = /^\/api\/autopilot\/offers\/([^/]+)\/accept\/?$/.exec(new URL(request.url).pathname);
+    if (!m || !ID_RE.test(m[1])) return agentError(404, "NOT_FOUND", "Offer not found");
+    const agentKey = agentKeyOf(request);
+    if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
+    let campaignId: string | undefined;
+    const text = await request.text();
+    if (text.trim()) {
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return agentError(400, "INVALID_INPUT", "Body must be a JSON object");
+      }
+      campaignId = typeof body === "object" && body !== null ? str((body as Record<string, unknown>).campaignId) : undefined;
+    }
+    try {
+      return json(200, await ctx.runMutation(internal.autopilot.acceptByKey, { token: agentKey, offerId: m[1], campaignId }));
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }),
+});
+
 // Website (Vite build uploaded by `npm run deploy:web`): everything not matched
 // above. Registered last; exact and longer-prefix app routes win. SPA fallback
 // serves index.html for client routes (the app uses hash routes anyway).

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { preconnect } from "react-dom";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
@@ -6,6 +7,7 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { money } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { useArrivalCounter } from "../sensor/useArrivalCounter";
+import { YouTubeCreative, loadYouTubeApi } from "./YouTubeCreative";
 
 const MINUTE = 60_000;
 const SEND_EVERY_MS = 10_000;
@@ -34,6 +36,18 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
   const current = state?.current ?? null;
   // Keep showing the creative for the whole slot (the playback receipt flips it to "played").
   const showCreative = (current?.state === "scheduled" || current?.state === "played") && current.creativeUrl;
+
+  // YouTube creatives ready here: warm the connection and the IFrame API so a paid spot starts fast.
+  const hasYouTube = (ready ?? []).some((c) => c.youtubeVideoId);
+  useEffect(() => {
+    if (!hasYouTube) return;
+    preconnect("https://www.youtube-nocookie.com");
+    preconnect("https://i.ytimg.com");
+    preconnect("https://www.youtube.com");
+    loadYouTubeApi().catch(() => {
+      // The player falls back to the iframe load event.
+    });
+  }, [hasYouTube]);
 
   // A billboard has no pointer; hide the cursor while this page is open.
   useEffect(() => {
@@ -69,7 +83,14 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
       {liveMode ? (
         <LiveScreen screen={screen} />
       ) : showCreative ? (
-        current.contentType?.startsWith("video/") ? (
+        current.youtubeVideoId ? (
+          <YouTubeCreative
+            key={current.slotId}
+            videoId={current.youtubeVideoId}
+            title={current.creativeTitle ?? current.advertiserName}
+            onFirstFrame={onCreativeShown}
+          />
+        ) : current.contentType?.startsWith("video/") ? (
           <video
             key={current.slotId}
             src={current.creativeUrl}
@@ -89,6 +110,9 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
             onLoad={onCreativeShown}
           />
         )
+      ) : screen.mode === "playing" && screen.nowPlaying?.creative?.youtubeVideoId ? (
+        // Paid YouTube spot before its slot shows up as scheduled: play it; the receipt comes with the slot.
+        <YouTubeCreative videoId={screen.nowPlaying.creative.youtubeVideoId} title={screen.nowPlaying.creative.title} />
       ) : screen.mode === "playing" && screen.nowPlaying ? (
         <div className="fade-in absolute inset-0 grid place-items-center bg-gradient-to-br from-[#1e3a8a] to-[#7c3aed] px-10 text-center">
           <p className="text-[clamp(2rem,6vw,6rem)] leading-[1.05] font-black tracking-tight text-white">{screen.nowPlaying.company}</p>
@@ -110,7 +134,10 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
       )}
       <div aria-hidden className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0">
         {(ready ?? []).map((c) =>
-          c.contentType?.startsWith("video/") ? (
+          c.youtubeVideoId ? (
+            // The video streams from YouTube; warm its thumbnail only.
+            <img key={c.campaignId} src={c.url} alt="" loading="eager" />
+          ) : c.contentType?.startsWith("video/") ? (
             <video key={c.campaignId} src={c.url} preload="auto" muted playsInline />
           ) : (
             <img key={c.campaignId} src={c.url} alt="" loading="eager" />

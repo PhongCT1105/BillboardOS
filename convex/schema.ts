@@ -1097,9 +1097,13 @@ export const accountType = v.union(v.literal("host"), v.literal("customer"));
 export const workspaceRole = v.union(v.literal("owner"), v.literal("operator"));
 export const companyRole = v.union(v.literal("owner"), v.literal("member"));
 
+import { knowledgeTables } from "./schemaParts/knowledge";
+import { autopilotTables } from "./lib/autopilotSchema";
 export default defineSchema({
   // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
   ...authTables,
+  ...knowledgeTables,
+  ...autopilotTables,
 
   /** One per user: which side of the marketplace they signed up for. */
   profiles: defineTable({
