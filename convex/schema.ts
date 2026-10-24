@@ -180,6 +180,7 @@ export const audienceSource = v.union(
 export const auditEventType = v.union(
   // inventory / booking lifecycle
   v.literal("seed.completed"),
+  v.literal("demo.reset"),
   v.literal("inventory.generated"),
   v.literal("campaign.created"),
   v.literal("quote.created"),
@@ -504,7 +505,8 @@ export default defineSchema({
 
   holds: defineTable(holdFields)
     .index("by_idempotencyKey", ["idempotencyKey"])
-    .index("by_quote_and_status", ["quoteId", "status"]),
+    .index("by_quote_and_status", ["quoteId", "status"])
+    .index("by_billboard_and_status", ["billboardId", "status"]),
 
   bookings: defineTable(bookingFields)
     .index("by_hold", ["holdId"])

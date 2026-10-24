@@ -139,7 +139,7 @@ export const create = mutation({
  * Return a hold's slots to inventory. Only slots still pointing at this hold
  * are reverted, so a stale call can never free someone else's inventory.
  */
-async function endHold(
+export async function endHold(
   ctx: MutationCtx,
   hold: Doc<"holds">,
   outcome: "released" | "expired",

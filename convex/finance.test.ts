@@ -63,6 +63,65 @@ async function invoiceByNumber(t: T, number: string) {
 const balance = (i: { amountMinor: number; paidMinor: number; adjustmentMinor: number; writtenOffMinor: number }) =>
   i.amountMinor - i.paidMinor - i.adjustmentMinor - i.writtenOffMinor;
 
+/** Assert every bank line and invoice matches the answer key (after a reconciliation run). */
+async function assertReconciledMatchesAnswerKey(t: T) {
+  const adjustedInvoices = new Map<string, number>();
+  for (const [externalId, expected] of Object.entries(LINE_ANSWERS)) {
+    const line = (await lineByExternalId(t, externalId))!;
+    const actual = await t.run(async (ctx) => {
+      const apps = await ctx.db
+        .query("paymentApplications")
+        .withIndex("by_bankTransaction", (q) => q.eq("bankTransactionId", line._id))
+        .collect();
+      const exceptions = await ctx.db
+        .query("financeExceptions")
+        .withIndex("by_bankTransaction", (q) => q.eq("bankTransactionId", line._id))
+        .collect();
+      const approvals = await ctx.db
+        .query("approvals")
+        .withIndex("by_subject", (q) => q.eq("subjectId", line._id))
+        .collect();
+      const num = async (id: Id<"invoices"> | undefined) => (id ? (await ctx.db.get(id))!.number : null);
+      return {
+        status: line.status,
+        rule: line.rule,
+        applications: await Promise.all(
+          apps.map(async (a) => ({ invoice: (await num(a.invoiceId))!, amountMinor: a.amountMinor, appliedBy: a.appliedBy })),
+        ),
+        exceptions: await Promise.all(
+          exceptions.map(async (e) => ({
+            kind: e.kind,
+            invoice: await num(e.invoiceId),
+            expectedMinor: e.expectedMinor,
+            observedMinor: e.observedMinor,
+          })),
+        ),
+        approvals: approvals.map((a) => ({ action: a.action, amountMinor: a.amountMinor, requestedBy: a.requestedBy })),
+      };
+    });
+
+    const label = `${externalId} (${expected.planted})`;
+    expect(actual.status, label).toBe(expected.status);
+    expect(actual.rule, label).toBe(expected.rule);
+    expect(actual.applications.map(({ invoice, amountMinor }) => ({ invoice, amountMinor })), label).toEqual(
+      expected.applications,
+    );
+    expect(actual.applications.every((a) => a.appliedBy === "agent:ar"), label).toBe(true);
+    expect(actual.exceptions, label).toEqual(expected.exceptions);
+    expect(actual.approvals.map(({ action, amountMinor }) => ({ action, amountMinor })), label).toEqual(
+      expected.approvalsRequested,
+    );
+    expect(actual.approvals.every((a) => a.requestedBy === "agent:ar"), label).toBe(true);
+    for (const adj of expected.adjustments) adjustedInvoices.set(adj.invoice, adj.amountMinor);
+  }
+
+  for (const [number, expected] of Object.entries(INVOICE_ANSWERS)) {
+    const inv = await invoiceByNumber(t, number);
+    expect({ status: inv.status, balanceMinor: balance(inv) }, number).toEqual(expected);
+    expect(inv.adjustmentMinor, `${number} adjustment`).toBe(adjustedInvoices.get(number) ?? 0);
+  }
+}
+
 describe("planted errors reproduce the answer key exactly", () => {
   test("ingest, reconciliation, invoices and collections", async () => {
     const { t, seed, summary } = await seededAndReconciled();
@@ -76,61 +135,7 @@ describe("planted errors reproduce the answer key exactly", () => {
     expect(summary.processed).toBe(Object.keys(LINE_ANSWERS).length);
     expect(summary.lines.map((l) => l.externalId)).toEqual(Object.keys(LINE_ANSWERS));
 
-    const adjustedInvoices = new Map<string, number>();
-    for (const [externalId, expected] of Object.entries(LINE_ANSWERS)) {
-      const line = (await lineByExternalId(t, externalId))!;
-      const actual = await t.run(async (ctx) => {
-        const apps = await ctx.db
-          .query("paymentApplications")
-          .withIndex("by_bankTransaction", (q) => q.eq("bankTransactionId", line._id))
-          .collect();
-        const exceptions = await ctx.db
-          .query("financeExceptions")
-          .withIndex("by_bankTransaction", (q) => q.eq("bankTransactionId", line._id))
-          .collect();
-        const approvals = await ctx.db
-          .query("approvals")
-          .withIndex("by_subject", (q) => q.eq("subjectId", line._id))
-          .collect();
-        const num = async (id: Id<"invoices"> | undefined) => (id ? (await ctx.db.get(id))!.number : null);
-        return {
-          status: line.status,
-          rule: line.rule,
-          applications: await Promise.all(
-            apps.map(async (a) => ({ invoice: (await num(a.invoiceId))!, amountMinor: a.amountMinor, appliedBy: a.appliedBy })),
-          ),
-          exceptions: await Promise.all(
-            exceptions.map(async (e) => ({
-              kind: e.kind,
-              invoice: await num(e.invoiceId),
-              expectedMinor: e.expectedMinor,
-              observedMinor: e.observedMinor,
-            })),
-          ),
-          approvals: approvals.map((a) => ({ action: a.action, amountMinor: a.amountMinor, requestedBy: a.requestedBy })),
-        };
-      });
-
-      const label = `${externalId} (${expected.planted})`;
-      expect(actual.status, label).toBe(expected.status);
-      expect(actual.rule, label).toBe(expected.rule);
-      expect(actual.applications.map(({ invoice, amountMinor }) => ({ invoice, amountMinor })), label).toEqual(
-        expected.applications,
-      );
-      expect(actual.applications.every((a) => a.appliedBy === "agent:ar"), label).toBe(true);
-      expect(actual.exceptions, label).toEqual(expected.exceptions);
-      expect(actual.approvals.map(({ action, amountMinor }) => ({ action, amountMinor })), label).toEqual(
-        expected.approvalsRequested,
-      );
-      expect(actual.approvals.every((a) => a.requestedBy === "agent:ar"), label).toBe(true);
-      for (const adj of expected.adjustments) adjustedInvoices.set(adj.invoice, adj.amountMinor);
-    }
-
-    for (const [number, expected] of Object.entries(INVOICE_ANSWERS)) {
-      const inv = await invoiceByNumber(t, number);
-      expect({ status: inv.status, balanceMinor: balance(inv) }, number).toEqual(expected);
-      expect(inv.adjustmentMinor, `${number} adjustment`).toBe(adjustedInvoices.get(number) ?? 0);
-    }
+    await assertReconciledMatchesAnswerKey(t);
 
     // Collections seat at the same "now".
     const plan = await t.mutation(internal.collections.plan, { asOf: FIXTURE_AS_OF });
@@ -551,5 +556,162 @@ describe("reconcile engine (pure)", () => {
     expect(chooseTone({ invoiceNumber: "INV-1", dueAt: due, asOf: due + 21 * DAY_MS, history: [] }).tone).toBe(
       "escalate_to_controller",
     );
+  });
+});
+
+describe("demo reset", () => {
+  async function snapshot(t: T) {
+    return await t.run(async (ctx) => {
+      const lines = await ctx.db.query("bankTransactions").collect();
+      const invoices = await ctx.db.query("invoices").collect();
+      return {
+        lines: lines
+          .map((l) => ({ externalId: l.externalId, status: l.status, appliedMinor: l.appliedMinor, amountMinor: l.amountMinor }))
+          .sort((a, b) => a.externalId.localeCompare(b.externalId)),
+        invoices: invoices
+          .map(({ _id, _creationTime, ...rest }) => rest)
+          .sort((a, b) => a.number.localeCompare(b.number)),
+        applications: (await ctx.db.query("paymentApplications").collect()).length,
+        exceptions: (await ctx.db.query("financeExceptions").collect()).length,
+        approvals: (await ctx.db.query("approvals").collect()).length,
+        tasks: (await ctx.db.query("collectionTasks").collect()).length,
+      };
+    });
+  }
+
+  test("reset after a full run restores the exact pre-run state; answer key passes again", async () => {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.seed.finance, {});
+    const before = await snapshot(t);
+    expect(before.lines.every((l) => l.status === "unmatched")).toBe(true);
+
+    // Full rehearsal: reconcile, a judge scenario line, approvals, collections.
+    await t.mutation(internal.seed.addScenarioBankLine, { payerName: "Sunset Records", amountMinor: 30000, memo: "INV-1013" });
+    await t.mutation(api.finance.runReconciliation, {});
+    await t.mutation(internal.collections.plan, { asOf: FIXTURE_AS_OF });
+    const refund = (await t.query(api.approvals.pending, {})).find((a) => a.action === "refund")!;
+    await t.mutation(api.approvals.decide, { approvalId: refund._id, approvedBy: "controller", decision: "approved", note: "ok" });
+    const unidentified = (await lineByExternalId(t, "fx-bank-007"))!;
+    const match = await t.mutation(api.approvals.request, {
+      action: "apply_manual_match",
+      subjectId: unidentified._id,
+      invoiceId: (await invoiceByNumber(t, "INV-1015"))._id,
+      amountMinor: 20000,
+      requestedBy: "maria.ar",
+      reason: "agency",
+    });
+    await t.mutation(api.approvals.decide, { approvalId: match.approvalId, approvedBy: "controller", decision: "approved", note: "ok" });
+    const auditBefore = (await t.run(async (ctx) => ctx.db.query("auditEvents").collect())).length;
+
+    const reset = await t.mutation(internal.seed.resetFinanceDemo, {});
+    expect(reset.bankLinesRemoved).toBe(8); // 7 fixture lines + 1 scenario line
+    expect(reset.bankLinesReingested).toBe(7);
+    expect(reset.invoicesRestored).toBe(16);
+
+    const after = await snapshot(t);
+    expect(after).toEqual(before);
+    // History is append-only: nothing deleted, one demo.reset appended (plus ingest events).
+    const audit = await t.run(async (ctx) => ctx.db.query("auditEvents").collect());
+    expect(audit.length).toBeGreaterThan(auditBefore);
+    expect(audit.filter((e) => e.type === "demo.reset")).toHaveLength(1);
+
+    // The moment can be replayed and still matches the answer key.
+    const summary = await t.mutation(api.finance.runReconciliation, {});
+    expect(summary.lines.map((l) => l.externalId)).toEqual(Object.keys(LINE_ANSWERS));
+    await assertReconciledMatchesAnswerKey(t);
+
+    // Reset is idempotent.
+    await t.mutation(internal.seed.resetFinanceDemo, {});
+    await t.mutation(internal.seed.resetFinanceDemo, {});
+    expect(await snapshot(t)).toEqual(before);
+  });
+
+  test("reset leaves non-fixture payments, exceptions and approvals untouched", async () => {
+    const t = convexTest(schema, modules);
+    const seed = await t.mutation(internal.seed.demo, {});
+    await t.mutation(internal.seed.finance, {});
+    const slots = await t.query(api.slots.listForBillboard, {
+      billboardId: seed.billboardId,
+      from: FIXTURE_AS_OF,
+      to: FIXTURE_AS_OF + DAY_MS,
+    });
+    // A real booking paid via x402, and a late x402 payment that became an exception.
+    const q1 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const h1 = await t.mutation(api.holds.create, { quoteId: q1.quoteId, idempotencyKey: "real-1", actor: "buyer" });
+    const booked = await t.mutation(internal.payments.recordVerified, {
+      holdId: h1.holdId, provider: "x402", externalRef: "0xreal", amountMinor: q1.amountMinor, asset: "USDC", idempotencyKey: "r1",
+    });
+    const q2 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id] });
+    const h2 = await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "real-2", actor: "buyer" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const late = await t.mutation(internal.payments.recordVerified, {
+      holdId: h2.holdId, provider: "x402", externalRef: "0xlate", amountMinor: q2.amountMinor, asset: "USDC", idempotencyKey: "r2",
+    });
+    expect(booked.outcome).toBe("booked");
+    expect(late.outcome).toBe("exception");
+    await t.mutation(api.finance.runReconciliation, {}); // files the x402 refund request too
+
+    const nonFixture = async () =>
+      t.run(async (ctx) => ({
+        payments: await ctx.db.query("payments").collect(),
+        bookings: await ctx.db.query("bookings").collect(),
+        exceptions: (await ctx.db.query("financeExceptions").collect()).filter((e) => e.paymentId),
+        approvals: (await ctx.db.query("approvals").collect()).filter((a) => a.subjectKind === "payment"),
+      }));
+    const before = await nonFixture();
+    expect(before.exceptions).toHaveLength(1);
+    expect(before.approvals).toHaveLength(1);
+
+    await t.mutation(internal.seed.resetFinanceDemo, {});
+    expect(await nonFixture()).toEqual(before);
+  });
+
+  test("resetBookingDemo releases active holds but keeps bookings", async () => {
+    const t = convexTest(schema, modules);
+    const seed = await t.mutation(internal.seed.demo, {});
+    const slots = await t.query(api.slots.listForBillboard, {
+      billboardId: seed.billboardId,
+      from: FIXTURE_AS_OF,
+      to: FIXTURE_AS_OF + DAY_MS,
+    });
+    const q1 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const h1 = await t.mutation(api.holds.create, { quoteId: q1.quoteId, idempotencyKey: "b1", actor: "buyer" });
+    await t.mutation(api.payments.recordManual, { holdId: h1.holdId, note: "demo" });
+    const q2 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id, slots[2]._id] });
+    await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "b2", actor: "buyer" });
+
+    const r = await t.mutation(internal.seed.resetBookingDemo, {});
+    expect(r.holdsReleased).toBe(1);
+    const state = await t.run(async (ctx) => ({
+      s0: await ctx.db.get(slots[0]._id),
+      s1: await ctx.db.get(slots[1]._id),
+      s2: await ctx.db.get(slots[2]._id),
+      bookings: await ctx.db.query("bookings").collect(),
+    }));
+    expect(state.s0?.state).toBe("booked");
+    expect(state.s1?.state).toBe("available");
+    expect(state.s2?.state).toBe("available");
+    expect(state.bookings).toHaveLength(1);
+  });
+
+  test("addScenarioBankLine validates and reconciles live", async () => {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.seed.finance, {});
+    expect(
+      await errorCode(t.mutation(internal.seed.addScenarioBankLine, { payerName: "", amountMinor: 100, memo: "" })),
+    ).toBe("INVALID_INPUT");
+    expect(
+      await errorCode(t.mutation(internal.seed.addScenarioBankLine, { payerName: "X", amountMinor: 1.5, memo: "" })),
+    ).toBe("INVALID_INPUT");
+    const added = await t.mutation(internal.seed.addScenarioBankLine, {
+      payerName: "Harbor Dental Grp",
+      amountMinor: 20000,
+      memo: "",
+    });
+    expect(added.externalId).toMatch(/^fx-scenario-/);
+    const summary = await t.mutation(api.finance.runReconciliation, {});
+    const line = summary.lines.find((l) => l.externalId === added.externalId)!;
+    // Harbor owes INV-1014 ($350) and INV-1015 ($200); $200 exactly matches INV-1015.
+    expect(line).toMatchObject({ status: "matched", rule: "payer_exact_amount" });
   });
 });

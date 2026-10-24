@@ -54,6 +54,11 @@ npm run server                  # x402 payment server at http://localhost:4021
 npm run buyer -- --hold-only    # advertiser buying agent (pays when CDP wallet is funded)
 
 npm test                        # convex-test suite
+
+# Demo rehearsal
+npx convex run seed:resetFinanceDemo                    # bank feed back to 7 unmatched planted lines
+npx convex run seed:resetBookingDemo                    # release active holds, top up slots
+npx convex run seed:addScenarioBankLine '{"payerName":"HARBOR DENTAL GRP","amountMinor":20000,"memo":"judge test"}'
 npm run typecheck               # web, convex and server
 ```
 
