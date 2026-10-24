@@ -48,7 +48,7 @@ npx convex login                # once
 npm run dev:convex              # Convex dev deployment (writes .env.local)
 npm run seed                    # billboard, slots, advertisers, campaigns, conference event, Nvidia campaign
 npx convex run seed:finance     # invoices + bank feed with planted errors
-npx convex run seed:liveVenue   # screen, slots and the seeded event for the live auction (no demo companies or agents)
+npx convex run seed:liveVenue   # dev only: seeds demo companies in a separate workspace (plus a screen, slots and a seeded event); never on production
 
 npm run dev                     # web app at http://localhost:5173 (payments and seller agents run on Convex)
 npm run deploy:web              # serve the built site from the Convex deployment at https://<deployment>.convex.site
@@ -76,9 +76,9 @@ npm run typecheck               # web, convex and server
 | `#/customer/agent` | Advertiser: set up the company agent, its wallet, limits and live feed |
 | `#/moment` | Presenter: devices, queue, live bids, host pricing and event, company top-ups |
 
-Running the live auction on a real deployment: [production runbook](docs/demo/live-moment-runbook.md).
+Running the live auction on a real deployment: [production runbook](docs/demo/live-moment-runbook.md). Production seeds nothing: the host creates the screens by hand and real companies sign up.
 
-The x402 payment endpoints, seller agents (`/a2a/hosts/<workspaceId>/...`) and the agent API (`/api/agent/...`) are served by Convex at `https://<deployment>.convex.site`. Payments need `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET` and `X402_PAY_TO` (or `CDP_WALLET_SECRET`) set with `npx convex env set`.
+The x402 payment endpoints, seller agents (`/a2a/hosts/<workspaceId>/...`) and the agent API (`/api/agent/...`) are served by Convex at `https://<deployment>.convex.site`. Payments need `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET` and `X402_PAY_TO` (or `CDP_WALLET_SECRET`) set with `npx convex env set`. For the live auction, leave `X402_PAY_TO` empty or set it to the operator CDP account's address (`npx convex run companyAgentsNode:operatorWallet` prints it): winners pay `X402_PAY_TO`, and host top-ups send from the operator account, so the two must be the same wallet for money to recycle.
 
 **Operator accounts.** The console, Finance and Sensor pages need an operator sign-in; booking and the screen are public. The **first account created on a deployment becomes the operator**. Teammates create an account, then an operator grants them with `operators.grant` (by email). Demoing separation of duties on operator-filed requests needs two operator accounts; agent-filed requests (for example `agent:ar` refunds) can be approved by any operator.
 
@@ -95,9 +95,9 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Company-specific pricing | **Real** guardrails; assessment by **Claude with web search** when `ANTHROPIC_API_KEY` is set on Convex, otherwise a labeled **heuristic** |
 | Ascending auctions, proxy bidding, soft close, winner default (booking auctions) | **Real** (Convex) |
 | Live auction: announce on real camera counts, 2 s join window, 12 s bidding (two 3 s extensions), negotiation, award, queue and re-offers | **Real** (Convex); the participants are real companies' agents |
-| Live price: audience x plays x CPM x match, host minimum and host-set CPM | **Real**; the host sets CPM and minimum, and enters the event. The seeded venue event from `seed:liveVenue` is **seeded** |
+| Live price: audience x plays x CPM x match, host minimum and host-set CPM | **Real**; the host sets CPM and minimum, and enters the event. Only the dev-only `seed:liveVenue` adds a **seeded** event |
 | Company agents: one per advertiser, run on the server with their own CDP wallet, rule-based tactics, webhooks signed and verified | **Real**; wallets hold **testnet** USDC |
-| Wallet funding | **Real** transfers from the operator wallet plus the CDP faucet (1 USDC per claim, 10 USDC per rolling 24 h per project); testnet money only |
+| Wallet funding | **Real**: the host's top-ups transfer USDC from the operator wallet; an advertiser's own top-up claims from the CDP faucet (1 USDC per claim, 10 USDC per rolling 24 h per project); testnet money only |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
 | Agent-to-agent commerce: seller agent per host, paid audience reports, negotiation, x402 to the host's wallet | **Real** protocol and policies; `npm run a2a:demo` is a **developer tool** (a scripted buyer on a laptop); paid runs need a funded wallet |

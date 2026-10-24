@@ -903,8 +903,11 @@ export const demoWatchRules = internalMutation({
 });
 
 // ---------------------------------------------------------------------------
-// Live venue: the screen, its slots and the seeded event. No agents, no demo
-// customers: companies sign up and run their own agents.
+// Live venue (DEV ONLY): seeds demo companies in a separate workspace. It runs
+// seed:demo and seed:pricingDemo, which create seeded advertisers, an unowned
+// "Moscone Media" workspace and its screen, then adds a seeded event. Never
+// run it on production: there, hosts create their screens by hand and real
+// companies sign up (Ruling R27).
 // ---------------------------------------------------------------------------
 
 const DEMO_EVENT_NAME = "Startup Demo Day (seeded)";
@@ -978,9 +981,11 @@ export const liveVenueSetup = internalMutation({
 });
 
 /**
- * The live venue (idempotent):
+ * Dev only: seeds demo companies in a separate workspace (idempotent).
  *   npx convex run seed:liveVenue
- * Runs seed:demo + seed:pricingDemo (screen, slots), then the seeded event.
+ * Runs seed:demo + seed:pricingDemo (seeded advertisers and campaigns, an
+ * unowned "Moscone Media" workspace, its screen and slots), then the seeded
+ * event. Not part of the production runbook (R27).
  */
 export const liveVenue = internalAction({
   args: { baseRateMinor: v.optional(v.number()), reserveFloorMinor: v.optional(v.number()) },
