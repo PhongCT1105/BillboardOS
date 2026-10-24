@@ -66,6 +66,7 @@ export async function settleInvoice(
     paidAt: status === "paid" ? cashDate : inv.paidAt,
   });
   await recordAudit(ctx, {
+    workspaceId: inv.workspaceId,
     traceId,
     actor,
     type: status === "paid" ? "invoice.paid" : "invoice.written_off",
@@ -89,6 +90,7 @@ export async function settleInvoice(
       resolution: `Invoice ${status}; no further follow-up.`,
     });
     await recordAudit(ctx, {
+      workspaceId: inv.workspaceId,
       traceId,
       actor,
       type: "collection.resolved",
@@ -102,6 +104,7 @@ export async function settleInvoice(
 export async function openFinanceException(
   ctx: MutationCtx,
   fields: {
+    workspaceId: Id<"workspaces"> | undefined;
     kind: FinanceExceptionKind;
     expectedMinor: number;
     observedMinor: number;
@@ -116,6 +119,7 @@ export async function openFinanceException(
 ): Promise<Id<"financeExceptions">> {
   const id = await ctx.db.insert("financeExceptions", { ...fields, status: "open" });
   await recordAudit(ctx, {
+    workspaceId: fields.workspaceId,
     traceId,
     actor,
     type: "finance.exception_opened",
@@ -144,6 +148,7 @@ export async function resolveFinanceException(
   if (!ex || ex.status !== "open") return;
   await ctx.db.patch(id, { status: "resolved", resolution, resolvedBy, resolvedAt: Date.now() });
   await recordAudit(ctx, {
+    workspaceId: ex.workspaceId,
     traceId,
     actor: resolvedBy,
     type: "finance.exception_resolved",
@@ -170,6 +175,7 @@ export function assertActor(name: string, value: string): string {
 export async function createApproval(
   ctx: MutationCtx,
   fields: {
+    workspaceId: Id<"workspaces"> | undefined;
     action: ApprovalAction;
     subjectKind: ApprovalSubjectKind;
     subjectId: string;
@@ -209,6 +215,7 @@ export async function createApproval(
     status: "pending",
   });
   await recordAudit(ctx, {
+    workspaceId: fields.workspaceId,
     traceId,
     actor: requestedBy,
     type: "approval.requested",

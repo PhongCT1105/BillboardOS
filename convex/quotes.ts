@@ -11,6 +11,7 @@ import { computeScreenPrice } from "./lib/screenPrice";
 import { applyCompanyMultiplier, heuristicAssessment } from "./lib/valuation";
 import { currentAssessment, gatherCompanyInputs, requestAssessment } from "./valuation";
 import { assertBoundedString } from "./lib/validators";
+import { requireCampaignAccess } from "./lib/tenancy";
 
 /**
  * Create a deterministic, expiring quote for a set of available slots on one
@@ -21,7 +22,7 @@ export const create = mutation({
   args: {
     campaignId: v.id("campaigns"),
     slotIds: v.array(v.id("slots")),
-    /** Who is asking, for the audit log (e.g. "buyer", "agent:advertiser"). */
+    /** Client label for the audit log (e.g. "web", "agent:buyer"); the identity comes from the session. */
     actor: v.optional(v.string()),
   },
   returns: v.object({
@@ -40,8 +41,10 @@ export const create = mutation({
   }),
   handler: async (ctx, args) => {
     const now = Date.now();
-    const actor = args.actor ?? "buyer";
-    assertBoundedString("actor", actor, MAX_KEY_LENGTH);
+    if (args.actor !== undefined) assertBoundedString("actor", args.actor, MAX_KEY_LENGTH);
+    // Customers quote only for their own company's campaigns.
+    const { customer } = await requireCampaignAccess(ctx, args.campaignId);
+    const actor = args.actor ? `${customer.actor} via ${args.actor}` : customer.actor;
 
     if (args.slotIds.length === 0 || args.slotIds.length > MAX_SLOTS_PER_QUOTE) {
       throw new ConvexError({
@@ -131,7 +134,7 @@ export const create = mutation({
     // Company valuation (posted quotes only; hidden from the buyer). Never
     // blocks: use the latest assessment, or an inline heuristic, and schedule
     // a refresh when stale.
-    const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now);
+    const valuation = await currentAssessment(ctx.db, campaign.advertiserId, now, billboard.workspaceId);
     let companyMultiplier = 1;
     let companyMethod: "claude" | "heuristic" | "override" | "inline_heuristic" = "inline_heuristic";
     if (valuation.assessment) {
@@ -155,6 +158,7 @@ export const create = mutation({
     const expiresAt = now + QUOTE_TTL_MS;
     const traceId = `trace_${crypto.randomUUID()}`;
     const quoteId: Id<"quotes"> = await ctx.db.insert("quotes", {
+      workspaceId: billboard.workspaceId,
       campaignId: args.campaignId,
       billboardId,
       slotIds: args.slotIds,
@@ -194,6 +198,7 @@ export const create = mutation({
     }
 
     await recordAudit(ctx, {
+      workspaceId: billboard.workspaceId,
       traceId,
       actor,
       type: "quote.created",
@@ -251,6 +256,7 @@ export const expire = internalMutation({
 
     await ctx.db.patch(args.quoteId, { status: "expired" });
     await recordAudit(ctx, {
+      workspaceId: quote.workspaceId,
       traceId: quote.traceId,
       actor: "system",
       type: "quote.expired",

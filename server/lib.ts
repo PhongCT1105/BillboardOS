@@ -93,3 +93,23 @@ export function cdpNetworkName(network: string): "base-sepolia" | "base" {
   if (network === "eip155:8453") return "base";
   throw new Error(`Unsupported network ${network}; use eip155:84532 (Base Sepolia)`);
 }
+
+/**
+ * Sign a ConvexHttpClient in as a customer (email + password, Convex Auth).
+ * Until agent keys exist (ADR 0004 step 2), scripts act as real customer
+ * accounts created by `npx convex run seed:demoCustomers '{"password":"..."}'`.
+ */
+export async function signInCustomer(
+  client: { action: (ref: never, args: never) => Promise<unknown>; setAuth: (token: string) => void },
+  signInRef: unknown,
+  email: string,
+  password: string,
+): Promise<void> {
+  const result = (await client.action(signInRef as never, {
+    provider: "password",
+    params: { email, password, flow: "signIn" },
+  } as never)) as { tokens?: { token: string } | null };
+  const token = result?.tokens?.token;
+  if (!token) throw new Error(`Sign-in for ${email} returned no token`);
+  client.setAuth(token);
+}

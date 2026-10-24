@@ -12,17 +12,17 @@ import { financeExceptionDoc } from "./lib/validators";
 import { invoiceBalance } from "./lib/finance";
 import { daysOverdue } from "./lib/collections";
 import { reconciliationSummary, runReconciliationBatch } from "./reconciliation";
-import { requireOperator } from "./lib/operator";
+import { resolveWorkspace } from "./lib/tenancy";
 
 /** Open finance exceptions needing operator review, newest first (max 100). */
 export const openExceptions = query({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(financeExceptionDoc),
-  handler: async (ctx) => {
-    await requireOperator(ctx);
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     return await ctx.db
       .query("financeExceptions")
-      .withIndex("by_status", (q) => q.eq("status", "open"))
+      .withIndex("by_workspace_and_status", (q) => q.eq("workspaceId", me.workspaceId).eq("status", "open"))
       .order("desc")
       .take(100);
   },
@@ -33,7 +33,7 @@ export const openExceptions = query({
  * oldest due first. `daysOverdue` <= 0 means not yet due.
  */
 export const receivables = query({
-  args: { asOf: v.optional(v.number()) },
+  args: { asOf: v.optional(v.number()), workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       invoiceId: v.id("invoices"),
@@ -55,14 +55,14 @@ export const receivables = query({
     }),
   ),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    const me = await resolveWorkspace(ctx, args.workspaceId);
     const asOf = args.asOf ?? Date.now();
     const invoices: Doc<"invoices">[] = [];
     for (const status of ["open", "partially_paid", "disputed"] as const) {
       invoices.push(
         ...(await ctx.db
           .query("invoices")
-          .withIndex("by_status_and_dueAt", (q) => q.eq("status", status))
+          .withIndex("by_workspace_and_status_and_dueAt", (q) => q.eq("workspaceId", me.workspaceId).eq("status", status))
           .take(100)),
       );
     }
@@ -99,7 +99,7 @@ export const receivables = query({
 
 /** Recent bank lines (newest posted first, max 50) with how each was applied. */
 export const bankFeed = query({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: v.array(
     v.object({
       _id: v.id("bankTransactions"),
@@ -130,9 +130,9 @@ export const bankFeed = query({
       openExceptionKinds: v.array(v.string()),
     }),
   ),
-  handler: async (ctx) => {
-    await requireOperator(ctx);
-    const lines = await ctx.db.query("bankTransactions").withIndex("by_postedAt").order("desc").take(50);
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    const lines = await ctx.db.query("bankTransactions").withIndex("by_workspace_and_postedAt", (q) => q.eq("workspaceId", me.workspaceId)).order("desc").take(50);
     const rows = [];
     for (const t of lines) {
       const apps = await ctx.db
@@ -189,10 +189,10 @@ export const bankFeed = query({
  * Operator only.
  */
 export const runReconciliation = mutation({
-  args: {},
+  args: { workspaceId: v.optional(v.id("workspaces")) },
   returns: reconciliationSummary,
-  handler: async (ctx) => {
-    const operator = await requireOperator(ctx);
-    return await runReconciliationBatch(ctx, operator.actor);
+  handler: async (ctx, args) => {
+    const operator = await resolveWorkspace(ctx, args.workspaceId);
+    return await runReconciliationBatch(ctx, operator.workspaceId, operator.actor);
   },
 });

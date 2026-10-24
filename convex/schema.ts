@@ -226,6 +226,11 @@ export const audienceSource = v.union(
 export const auditEventType = v.union(
   // inventory / booking lifecycle
   v.literal("seed.completed"),
+  v.literal("workspace.created"),
+  v.literal("workspace.member_added"),
+  v.literal("workspace.payout_changed"),
+  v.literal("company.created"),
+  v.literal("tenancy.migrated"),
   v.literal("operator.granted"),
   v.literal("demo.reset"),
   v.literal("inventory.generated"),
@@ -301,6 +306,8 @@ export const auditData = v.record(
 // ---------------------------------------------------------------------------
 
 export const billboardFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   name: v.string(),
   city: v.string(),
   locationLabel: v.string(),
@@ -320,6 +327,8 @@ export const billboardFields = {
 };
 
 export const slotFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   billboardId: v.id("billboards"),
   startAt: v.number(),
   endAt: v.number(),
@@ -330,9 +339,21 @@ export const slotFields = {
   auctionId: v.optional(v.id("auctions")),
 };
 
+export const companySize = v.union(
+  v.literal("1-10"),
+  v.literal("11-50"),
+  v.literal("51-200"),
+  v.literal("201-1000"),
+  v.literal("1000+"),
+);
+
+/** Customer company (ADR 0004). Seeded companies have no owner or members yet. */
 export const advertiserFields = {
   displayName: v.string(),
   paymentTerms,
+  ownerUserId: v.optional(v.id("users")),
+  website: v.optional(v.string()),
+  size: v.optional(companySize),
   /** Last time a company valuation was scheduled (debounces refreshes). */
   valuationRequestedAt: v.optional(v.number()),
   /** Names this advertiser appears under on bank statements (matching evidence). */
@@ -358,6 +379,8 @@ export const campaignFields = {
 };
 
 export const quoteFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   campaignId: v.id("campaigns"),
   /** All slots in a quote belong to one billboard (multi-screen bundles are P2). */
   billboardId: v.id("billboards"),
@@ -384,6 +407,8 @@ export const quoteFields = {
 };
 
 export const holdFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   quoteId: v.id("quotes"),
   billboardId: v.id("billboards"),
   slotIds: v.array(v.id("slots")),
@@ -400,6 +425,8 @@ export const holdFields = {
 };
 
 export const bookingFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   holdId: v.id("holds"),
   quoteId: v.id("quotes"),
   campaignId: v.id("campaigns"),
@@ -416,6 +443,8 @@ export const bookingFields = {
 };
 
 export const paymentFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   holdId: v.id("holds"),
   provider: paymentProvider,
   externalRef: v.string(),
@@ -431,6 +460,8 @@ export const paymentFields = {
 };
 
 export const financeExceptionFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   kind: financeExceptionKind,
   status: financeExceptionStatus,
   /** Booking-side exceptions (x402/manual) have a hold + billboard. */
@@ -452,6 +483,8 @@ export const financeExceptionFields = {
 };
 
 export const audienceAggregateFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   billboardId: v.id("billboards"),
   bucketStart: v.number(),
   countEstimate: v.number(),
@@ -463,6 +496,8 @@ export const audienceAggregateFields = {
 };
 
 export const playbackEventFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   bookingId: v.id("bookings"),
   slotId: v.id("slots"),
   billboardId: v.id("billboards"),
@@ -475,6 +510,8 @@ export const playbackEventFields = {
 };
 
 export const invoiceFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   /** Human-readable, unique: "INV-1042". */
   number: v.string(),
   advertiserId: v.id("advertisers"),
@@ -498,6 +535,8 @@ export const invoiceFields = {
 };
 
 export const bankTransactionFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   source: bankSource,
   /** Unique per source; re-delivered lines are dropped at ingest. */
   externalId: v.string(),
@@ -526,6 +565,8 @@ export const paymentApplicationFields = {
 };
 
 export const approvalFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   action: approvalAction,
   subjectKind: approvalSubjectKind,
   subjectId: v.string(),
@@ -544,6 +585,8 @@ export const approvalFields = {
 };
 
 export const collectionTaskFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   invoiceId: v.id("invoices"),
   advertiserId: v.id("advertisers"),
   tone: collectionTone,
@@ -562,6 +605,8 @@ export const collectionTaskFields = {
 export const eventSource = v.union(v.literal("seed"), v.literal("operator"), v.literal("claude"));
 
 export const eventFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   billboardId: v.id("billboards"),
   name: v.string(),
   startsAt: v.number(),
@@ -580,6 +625,8 @@ export const saleKind = v.union(v.literal("posted"), v.literal("terms"), v.liter
 
 /** One row per sold slot: the market-history stage's evidence. */
 export const priceHistoryFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   billboardId: v.id("billboards"),
   slotId: v.id("slots"),
   slotStartAt: v.number(),
@@ -594,6 +641,8 @@ export const priceHistoryFields = {
 
 /** Company willingness-to-pay assessment (ADR 0003 section 2). Operator-only data. */
 export const companyAssessmentFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   advertiserId: v.id("advertisers"),
   /** Clamped to x0.75..x1.5 in code before storage. */
   multiplier: v.number(),
@@ -622,6 +671,8 @@ export const auctionStatus = v.union(
 
 /** Ascending auction with proxy bidding and soft close (ADR 0003 section 3). */
 export const auctionFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   billboardId: v.id("billboards"),
   slotIds: v.array(v.id("slots")),
   /** Screen price from the harness at open; every bidder faces the same reserve. */
@@ -686,6 +737,8 @@ export const autoBidFields = {
 };
 
 export const auditEventFields = {
+  /** Owning host workspace (ADR 0004). Optional until backfilled. */
+  workspaceId: v.optional(v.id("workspaces")),
   traceId: v.string(),
   /** e.g. "system", "operator", "agent:pricing", "buyer:<name>" */
   actor: v.string(),
@@ -699,11 +752,53 @@ export const auditEventFields = {
 // Schema
 // ---------------------------------------------------------------------------
 
+export const accountType = v.union(v.literal("host"), v.literal("customer"));
+export const workspaceRole = v.union(v.literal("owner"), v.literal("operator"));
+export const companyRole = v.union(v.literal("owner"), v.literal("member"));
+
 export default defineSchema({
   // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
   ...authTables,
 
-  /** Signed-in users allowed to act as operator/controller. */
+  /** One per user: which side of the marketplace they signed up for. */
+  profiles: defineTable({
+    userId: v.id("users"),
+    accountType,
+    /** Host: workspace the console/finance views use. */
+    activeWorkspaceId: v.optional(v.id("workspaces")),
+  }).index("by_userId", ["userId"]),
+
+  /** Host side: a company that owns screens (ADR 0004). */
+  workspaces: defineTable({
+    name: v.string(),
+    city: v.string(),
+    ownerUserId: v.optional(v.id("users")),
+    /** x402 payouts for this workspace's sales (EVM address). */
+    payoutAddress: v.optional(v.string()),
+  }).index("by_name", ["name"]),
+
+  workspaceMembers: defineTable({
+    workspaceId: v.id("workspaces"),
+    userId: v.id("users"),
+    email: v.string(),
+    role: workspaceRole,
+  })
+    .index("by_workspace", ["workspaceId"])
+    .index("by_user", ["userId"])
+    .index("by_workspace_and_user", ["workspaceId", "userId"]),
+
+  /** Customer side: people who act for a customer company. */
+  advertiserMembers: defineTable({
+    advertiserId: v.id("advertisers"),
+    userId: v.id("users"),
+    email: v.string(),
+    role: companyRole,
+  })
+    .index("by_advertiser", ["advertiserId"])
+    .index("by_user", ["userId"])
+    .index("by_advertiser_and_user", ["advertiserId", "userId"]),
+
+  /** LEGACY (pre ADR 0004): read once by the tenancy migration, then unused. */
   operators: defineTable({
     userId: v.id("users"),
     email: v.string(),
@@ -713,7 +808,7 @@ export default defineSchema({
     .index("by_userId", ["userId"])
     .index("by_email", ["email"]),
 
-  billboards: defineTable(billboardFields).index("by_name", ["name"]),
+  billboards: defineTable(billboardFields).index("by_name", ["name"]).index("by_workspace", ["workspaceId"]),
 
   slots: defineTable(slotFields).index("by_billboard_and_startAt", [
     "billboardId",
@@ -772,7 +867,8 @@ export default defineSchema({
   financeExceptions: defineTable(financeExceptionFields)
     .index("by_status", ["status"])
     .index("by_billboard_and_status", ["billboardId", "status"])
-    .index("by_bankTransaction", ["bankTransactionId"]),
+    .index("by_bankTransaction", ["bankTransactionId"])
+    .index("by_workspace_and_status", ["workspaceId", "status"]),
 
   audienceAggregates: defineTable(audienceAggregateFields).index(
     "by_billboard_and_bucketStart",
@@ -783,12 +879,15 @@ export default defineSchema({
     .index("by_number", ["number"])
     .index("by_advertiser", ["advertiserId"])
     .index("by_advertiser_and_status", ["advertiserId", "status"])
-    .index("by_status_and_dueAt", ["status", "dueAt"]),
+    .index("by_status_and_dueAt", ["status", "dueAt"])
+    .index("by_workspace_and_status_and_dueAt", ["workspaceId", "status", "dueAt"]),
 
   bankTransactions: defineTable(bankTransactionFields)
     .index("by_source_and_externalId", ["source", "externalId"])
     .index("by_status_and_postedAt", ["status", "postedAt"])
-    .index("by_postedAt", ["postedAt"]),
+    .index("by_postedAt", ["postedAt"])
+    .index("by_workspace_and_status_and_postedAt", ["workspaceId", "status", "postedAt"])
+    .index("by_workspace_and_postedAt", ["workspaceId", "postedAt"]),
 
   paymentApplications: defineTable(paymentApplicationFields)
     .index("by_invoice", ["invoiceId"])
@@ -797,11 +896,14 @@ export default defineSchema({
   approvals: defineTable(approvalFields)
     .index("by_status", ["status"])
     .index("by_financeException", ["financeExceptionId"])
-    .index("by_subject", ["subjectId"]),
+    .index("by_subject", ["subjectId"])
+    .index("by_workspace_and_status", ["workspaceId", "status"]),
 
   collectionTasks: defineTable(collectionTaskFields)
     .index("by_invoice", ["invoiceId"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_workspace", ["workspaceId"])
+    .index("by_workspace_and_status", ["workspaceId", "status"]),
 
   /** Monotonic counters (invoice numbers). */
   counters: defineTable({ name: v.string(), value: v.number() }).index("by_name", ["name"]),
@@ -812,5 +914,6 @@ export default defineSchema({
 
   auditEvents: defineTable(auditEventFields)
     .index("by_trace", ["traceId"])
-    .index("by_subject", ["subjectId"]),
+    .index("by_subject", ["subjectId"])
+    .index("by_workspace", ["workspaceId"]),
 });

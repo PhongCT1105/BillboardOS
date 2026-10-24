@@ -36,6 +36,7 @@ import {
   explorerTxUrl,
   presence,
   requireEnv,
+  signInCustomer,
 } from "./lib.ts";
 
 // ---------------------------------------------------------------- args
@@ -160,6 +161,21 @@ if (!Number.isInteger(slotCount) || slotCount < 1 || slotCount > 16) {
 }
 
 const convex = new ConvexHttpClient(requireEnv("CONVEX_URL", "public Convex API URL"));
+const BUYER_EMAIL = env("BUYER_EMAIL") ?? "coffee@demo.billboardos.dev";
+try {
+  await signInCustomer(
+    convex,
+    api.auth.signIn,
+    BUYER_EMAIL,
+    requireEnv("DEMO_CUSTOMER_PASSWORD", "password for the demo customer accounts (seed:demoCustomers)"),
+  );
+  info(`signed in as customer ${BUYER_EMAIL}`);
+} catch (error) {
+  fail(
+    `Could not sign in as ${BUYER_EMAIL}: ${error instanceof Error ? error.message : String(error)}\n` +
+      `  Create the demo buyers once: npx convex run seed:demoCustomers '{"password":"<DEMO_CUSTOMER_PASSWORD>"}'`,
+  );
+}
 
 // ---------------------------------------------------------------- 1. campaign
 

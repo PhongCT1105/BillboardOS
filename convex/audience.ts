@@ -3,7 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { audienceSource } from "./schema";
 
 import { AUDIENCE_BUCKET_MS } from "./lib/pricing";
-import { requireOperator } from "./lib/operator";
+import { requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
 
 export { AUDIENCE_BUCKET_MS };
 const MAX_COUNT = 100_000;
@@ -27,7 +27,8 @@ export const record = mutation({
     bucketStart: v.number(),
   }),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    // The sensor laptop signs in as a member of the screen's workspace.
+    await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
     if (
       !Number.isSafeInteger(args.countEstimate) ||
       args.countEstimate < 0 ||
@@ -65,6 +66,7 @@ export const record = mutation({
       return { aggregateId: existing._id, bucketStart };
     }
     const aggregateId = await ctx.db.insert("audienceAggregates", {
+      workspaceId: billboard.workspaceId,
       billboardId: args.billboardId,
       bucketStart,
       ...fields,
@@ -99,7 +101,8 @@ export const addArrivals = mutation({
     peakInView: v.number(),
   }),
   handler: async (ctx, args) => {
-    await requireOperator(ctx);
+    // The sensor laptop signs in as a member of the screen's workspace.
+    await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
     if (!Number.isSafeInteger(args.arrivals) || args.arrivals < 0 || args.arrivals > MAX_ARRIVALS_PER_CALL) {
       throw new ConvexError({
         code: "INVALID_INPUT",
@@ -141,6 +144,7 @@ export const addArrivals = mutation({
       return { aggregateId: existing._id, bucketStart, countEstimate, peakInView };
     }
     const aggregateId = await ctx.db.insert("audienceAggregates", {
+      workspaceId: billboard.workspaceId,
       billboardId: args.billboardId,
       bucketStart,
       countEstimate: args.arrivals,

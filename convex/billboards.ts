@@ -6,7 +6,8 @@ import { loadTrailingAudience } from "./lib/audienceWindow";
 import { recordAudit } from "./lib/audit";
 import { effectiveBaseline } from "./lib/pricing";
 import { billboardDoc } from "./lib/validators";
-import { requireOperator } from "./lib/operator";
+import { requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
+import { ensureUpcomingSlots } from "./lib/inventory";
 
 /** All billboards (bounded; inventory is small). */
 export const list = query({
@@ -32,7 +33,7 @@ export const setAudienceBaseline = mutation({
     audienceBaselinePerBucket: v.number(),
   }),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
+    const operator = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
     if (
       !Number.isSafeInteger(args.peoplePer15Min) ||
       args.peoplePer15Min < 1 ||
@@ -48,6 +49,7 @@ export const setAudienceBaseline = mutation({
     const previous = effectiveBaseline(billboard.audienceBaselinePerBucket);
     await ctx.db.patch(billboard._id, { audienceBaselinePerBucket: args.peoplePer15Min });
     await recordAudit(ctx, {
+      workspaceId: billboard.workspaceId,
       traceId: `billboard:${billboard._id}`,
       actor: operator.actor,
       type: "billboard.baseline_changed",
@@ -138,13 +140,14 @@ export const setAudienceTags = mutation({
   args: { billboardId: v.id("billboards"), audienceTags },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
+    const operator = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
     const problem = validateTags(args.audienceTags);
     if (problem) throw new ConvexError({ code: "INVALID_INPUT", message: problem });
     const billboard = await ctx.db.get(args.billboardId);
     if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
     await ctx.db.patch(billboard._id, { audienceTags: args.audienceTags });
     await recordAudit(ctx, {
+      workspaceId: billboard.workspaceId,
       traceId: `billboard:${billboard._id}`,
       actor: operator.actor,
       type: "billboard.audience_tags_changed",
@@ -152,5 +155,77 @@ export const setAudienceTags = mutation({
       reason: `Audience profile for ${billboard.name} set to ${Object.entries(args.audienceTags).map(([k, w]) => `${k} ${w}`).join(", ")}`,
     });
     return null;
+  },
+});
+
+/** Screens of the caller's (active) workspace. */
+export const mine = query({
+  args: { workspaceId: v.optional(v.id("workspaces")) },
+  returns: v.array(billboardDoc),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    return await ctx.db
+      .query("billboards")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", me.workspaceId))
+      .take(100);
+  },
+});
+
+/** Host adds a screen to their workspace; 12 hours of 15-minute slots go on sale right away. */
+export const create = mutation({
+  args: {
+    workspaceId: v.optional(v.id("workspaces")),
+    name: v.string(),
+    city: v.string(),
+    locationLabel: v.string(),
+    utcOffsetMinutes: v.number(),
+    baseRateMinor: v.number(),
+    reserveFloorMinor: v.number(),
+  },
+  returns: v.id("billboards"),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    const name = args.name.trim();
+    const city = args.city.trim();
+    const locationLabel = args.locationLabel.trim();
+    if ([name, city, locationLabel].some((x) => x.length === 0 || x.length > 120)) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "Name, city and location must be 1..120 characters" });
+    }
+    if (!Number.isInteger(args.utcOffsetMinutes) || Math.abs(args.utcOffsetMinutes) > 14 * 60) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "utcOffsetMinutes must be an integer within +-840" });
+    }
+    for (const [label, value] of [["baseRateMinor", args.baseRateMinor], ["reserveFloorMinor", args.reserveFloorMinor]] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0 || value > 1_000_000) {
+        throw new ConvexError({ code: "INVALID_INPUT", message: `${label} must be an integer in (0, 1000000] (US cents)` });
+      }
+    }
+    if (args.reserveFloorMinor > args.baseRateMinor) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "Reserve floor can't exceed the base rate" });
+    }
+    const existing = await ctx.db
+      .query("billboards")
+      .withIndex("by_name", (q) => q.eq("name", name))
+      .first();
+    if (existing) throw new ConvexError({ code: "NAME_TAKEN", message: "A screen with this name already exists" });
+    const billboardId = await ctx.db.insert("billboards", {
+      workspaceId: me.workspaceId,
+      name,
+      city,
+      locationLabel,
+      utcOffsetMinutes: args.utcOffsetMinutes,
+      baseRateMinor: args.baseRateMinor,
+      reserveFloorMinor: args.reserveFloorMinor,
+      deviceStatus: "online",
+    });
+    const slots = await ensureUpcomingSlots(ctx, billboardId, Date.now());
+    await recordAudit(ctx, {
+      workspaceId: me.workspaceId,
+      traceId: `billboard:${billboardId}`,
+      actor: me.actor,
+      type: "inventory.generated",
+      subjectId: billboardId,
+      reason: `${me.email} added screen ${name} (${city}) with ${slots} upcoming slot(s)`,
+    });
+    return billboardId;
   },
 });

@@ -11,6 +11,7 @@ import { currency, holdStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH } from "./lib/constants";
 import { assertBoundedString } from "./lib/validators";
+import { requireCampaignAccess } from "./lib/tenancy";
 
 const holdResult = v.object({
   holdId: v.id("holds"),
@@ -56,6 +57,11 @@ export const create = mutation({
   handler: async (ctx, args) => {
     assertBoundedString("idempotencyKey", args.idempotencyKey, MAX_KEY_LENGTH);
     assertBoundedString("actor", args.actor, MAX_KEY_LENGTH);
+    const quoteForAccess = await ctx.db.get(args.quoteId);
+    if (!quoteForAccess) throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
+    // Only the quoting company may hold it.
+    const { customer } = await requireCampaignAccess(ctx, quoteForAccess.campaignId);
+    const actor = `${customer.actor} via ${args.actor}`;
 
     const existing = await ctx.db
       .query("holds")
@@ -83,7 +89,7 @@ export const create = mutation({
       });
     }
 
-    const hold = await takeHold(ctx, quote, args.idempotencyKey, args.actor);
+    const hold = await takeHold(ctx, quote, args.idempotencyKey, actor);
     return toResult(hold, false);
   },
 });
@@ -125,6 +131,7 @@ export async function takeHold(
 
   const expiresAt = now + HOLD_TTL_MS;
   const holdId = await ctx.db.insert("holds", {
+    workspaceId: quote.workspaceId,
     quoteId: quote._id,
     billboardId: quote.billboardId,
     slotIds: quote.slotIds,
@@ -145,6 +152,7 @@ export async function takeHold(
   await ctx.scheduler.runAt(expiresAt, internal.holds.expire, { holdId });
 
   await recordAudit(ctx, {
+    workspaceId: quote.workspaceId,
     traceId: quote.traceId,
     actor,
     type: "slot.held",
@@ -190,6 +198,7 @@ export async function endHold(
   if (quote && quote.status === "open" && Date.now() >= quote.expiresAt) {
     await ctx.db.patch(quote._id, { status: "expired" });
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor: "system",
       type: "quote.expired",
@@ -208,6 +217,7 @@ export async function endHold(
   }
 
   await recordAudit(ctx, {
+    workspaceId: hold.workspaceId,
     traceId: hold.traceId,
     actor,
     type: outcome === "expired" ? "hold.expired" : "hold.released",
@@ -217,6 +227,7 @@ export async function endHold(
   });
   if (reverted.length > 0) {
     await recordAudit(ctx, {
+      workspaceId: hold.workspaceId,
       traceId: hold.traceId,
       actor,
       type: "slot.released",
@@ -248,6 +259,9 @@ export const release = mutation({
     if (!hold) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Hold not found" });
     }
+    const holdQuote = await ctx.db.get(hold.quoteId);
+    if (!holdQuote) throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
+    await requireCampaignAccess(ctx, holdQuote.campaignId);
     if (hold.idempotencyKey !== args.idempotencyKey) {
       throw new ConvexError({ code: "FORBIDDEN", message: "Not the holder of this hold" });
     }
@@ -320,6 +334,8 @@ export const getForPayment = internalQuery({
       expiresAt: v.number(),
       status: holdStatus,
       payable: v.boolean(),
+      /** Workspace payout address for x402 (null = server default X402_PAY_TO). */
+      payTo: v.union(v.string(), v.null()),
       /** Correlates server logs with the audit trail (quote -> hold -> payment -> booking). */
       traceId: v.string(),
     }),
@@ -337,6 +353,7 @@ export const getForPayment = internalQuery({
       expiresAt: hold.expiresAt,
       status: hold.status,
       payable: hold.status === "active" && Date.now() < hold.expiresAt,
+      payTo: hold.workspaceId ? ((await ctx.db.get(hold.workspaceId))?.payoutAddress ?? null) : null,
       traceId: hold.traceId,
     };
   },

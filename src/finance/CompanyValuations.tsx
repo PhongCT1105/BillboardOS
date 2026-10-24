@@ -18,7 +18,7 @@ const METHOD_LABEL: Record<NonNullable<Row["assessment"]>["method"], string> = {
  * and from which sources. Buyers never see any of this; they see the final price.
  */
 export function CompanyValuations() {
-  const rows = useQuery(api.valuation.list);
+  const rows = useQuery(api.valuation.list, {});
   return (
     <section aria-labelledby="valuations-heading">
       <h2 id="valuations-heading" className="text-lg font-semibold">

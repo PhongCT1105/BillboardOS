@@ -5,7 +5,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { auctionStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH, QUOTE_TTL_MS } from "./lib/constants";
-import { requireOperator } from "./lib/operator";
+import { requireCampaignAccess, requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
 import { computeScreenPrice } from "./lib/screenPrice";
 import { loadTrailingAudience } from "./lib/audienceWindow";
 import { effectiveBaseline } from "./lib/pricing";
@@ -78,6 +78,7 @@ async function openAuction(
   const { price } = await computeScreenPrice(ctx.db, billboard, slots, now);
   const traceId = `auction_${crypto.randomUUID()}`;
   const auctionId = await ctx.db.insert("auctions", {
+    workspaceId: billboard.workspaceId,
     billboardId,
     slotIds: input.slotIds,
     reserveMinor: price.amountMinor,
@@ -96,6 +97,7 @@ async function openAuction(
   for (const slot of slots) await ctx.db.patch(slot._id, { auctionId });
   await ctx.scheduler.runAt(endsAt, internal.auctions.close, { auctionId });
   await recordAudit(ctx, {
+    workspaceId: billboard.workspaceId,
     traceId,
     actor: input.openedBy,
     type: "auction.opened",
@@ -115,7 +117,9 @@ export const open = mutation({
   },
   returns: v.object({ auctionId: v.id("auctions") }),
   handler: async (ctx, args) => {
-    const operator = await requireOperator(ctx);
+    const firstSlot = args.slotIds[0] ? await ctx.db.get(args.slotIds[0]) : null;
+    if (!firstSlot) throw new ConvexError({ code: "NOT_FOUND", message: "Slot not found" });
+    const operator = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, firstSlot.billboardId));
     const minutes = args.durationMinutes ?? DEFAULT_DURATION_MS / 60_000;
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 30) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "durationMinutes must be between 1 and 30" });
@@ -222,6 +226,8 @@ async function authBidder(
   campaignId: Id<"campaigns">,
   bidderKey: string,
 ): Promise<{ auction: Doc<"auctions">; participant: Doc<"auctionParticipants">; campaign: Doc<"campaigns"> }> {
+  // Customers bid only for their own company's campaigns (and still need the bidder key).
+  await requireCampaignAccess(ctx, campaignId);
   const auction = await ctx.db.get(auctionId);
   if (!auction) throw new ConvexError({ code: "NOT_FOUND", message: "Auction not found" });
   const participant = await ctx.db
@@ -306,6 +312,7 @@ async function reprice(ctx: MutationCtx, auctionId: Id<"auctions">, now: number,
       patch.endsAt = newEnds;
       patch.extensions = auction.extensions + 1;
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "system",
         type: "auction.extended",
@@ -318,6 +325,7 @@ async function reprice(ctx: MutationCtx, auctionId: Id<"auctions">, now: number,
   if (changed) {
     const leader = parts.find((p) => p._id === res.leaderId);
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor,
       type: "auction.bid",
@@ -373,8 +381,7 @@ export const join = mutation({
     const auction = await ctx.db.get(args.auctionId);
     if (!auction) throw new ConvexError({ code: "NOT_FOUND", message: "Auction not found" });
     assertOpen(auction, now);
-    const campaign = await ctx.db.get(args.campaignId);
-    if (!campaign) throw new ConvexError({ code: "NOT_FOUND", message: "Campaign not found" });
+    const { campaign } = await requireCampaignAccess(ctx, args.campaignId);
     if (campaign.status === "completed" || campaign.status === "cancelled") {
       throw new ConvexError({ code: "CAMPAIGN_CLOSED", message: `Campaign is ${campaign.status}` });
     }
@@ -423,6 +430,7 @@ export const join = mutation({
       maxSetAt: now,
     });
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: `campaign:${args.campaignId}`,
       type: "auction.joined",
@@ -526,6 +534,7 @@ export const setAutoBid = mutation({
       maxSetAt: effective > participant.effectiveMaxMinor ? now : participant.maxSetAt,
     });
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: `campaign:${args.campaignId}`,
       type: "auction.auto_bid_set",
@@ -552,6 +561,7 @@ async function award(
 ): Promise<Doc<"holds"> | null> {
   const now = Date.now();
   const quoteId = await ctx.db.insert("quotes", {
+    workspaceId: auction.workspaceId,
     campaignId: participant.campaignId,
     billboardId: auction.billboardId,
     slotIds: auction.slotIds,
@@ -606,6 +616,7 @@ export const close = internalMutation({
     if (!leader) {
       await ctx.db.patch(auction._id, { status: "failed", outcomeNote: "No bids at or above the reserve" });
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "system",
         type: "auction.failed",
@@ -618,6 +629,7 @@ export const close = internalMutation({
     if (!hold) {
       await ctx.db.patch(auction._id, { status: "failed", outcomeNote: "Slot no longer available at close" });
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "system",
         type: "auction.failed",
@@ -627,6 +639,7 @@ export const close = internalMutation({
       return null;
     }
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: "system",
       type: "auction.closed",
@@ -656,6 +669,7 @@ export const handleWinnerDefault = internalMutation({
     const defaulted = [...(auction.defaultedParticipantIds ?? []), defaulter._id];
     await ctx.db.patch(auction._id, { defaultedParticipantIds: defaulted });
     await ctx.db.insert("financeExceptions", {
+      workspaceId: auction.workspaceId,
       kind: "winner_default",
       status: "open",
       holdId: hold._id,
@@ -667,6 +681,7 @@ export const handleWinnerDefault = internalMutation({
       nextAction: "Slot offered to the runner-up at their last bid. Review the defaulting buyer's terms before they bid again.",
     });
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: "system",
       type: "auction.winner_default",
@@ -685,6 +700,7 @@ export const handleWinnerDefault = internalMutation({
       const offered = await award(ctx, auction, p, last.amountMinor, "runner-up");
       if (!offered) break;
       await recordAudit(ctx, {
+        workspaceId: auction.workspaceId,
         traceId: auction.traceId,
         actor: "agent:seller",
         type: "auction.runner_up_offered",
@@ -696,6 +712,7 @@ export const handleWinnerDefault = internalMutation({
     }
     await ctx.db.patch(auction._id, { status: "failed", outcomeNote: "Winner defaulted and no runner-up was available" });
     await recordAudit(ctx, {
+      workspaceId: auction.workspaceId,
       traceId: auction.traceId,
       actor: "system",
       type: "auction.failed",
@@ -713,6 +730,7 @@ export async function markAuctionSettled(ctx: MutationCtx, hold: Doc<"holds">, b
   if (!auction || auction.winnerHoldId !== hold._id || auction.status !== "closed") return;
   await ctx.db.patch(auction._id, { status: "settled", outcomeNote: `Paid and booked (${bookingId})` });
   await recordAudit(ctx, {
+    workspaceId: auction.workspaceId,
     traceId: auction.traceId,
     actor: "system",
     type: "auction.settled",

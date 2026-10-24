@@ -202,6 +202,7 @@ export const recordPlayback = mutation({
     const campaign = await ctx.db.get(booking.campaignId);
 
     const playbackEventId = await ctx.db.insert("playbackEvents", {
+      workspaceId: slot.workspaceId,
       bookingId: booking._id,
       slotId: slot._id,
       billboardId: slot.billboardId,
@@ -229,6 +230,7 @@ export const recordPlayback = mutation({
       ? ((await ctx.db.system.get(campaign.creativeStorageId))?.sha256 ?? null)
       : null;
     await recordAudit(ctx, {
+      workspaceId: booking.workspaceId,
       traceId: booking.traceId,
       actor: "device",
       type: args.status === "played" ? "playback.observed" : "playback.failed",

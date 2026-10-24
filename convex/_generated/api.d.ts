@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as accounts from "../accounts.js";
 import type * as advertisers from "../advertisers.js";
 import type * as approvals from "../approvals.js";
 import type * as auctions from "../auctions.js";
@@ -37,15 +38,15 @@ import type * as lib_finance from "../lib/finance.js";
 import type * as lib_inventory from "../lib/inventory.js";
 import type * as lib_marketHistory from "../lib/marketHistory.js";
 import type * as lib_match from "../lib/match.js";
-import type * as lib_operator from "../lib/operator.js";
 import type * as lib_pricing from "../lib/pricing.js";
 import type * as lib_reconcile from "../lib/reconcile.js";
 import type * as lib_scheduling from "../lib/scheduling.js";
 import type * as lib_screenPrice from "../lib/screenPrice.js";
 import type * as lib_stages from "../lib/stages.js";
+import type * as lib_tenancy from "../lib/tenancy.js";
 import type * as lib_validators from "../lib/validators.js";
 import type * as lib_valuation from "../lib/valuation.js";
-import type * as operators from "../operators.js";
+import type * as migrations from "../migrations.js";
 import type * as payments from "../payments.js";
 import type * as playback from "../playback.js";
 import type * as player from "../player.js";
@@ -55,6 +56,7 @@ import type * as seed from "../seed.js";
 import type * as slots from "../slots.js";
 import type * as valuation from "../valuation.js";
 import type * as valuationAgent from "../valuationAgent.js";
+import type * as workspaces from "../workspaces.js";
 
 import type {
   ApiFromModules,
@@ -63,6 +65,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  accounts: typeof accounts;
   advertisers: typeof advertisers;
   approvals: typeof approvals;
   auctions: typeof auctions;
@@ -92,15 +95,15 @@ declare const fullApi: ApiFromModules<{
   "lib/inventory": typeof lib_inventory;
   "lib/marketHistory": typeof lib_marketHistory;
   "lib/match": typeof lib_match;
-  "lib/operator": typeof lib_operator;
   "lib/pricing": typeof lib_pricing;
   "lib/reconcile": typeof lib_reconcile;
   "lib/scheduling": typeof lib_scheduling;
   "lib/screenPrice": typeof lib_screenPrice;
   "lib/stages": typeof lib_stages;
+  "lib/tenancy": typeof lib_tenancy;
   "lib/validators": typeof lib_validators;
   "lib/valuation": typeof lib_valuation;
-  operators: typeof operators;
+  migrations: typeof migrations;
   payments: typeof payments;
   playback: typeof playback;
   player: typeof player;
@@ -110,6 +113,7 @@ declare const fullApi: ApiFromModules<{
   slots: typeof slots;
   valuation: typeof valuation;
   valuationAgent: typeof valuationAgent;
+  workspaces: typeof workspaces;
 }>;
 
 /**

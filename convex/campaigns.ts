@@ -4,6 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags, campaignStatus, creativeStatus, currency } from "./schema";
 import { validateTags } from "./lib/match";
 import { requestAssessment } from "./valuation";
+import { requireCustomer, requireUser } from "./lib/tenancy";
 import { recordAudit } from "./lib/audit";
 
 const MAX_BRIEF_LENGTH = 4000;
@@ -25,19 +26,39 @@ export const campaignSummary = v.object({
   targetAudience: v.optional(audienceTags),
 });
 
-/** Campaigns, newest first (max 50), optionally for one advertiser. */
+/**
+ * The caller's own campaigns (every company they act for, or one of them),
+ * newest first (max 50). Customers never see other companies' campaigns.
+ */
 export const list = query({
   args: { advertiserId: v.optional(v.id("advertisers")) },
   returns: v.array(campaignSummary),
   handler: async (ctx, args) => {
-    const advertiserId = args.advertiserId;
-    const campaigns = advertiserId
-      ? await ctx.db
+    const user = await requireUser(ctx);
+    let companyIds: Id<"advertisers">[];
+    if (args.advertiserId) {
+      await requireCustomer(ctx, args.advertiserId);
+      companyIds = [args.advertiserId];
+    } else {
+      companyIds = (
+        await ctx.db
+          .query("advertiserMembers")
+          .withIndex("by_user", (q) => q.eq("userId", user.userId))
+          .take(20)
+      ).map((m) => m.advertiserId);
+    }
+    const campaigns: Doc<"campaigns">[] = [];
+    for (const advertiserId of companyIds) {
+      campaigns.push(
+        ...(await ctx.db
           .query("campaigns")
           .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
           .order("desc")
-          .take(50)
-      : await ctx.db.query("campaigns").order("desc").take(50);
+          .take(50)),
+      );
+    }
+    campaigns.sort((a, b) => b._creationTime - a._creationTime);
+    campaigns.splice(50);
 
     const names = new Map<Id<"advertisers">, string>();
     const rows = [];
@@ -71,10 +92,10 @@ function toSummary(c: Doc<"campaigns">, advertiserName: string) {
   };
 }
 
-/** Create an active campaign for an existing advertiser. Returns the new campaign id. */
+/** Create an active campaign for your company (default: your first company). Returns the new campaign id. */
 export const create = mutation({
   args: {
-    advertiserId: v.id("advertisers"),
+    advertiserId: v.optional(v.id("advertisers")),
     brief: v.string(),
     targetCity: v.optional(v.string()),
     budgetMinor: v.number(),
@@ -83,6 +104,8 @@ export const create = mutation({
   },
   returns: v.id("campaigns"),
   handler: async (ctx, args) => {
+    const customer = await requireCustomer(ctx, args.advertiserId);
+    const advertiserId = customer.advertiserId;
     const brief = args.brief.trim();
     if (brief.length === 0 || brief.length > MAX_BRIEF_LENGTH) {
       throw new ConvexError({
@@ -108,13 +131,13 @@ export const create = mutation({
       const problem = validateTags(args.targetAudience);
       if (problem) throw new ConvexError({ code: "INVALID_INPUT", message: problem });
     }
-    const advertiser = await ctx.db.get(args.advertiserId);
+    const advertiser = await ctx.db.get(advertiserId);
     if (!advertiser) {
       throw new ConvexError({ code: "NOT_FOUND", message: "Advertiser not found" });
     }
 
     const campaignId = await ctx.db.insert("campaigns", {
-      advertiserId: args.advertiserId,
+      advertiserId,
       brief,
       targetCity,
       budgetMinor: args.budgetMinor,
@@ -124,14 +147,14 @@ export const create = mutation({
       targetAudience: args.targetAudience,
     });
     // Company analyst: assess (or refresh) this advertiser in the background.
-    await requestAssessment(ctx, args.advertiserId, "campaign created");
+    await requestAssessment(ctx, advertiserId, "campaign created");
     await recordAudit(ctx, {
       traceId: `campaign:${campaignId}`,
-      actor: "advertiser",
+      actor: customer.actor,
       type: "campaign.created",
       subjectId: campaignId,
       reason: `Campaign created for ${advertiser.displayName}`,
-      data: { advertiserId: args.advertiserId, budgetMinor: args.budgetMinor, targetCity: targetCity ?? null },
+      data: { advertiserId, budgetMinor: args.budgetMinor, targetCity: targetCity ?? null },
     });
     return campaignId;
   },

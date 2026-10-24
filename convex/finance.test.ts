@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, signedInUser, type TestClient } from "./test.setup";
+import { modules, signedInOperator, signedInUser, type TestClient, joinCompanies } from "./test.setup";
 import { FIXTURE_AS_OF, FIXTURE_BANK_LINES } from "./fixtures/financeFixture";
 import {
   COLLECTION_ANSWERS,
@@ -40,6 +40,7 @@ async function seededAndReconciled() {
   const t = await signedInOperator(anon);
   const ctrl = await signedInOperator(t, "controller@billboardos.test");
   const seed = await t.mutation(internal.seed.finance, {});
+  await joinCompanies(t);
   const summary = await t.mutation(internal.reconciliation.run, {});
   return { anon, t, ctrl, seed, summary };
 }
@@ -216,7 +217,7 @@ describe("segregation of duties", () => {
     const stranger = await signedInUser(t);
     expect(
       await errorCode(stranger.mutation(api.approvals.decide, { approvalId: refund._id, decision: "approved", note: "" })),
-    ).toBe("NOT_OPERATOR");
+    ).toBe("NOT_WORKSPACE_MEMBER");
 
     const writeOff = await t.mutation(api.approvals.request, {
       action: "write_off",
@@ -360,6 +361,7 @@ describe("booking on terms", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
+    await joinCompanies(t);
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
       from: FIXTURE_AS_OF,
@@ -421,6 +423,7 @@ describe("booking on terms", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
+    await joinCompanies(t);
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
       from: FIXTURE_AS_OF,
@@ -460,13 +463,14 @@ describe("bank ingest", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const line = { source: "nessie" as const, externalId: "n-1", amountMinor: 1000, postedAt: FIXTURE_AS_OF, payerName: "X", memo: "" };
-    const first = await t.mutation(internal.bank.ingest, { lines: [line, line] });
+    const workspaceId = (await t.run(async (ctx) => ctx.db.query("workspaces").first()))!._id;
+    const first = await t.mutation(internal.bank.ingest, { workspaceId, lines: [line, line] });
     expect(first).toMatchObject({ inserted: 1, duplicates: ["n-1"] });
     // Same id from a different source is a different line.
-    const other = await t.mutation(internal.bank.ingest, { lines: [{ ...line, source: "fixture" }] });
+    const other = await t.mutation(internal.bank.ingest, { workspaceId, lines: [{ ...line, source: "fixture" }] });
     expect(other.inserted).toBe(1);
     expect(
-      await errorCode(t.mutation(internal.bank.ingest, { lines: [{ ...line, externalId: "n-2", amountMinor: 0 }] })),
+      await errorCode(t.mutation(internal.bank.ingest, { workspaceId, lines: [{ ...line, externalId: "n-2", amountMinor: 0 }] })),
     ).toBe("INVALID_INPUT");
   });
 });
@@ -582,6 +586,7 @@ describe("demo reset", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
+    await joinCompanies(t);
     const before = await snapshot(t);
     expect(before.lines.every((l) => l.status === "unmatched")).toBe(true);
 
@@ -629,7 +634,9 @@ describe("demo reset", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
+    await joinCompanies(t);
     await t.mutation(internal.seed.finance, {});
+    await joinCompanies(t);
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
       from: FIXTURE_AS_OF,
@@ -670,6 +677,7 @@ describe("demo reset", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     const seed = await t.mutation(internal.seed.demo, {});
+    await joinCompanies(t);
     const slots = await t.query(api.slots.listForBillboard, {
       billboardId: seed.billboardId,
       from: FIXTURE_AS_OF,
@@ -699,6 +707,7 @@ describe("demo reset", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
+    await joinCompanies(t);
     expect(
       await errorCode(t.mutation(internal.seed.addScenarioBankLine, { payerName: "", amountMinor: 100, memo: "" })),
     ).toBe("INVALID_INPUT");
@@ -723,6 +732,7 @@ describe("AR -> collections hand-off", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
+    await joinCompanies(t);
     await t.mutation(api.finance.runReconciliation, {});
     expect(await t.query(api.collections.tasks, {})).toHaveLength(0); // not yet run
     await t.finishAllScheduledFunctions(vi.runAllTimers);
@@ -742,6 +752,7 @@ describe("AR -> collections hand-off", () => {
     const t = await signedInOperator(convexTest(schema, modules));
     const ctrl = await signedInOperator(t, "controller@billboardos.test");
     await t.mutation(internal.seed.finance, {});
+    await joinCompanies(t);
     await t.mutation(api.finance.runReconciliation, {});
     const line = (await lineByExternalId(t, "fx-bank-003"))!;
     expect(line.note?.match(/materiality/g)).toHaveLength(1);

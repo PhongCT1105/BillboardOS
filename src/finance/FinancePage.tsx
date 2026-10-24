@@ -13,10 +13,10 @@ import { CompanyValuations } from "./CompanyValuations";
 type RunSummary = FunctionReturnType<typeof api.finance.runReconciliation>;
 
 export function FinancePage() {
-  const bankFeed = useQuery(api.finance.bankFeed);
+  const bankFeed = useQuery(api.finance.bankFeed, {});
   const receivables = useQuery(api.finance.receivables, {});
-  const exceptions = useQuery(api.finance.openExceptions);
-  const approvals = useQuery(api.approvals.pending);
+  const exceptions = useQuery(api.finance.openExceptions, {});
+  const approvals = useQuery(api.approvals.pending, {});
   const tasks = useQuery(api.collections.tasks, {});
   const runReconciliation = useMutation(api.finance.runReconciliation);
   const [summary, setSummary] = useState<RunSummary | null>(null);

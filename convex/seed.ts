@@ -1,5 +1,7 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, type MutationCtx } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { createAccount } from "@convex-dev/auth/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
 import { ensureUpcomingSlots } from "./lib/inventory";
@@ -14,6 +16,18 @@ import {
 } from "./fixtures/financeFixture";
 
 const BILLBOARD_NAME = "Moscone West Screen";
+/** The demo host workspace that owns all seeded inventory and finance data (ADR 0004). */
+export const DEMO_WORKSPACE_NAME = "Moscone Media";
+
+/** Find or create the demo host workspace (no owner until someone is migrated/invited in). */
+export async function ensureDemoWorkspace(ctx: MutationCtx): Promise<Id<"workspaces">> {
+  const existing = await ctx.db
+    .query("workspaces")
+    .withIndex("by_name", (q) => q.eq("name", DEMO_WORKSPACE_NAME))
+    .first();
+  if (existing) return existing._id;
+  return await ctx.db.insert("workspaces", { name: DEMO_WORKSPACE_NAME, city: "San Francisco" });
+}
 /** Moscone West: mostly software people, some startups, some tourists. */
 const MOSCONE_AUDIENCE = { software: 0.6, startups: 0.2, tourists: 0.2 };
 
@@ -33,6 +47,7 @@ export const demo = internalMutation({
   }),
   handler: async (ctx) => {
     let created = false;
+    const workspaceId = await ensureDemoWorkspace(ctx);
 
     let billboard = await ctx.db
       .query("billboards")
@@ -42,6 +57,7 @@ export const demo = internalMutation({
     if (!billboard) {
       created = true;
       const billboardId = await ctx.db.insert("billboards", {
+        workspaceId,
         name: BILLBOARD_NAME,
         city: "San Francisco",
         locationLabel: "Moscone Center West, 800 Howard St, San Francisco, CA",
@@ -51,6 +67,10 @@ export const demo = internalMutation({
         deviceStatus: "online",
       });
       billboard = (await ctx.db.get(billboardId))!;
+    }
+    if (!billboard.workspaceId) {
+      await ctx.db.patch(billboard._id, { workspaceId });
+      billboard = (await ctx.db.get(billboard._id))!;
     }
     // Who is likely in front of the screen (matching only; never changes price).
     if (!billboard.audienceTags) {
@@ -98,6 +118,7 @@ export const demo = internalMutation({
 
     if (created) {
       await recordAudit(ctx, {
+        workspaceId: await ensureDemoWorkspace(ctx),
         traceId: "seed:demo",
         actor: "system",
         type: "seed.completed",
@@ -122,6 +143,7 @@ export const demo = internalMutation({
  * fixture invoices are also put back to their seeded state.
  */
 async function seedFinanceFixture(ctx: MutationCtx, restoreInvoices: boolean) {
+  const workspaceId = await ensureDemoWorkspace(ctx);
   let advertisersCreated = 0;
   const ids = new Map<string, Id<"advertisers">>();
   for (const spec of FIXTURE_ADVERTISERS) {
@@ -152,6 +174,7 @@ async function seedFinanceFixture(ctx: MutationCtx, restoreInvoices: boolean) {
   for (const inv of FIXTURE_INVOICES) {
     const paid = inv.paidAt !== undefined;
     const seeded = {
+      workspaceId,
       number: inv.number,
       advertiserId: ids.get(inv.advertiser)!,
       description: inv.description,
@@ -179,7 +202,7 @@ async function seedFinanceFixture(ctx: MutationCtx, restoreInvoices: boolean) {
     }
   }
 
-  const bank = await ingestBankLines(ctx, FIXTURE_BANK_LINES, "system:fixture");
+  const bank = await ingestBankLines(ctx, workspaceId, FIXTURE_BANK_LINES, "system:fixture");
   return { advertisersCreated, invoicesCreated, invoicesRestored, bank };
 }
 
@@ -202,6 +225,7 @@ export const finance = internalMutation({
     const r = await seedFinanceFixture(ctx, false);
     if (r.advertisersCreated + r.invoicesCreated + r.bank.inserted.length > 0) {
       await recordAudit(ctx, {
+        workspaceId: await ensureDemoWorkspace(ctx),
         traceId: "seed:finance",
         actor: "system",
         type: "seed.completed",
@@ -246,10 +270,13 @@ export const resetFinanceDemo = internalMutation({
     bankLinesReingested: v.number(),
   }),
   handler: async (ctx) => {
-    const fixtureLines = await ctx.db
-      .query("bankTransactions")
-      .withIndex("by_source_and_externalId", (q) => q.eq("source", "fixture"))
-      .take(MAX_FIXTURE_BANK_LINES);
+    const demoWorkspaceId = await ensureDemoWorkspace(ctx);
+    const fixtureLines = (
+      await ctx.db
+        .query("bankTransactions")
+        .withIndex("by_source_and_externalId", (q) => q.eq("source", "fixture"))
+        .take(MAX_FIXTURE_BANK_LINES)
+    ).filter((l) => l.workspaceId === undefined || l.workspaceId === demoWorkspaceId);
 
     const fixtureInvoices: Doc<"invoices">[] = [];
     for (const inv of FIXTURE_INVOICES) {
@@ -360,6 +387,7 @@ export const resetFinanceDemo = internalMutation({
       bankLinesReingested: seeded.bank.inserted.length,
     };
     await recordAudit(ctx, {
+      workspaceId: await ensureDemoWorkspace(ctx),
       traceId: "demo:reset",
       actor: "operator",
       type: "demo.reset",
@@ -397,6 +425,7 @@ export const resetBookingDemo = internalMutation({
     }
     const slotsCreated = await ensureUpcomingSlots(ctx, billboard._id, Date.now());
     await recordAudit(ctx, {
+      workspaceId: await ensureDemoWorkspace(ctx),
       traceId: "demo:reset",
       actor: "operator",
       type: "demo.reset",
@@ -433,6 +462,7 @@ export const addScenarioBankLine = internalMutation({
     const externalId = `fx-scenario-${crypto.randomUUID().slice(0, 8)}`;
     const r = await ingestBankLines(
       ctx,
+      await ensureDemoWorkspace(ctx),
       [{ source: "fixture", externalId, amountMinor: args.amountMinor, postedAt: Date.now(), payerName, memo }],
       "operator:scenario",
     );
@@ -540,5 +570,129 @@ export const pricingDemo = internalMutation({
       nvidiaCampaignId: nvidiaCampaign._id,
       goldenGateCampaignId,
     };
+  },
+});
+
+/** Demo buyer accounts used by `npm run buyer` and `npm run auction:demo` until agent keys (ADR 0004 step 2). */
+export const DEMO_CUSTOMERS = [
+  { email: "coffee@demo.billboardos.dev", company: "Golden Gate Coffee Co." },
+  { email: "nvidia@demo.billboardos.dev", company: "Nvidia" },
+] as const;
+
+/** Is there already a sign-in account for this email? */
+export const demoAccountExists = internalQuery({
+  args: { email: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const user = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", args.email))
+      .first();
+    return user !== null;
+  },
+});
+
+/** Customer profile + company membership for a demo buyer (idempotent). */
+export const attachDemoCustomer = internalMutation({
+  args: { email: v.string(), company: v.string() },
+  returns: v.object({ advertiserId: v.union(v.id("advertisers"), v.null()) }),
+  handler: async (ctx, args) => {
+    const user = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", args.email))
+      .first();
+    const advertiser = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", args.company))
+      .first();
+    if (!user || !advertiser) return { advertiserId: null };
+    const profile = await ctx.db
+      .query("profiles")
+      .withIndex("by_userId", (q) => q.eq("userId", user._id))
+      .unique();
+    if (!profile) await ctx.db.insert("profiles", { userId: user._id, accountType: "customer" });
+    const member = await ctx.db
+      .query("advertiserMembers")
+      .withIndex("by_advertiser_and_user", (q) => q.eq("advertiserId", advertiser._id).eq("userId", user._id))
+      .unique();
+    if (!member) {
+      await ctx.db.insert("advertiserMembers", { advertiserId: advertiser._id, userId: user._id, email: args.email, role: "member" });
+    }
+    return { advertiserId: advertiser._id };
+  },
+});
+
+/**
+ * Create password sign-ins for the demo buyers and attach them to Golden Gate
+ * Coffee and Nvidia (run after seed:demo and seed:pricingDemo):
+ *   npx convex run seed:demoCustomers '{"password":"<at least 8 chars>"}'
+ * Existing accounts keep their password. The scripts sign in with
+ * DEMO_CUSTOMER_PASSWORD from .env.
+ */
+export const demoCustomers = internalAction({
+  args: { password: v.string() },
+  returns: v.array(v.object({ email: v.string(), company: v.string(), created: v.boolean(), attached: v.boolean() })),
+  handler: async (ctx, args): Promise<{ email: string; company: string; created: boolean; attached: boolean }[]> => {
+    if (args.password.length < 8) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "Password must be at least 8 characters" });
+    }
+    const out: { email: string; company: string; created: boolean; attached: boolean }[] = [];
+    for (const spec of DEMO_CUSTOMERS) {
+      const exists: boolean = await ctx.runQuery(internal.seed.demoAccountExists, { email: spec.email });
+      if (!exists) {
+        await createAccount(ctx, {
+          provider: "password",
+          account: { id: spec.email, secret: args.password },
+          profile: { email: spec.email },
+        });
+      }
+      const r: { advertiserId: Id<"advertisers"> | null } = await ctx.runMutation(internal.seed.attachDemoCustomer, {
+        email: spec.email,
+        company: spec.company,
+      });
+      out.push({ email: spec.email, company: spec.company, created: !exists, attached: r.advertiserId !== null });
+    }
+    return out;
+  },
+});
+
+/**
+ * Make an existing account an owner of the demo "Moscone Media" workspace
+ * (it has no owner after migration when nobody had signed up yet):
+ *   npx convex run seed:addDemoOwner '{"email":"you@example.com"}'
+ */
+export const addDemoOwner = internalMutation({
+  args: { email: v.string() },
+  returns: v.object({ workspaceId: v.id("workspaces"), added: v.boolean() }),
+  handler: async (ctx, args) => {
+    const email = args.email.trim().toLowerCase();
+    const user = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", email))
+      .first();
+    if (!user) throw new ConvexError({ code: "USER_NOT_FOUND", message: "Sign up with this email first" });
+    const workspaceId = await ensureDemoWorkspace(ctx);
+    const existing = await ctx.db
+      .query("workspaceMembers")
+      .withIndex("by_workspace_and_user", (q) => q.eq("workspaceId", workspaceId).eq("userId", user._id))
+      .unique();
+    if (!existing) await ctx.db.insert("workspaceMembers", { workspaceId, userId: user._id, email, role: "owner" });
+    const profile = await ctx.db
+      .query("profiles")
+      .withIndex("by_userId", (q) => q.eq("userId", user._id))
+      .unique();
+    if (!profile) await ctx.db.insert("profiles", { userId: user._id, accountType: "host", activeWorkspaceId: workspaceId });
+    else await ctx.db.patch(profile._id, { activeWorkspaceId: workspaceId });
+    const workspace = (await ctx.db.get(workspaceId))!;
+    if (!workspace.ownerUserId) await ctx.db.patch(workspaceId, { ownerUserId: user._id });
+    await recordAudit(ctx, {
+      workspaceId,
+      traceId: `workspace:${workspaceId}`,
+      actor: "system:cli",
+      type: "workspace.member_added",
+      subjectId: user._id,
+      reason: `${email} added as owner of ${DEMO_WORKSPACE_NAME} (CLI)`,
+    });
+    return { workspaceId, added: !existing };
   },
 });

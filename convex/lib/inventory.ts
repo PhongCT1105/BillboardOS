@@ -17,6 +17,7 @@ export async function ensureUpcomingSlots(
   billboardId: Id<"billboards">,
   now: number,
 ): Promise<number> {
+  const billboard = await ctx.db.get(billboardId);
   const latest = await ctx.db
     .query("slots")
     .withIndex("by_billboard_and_startAt", (q) => q.eq("billboardId", billboardId))
@@ -31,6 +32,7 @@ export async function ensureUpcomingSlots(
   while (startAt < horizon && created < MAX_NEW_SLOTS) {
     await ctx.db.insert("slots", {
       billboardId,
+      workspaceId: billboard?.workspaceId,
       startAt,
       endAt: startAt + SLOT_MS,
       state: "available",

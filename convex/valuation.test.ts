@@ -3,7 +3,7 @@ import { ConvexError } from "convex/values";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { modules, signedInOperator, signedInUser } from "./test.setup";
+import { modules, signedInOperator, signedInUser, joinCompanies } from "./test.setup";
 import { applyCompanyMultiplier, heuristicAssessment, parseAssessment, type CompanyInputs } from "./lib/valuation";
 
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -33,7 +33,9 @@ async function world() {
   const anon = convexTest(schema, modules);
   const t = await signedInOperator(anon);
   const seed = await t.mutation(internal.seed.demo, {});
+  await joinCompanies(t);
   const demo = await t.mutation(internal.seed.pricingDemo, {});
+  await joinCompanies(t);
   const slots = await t.query(api.slots.listForBillboard, {
     billboardId: seed.billboardId,
     from: START,
@@ -116,16 +118,17 @@ describe("company pricing on posted quotes", () => {
     const stored2 = await t.run(async (ctx) => ctx.db.get(q2.quoteId));
     expect(stored2).toMatchObject({ companyMethod: "heuristic", companyAssessmentId: nvidia.assessment!._id });
 
-    const audit = await t.query(api.audit.recent, {});
+    // Company valuation is platform-level: its audit events carry no workspace.
+    const audit = await t.run(async (ctx) => ctx.db.query("auditEvents").withIndex("by_subject", (q) => q.eq("subjectId", demo.nvidiaAdvertiserId)).take(50));
     expect(audit.some((e) => e.type === "valuation.assessed" && e.actor === "system:valuation-heuristic")).toBe(true);
   });
 
-  test("operator override pins the multiplier, is audited, and beats automated runs", async () => {
+  test("workspace override pins the multiplier for this workspace's quotes, even after an automated run", async () => {
     const { anon, t, demo, slots } = await world();
     const stranger = await signedInUser(anon);
     expect(
       await errorCode(stranger.mutation(api.valuation.override, { advertiserId: demo.nvidiaAdvertiserId, multiplier: 1.4, reason: "x" })),
-    ).toBe("NOT_OPERATOR");
+    ).toBe("NO_WORKSPACE");
     expect(await errorCode(anon.query(api.valuation.list, {}))).toBe("UNAUTHENTICATED");
     expect(
       await errorCode(t.mutation(api.valuation.override, { advertiserId: demo.nvidiaAdvertiserId, multiplier: 2, reason: "x" })),
@@ -139,9 +142,11 @@ describe("company pricing on posted quotes", () => {
     const q = await t.mutation(api.quotes.create, { campaignId: demo.nvidiaCampaignId, slotIds: [slots[20]._id] });
     expect(q.amountMinor).toBe(Math.round(q.priceBreakdown[0].screenMinor * 1.4));
 
-    // An automated run does not replace an active override.
+    // An automated (platform) run is stored, but this workspace's override keeps winning here.
     const r = await t.action(internal.valuationAgent.assessCompany, { advertiserId: demo.nvidiaAdvertiserId, reason: "test" });
-    expect(r.method).toBe("skipped_override");
+    expect(r.method).toBe("heuristic");
+    const q2 = await t.mutation(api.quotes.create, { campaignId: demo.nvidiaCampaignId, slotIds: [slots[21]._id] });
+    expect(q2.amountMinor).toBe(Math.round(q2.priceBreakdown[0].screenMinor * 1.4));
     const audit = await t.query(api.audit.recent, {});
     expect(audit.find((e) => e.type === "valuation.overridden")?.actor).toBe("operator:ops@billboardos.test");
   });
@@ -249,7 +254,7 @@ describe("Claude company analyst (mocked API)", () => {
     );
     const r = await t.action(internal.valuationAgent.assessCompany, { advertiserId: demo.nvidiaAdvertiserId, reason: "test" });
     expect(r).toEqual({ method: "heuristic", multiplier: 1.1 });
-    const audit = await t.query(api.audit.recent, {});
+    const audit = await t.run(async (ctx) => ctx.db.query("auditEvents").withIndex("by_subject", (q) => q.eq("subjectId", demo.nvidiaAdvertiserId)).take(50));
     expect(audit.find((e) => e.type === "valuation.failed")?.reason).toContain("Model declined");
   });
 });
