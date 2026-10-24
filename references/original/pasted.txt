@@ -1,0 +1,28 @@
+IDEA
+Imagine a marketing agency operating digital billboards in Times Square, San Francisco, and Seattle. Each billboard has an AI agent that understands its available advertising slots, estimates audience reach, and helps sell those slots to suitable companies.
+The system would work through six core capabilities:
+Understand the audience and location. Cameras and sensors estimate foot traffic and how long people stay nearby. Location and event information help estimate audience relevance—for example, a technology conference or a financial district. Profession should come from that context; a camera cannot reliably determine whether someone works in tech or finance.
+Adjust prices dynamically. Prices respond to estimated audience reach, advertiser demand, available slots, time of day, and local events. A crowded sporting event could justify higher prices, while quieter periods trigger discounts to attract bookings. Seasonal patterns would depend on the location and observed demand.
+Offer packages for different advertisers. Company size, campaign budget, and advertising goals inform the offer. A small startup might receive a discounted off-peak package, while a large company could purchase premium locations, peak hours, or a campaign across multiple billboards.
+Understand each company’s campaign. Advertisers upload documents describing their business, product, target customers, preferred cities, budget, and advertising materials. The AI uses this information to recommend suitable billboards, schedules, and packages.
+Find customers and manage communication. A prospecting agent identifies companies whose campaigns could match available inventory—for example, YC startups seeking exposure in San Francisco or financial businesses targeting New York. A communication channel handles inquiries, personalized proposals, negotiations, and follow-ups.
+Manage bookings and financial operations. Once a deal is accepted, the system reserves the advertising slots, handles invoicing and payment tracking, schedules the ad, and records when it played. The owner sees bookings, revenue, available inventory, and audience estimates in one dashboard.
+The optional agent-to-agent extension gives advertisers their own buying agents. An advertiser’s agent compares billboard offers and negotiates within its budget; the billboard’s agent seeks suitable bookings above the owner’s minimum price. After agreement, the buyer pays through an x402-enabled booking endpoint, and the campaign is scheduled. Your application implements the negotiation; x402 provides the payment mechanism. Coinbase Developer Documentation
+Optional fraud screening checks business identity and risk signals before accepting a campaign. Confirmed fraudulent advertisers are excluded; uncertain results are flagged for review. CRS offers business verification and credit-related products, although the integration would depend on the endpoints available to your team. A low credit score alone should not be treated as proof of fraud. CRS Credit API
+For the sponsor tracks you listed, the proposed positioning is:
+Track
+How the project could fit
+CRS — Financial Intelligence / Credit API
+Verify advertisers and use business risk information to inform payment terms.
+CREAO — Best AI-first Disruption
+Automate the billboard sales workflow, from finding customers to scheduling campaigns.
+CREAO — Best One-person Company
+Let one operator manage prospecting, sales, bookings, and billing across a billboard network.
+CREAO — Best Team Empowerment
+Give sales and operations teams a shared assistant for proposals, follow-ups, and campaign management.
+Coinbase — Best Use of x402
+Let advertiser agents purchase advertising slots from billboard agents programmatically.
+
+A focused hackathon MVP: one camera, one screen acting as a billboard, a pricing engine, an advertiser brief upload, and a booking dashboard. The live demo shows audience counts changing, the offered price updating, an advertiser booking a slot, and its ad appearing on the screen. Agent negotiation, x402 payments, and CRS screening can extend that core flow.
+
+
