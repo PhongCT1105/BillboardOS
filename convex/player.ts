@@ -5,6 +5,7 @@ import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { computeScreenPrice } from "./lib/screenPrice";
 import { creativeReady, onMomentFirstFrame } from "./lib/momentHooks";
+import { explorerTxUrl } from "./lib/x402/money";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
@@ -279,5 +280,139 @@ export const readyCreatives = query({
       if (url) out.push({ campaignId: campaign._id, url, contentType: campaign.creativeContentType ?? null });
     }
     return out;
+  },
+});
+
+/**
+ * What the display shows, from the latest live moment on this screen: announce,
+ * live auction (with its bid ladder), negotiation, the paid ad playing, or
+ * "your ad here". Public: the room sees the company names. The client passes
+ * `now` (floored to a few seconds) so the query itself never reads the clock;
+ * it falls back to the server clock when omitted.
+ */
+export const screenState = query({
+  args: { billboardId: v.id("billboards"), now: v.optional(v.number()) },
+  returns: v.object({
+    mode: v.union(
+      v.literal("announce"),
+      v.literal("auction"),
+      v.literal("negotiation"),
+      v.literal("playing"),
+      v.literal("your_ad_here"),
+    ),
+    screenName: v.string(),
+    minutesLeft: v.number(),
+    peopleInView: v.union(v.number(), v.null()),
+    eventName: v.union(v.string(), v.null()),
+    openingMinor: v.union(v.number(), v.null()),
+    minimumMinor: v.union(v.number(), v.null()),
+    why: v.union(v.string(), v.null()),
+    closesAt: v.union(v.number(), v.null()),
+    ladder: v.array(
+      v.object({ company: v.string(), amountMinor: v.number(), at: v.number(), leading: v.boolean() }),
+    ),
+    nowPlaying: v.union(
+      v.null(),
+      v.object({
+        company: v.string(),
+        wonAtMinor: v.number(),
+        txShort: v.union(v.string(), v.null()),
+        txUrl: v.union(v.string(), v.null()),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    const now = args.now ?? Date.now();
+    const billboard = await ctx.db.get(args.billboardId);
+    if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
+    const moment = await ctx.db
+      .query("moments")
+      .withIndex("by_billboard", (q) => q.eq("billboardId", billboard._id))
+      .order("desc")
+      .first();
+
+    const empty = {
+      screenName: billboard.name,
+      minutesLeft: 0,
+      peopleInView: null,
+      eventName: null,
+      openingMinor: null,
+      minimumMinor: null,
+      why: null,
+      closesAt: null,
+      ladder: [],
+      nowPlaying: null,
+    };
+    if (!moment) return { mode: "your_ad_here" as const, ...empty };
+
+    const spotMinutes = Math.max(1, Math.round((moment.spotEndAt - moment.spotStartAt) / 60_000));
+    const base = {
+      screenName: billboard.name,
+      minutesLeft: spotMinutes,
+      peopleInView: moment.peopleInView ?? null,
+      eventName: moment.eventName ?? null,
+      openingMinor: moment.priceMinor,
+      minimumMinor: moment.floorMinor,
+      why: moment.priceWhy ?? null,
+      closesAt: null as number | null,
+      ladder: [] as { company: string; amountMinor: number; at: number; leading: boolean }[],
+      nowPlaying: null as null | { company: string; wonAtMinor: number; txShort: string | null; txUrl: string | null },
+    };
+
+    if (moment.status === "offering") return { mode: "announce" as const, ...base };
+
+    if (moment.status === "bidding" || moment.status === "negotiating") {
+      const bids = await ctx.db
+        .query("momentBids")
+        .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
+        .order("desc")
+        .take(40);
+      const shown = moment.status === "bidding" ? bids.filter((b) => b.kind === "bid") : bids;
+      const names = new Map<Id<"advertisers">, string>();
+      for (const b of shown) {
+        if (!names.has(b.advertiserId)) names.set(b.advertiserId, (await ctx.db.get(b.advertiserId))?.displayName ?? "A company");
+      }
+      const top = shown.reduce((max, b) => Math.max(max, b.amountMinor), 0);
+      const ladder = shown
+        .slice(0, 6)
+        .sort((a, b) => b.amountMinor - a.amountMinor || b.at - a.at)
+        .map((b) => ({
+          company: names.get(b.advertiserId) ?? "A company",
+          amountMinor: b.amountMinor,
+          at: b.at,
+          leading: moment.status === "bidding" && b.offerId === moment.leaderOfferId && b.amountMinor === top,
+        }));
+      // Only the first row at the top amount is the leader.
+      let seenLead = false;
+      for (const row of ladder) {
+        if (row.leading && seenLead) row.leading = false;
+        if (row.leading) seenLead = true;
+      }
+      return {
+        mode: moment.status === "bidding" ? ("auction" as const) : ("negotiation" as const),
+        ...base,
+        closesAt: moment.status === "bidding" ? (moment.biddingClosesAt ?? null) : moment.offerClosesAt,
+        ladder,
+      };
+    }
+
+    if ((moment.status === "paid" || moment.status === "playing") && now < moment.spotEndAt) {
+      const winner = moment.winnerOfferId ? await ctx.db.get(moment.winnerOfferId) : null;
+      const advertiser = winner ? await ctx.db.get(winner.advertiserId) : null;
+      const tx = moment.paymentTx ?? null;
+      return {
+        mode: "playing" as const,
+        ...base,
+        minutesLeft: Math.max(0, Math.ceil((moment.spotEndAt - now) / 60_000)),
+        nowPlaying: {
+          company: advertiser?.displayName ?? "A company",
+          wonAtMinor: moment.paidMinor ?? moment.currentMinor ?? moment.priceMinor,
+          txShort: tx ? (tx.length > 14 ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : tx) : null,
+          txUrl: tx && moment.paymentNetwork ? (explorerTxUrl(moment.paymentNetwork, tx) ?? null) : null,
+        },
+      };
+    }
+
+    return { mode: "your_ad_here" as const, ...empty, minutesLeft: spotMinutes, openingMinor: moment.priceMinor, minimumMinor: moment.floorMinor };
   },
 });

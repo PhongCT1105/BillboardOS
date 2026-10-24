@@ -1050,6 +1050,67 @@ describe("live auction lifecycle", () => {
   });
 });
 
+describe("display", () => {
+  test("screenState follows the moment: announce → auction (ladder) → playing", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const idle = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    expect(idle.mode).toBe("your_ad_here");
+    expect(idle.ladder).toHaveLength(0);
+
+    const { m, lk, rv } = await w.announce();
+    const announced = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    expect(announced.mode).toBe("announce");
+    expect(announced.ladder).toHaveLength(0);
+    expect(announced.openingMinor).toBe(m.priceMinor);
+    expect(announced.minimumMinor).toBe(m.floorMinor);
+    expect(announced.screenName).toBe("LED");
+    expect(announced.nowPlaying).toBeNull();
+
+    await w.reply(w.launchKit, lk, "accept");
+    await w.reply(w.rivet, rv, "accept");
+    await w.advance(2_000);
+    const open = await w.momentDoc(m._id);
+    expect(open.status).toBe("bidding");
+    const O = open.priceMinor;
+    const b2 = minNextLiveBid({ leaderMinor: O, openingMinor: O });
+    await w.bid(w.launchKit, lk, O);
+    await w.bid(w.rivet, rv, b2);
+    await w.flush();
+    const auction = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    expect(auction.mode).toBe("auction");
+    expect(auction.ladder).toHaveLength(2);
+    expect(auction.ladder[0]).toMatchObject({ company: "Rivet", amountMinor: b2, leading: true });
+    expect(auction.ladder[1]).toMatchObject({ company: "LaunchKit", amountMinor: O, leading: false });
+    expect(auction.closesAt).toBe((await w.momentDoc(m._id)).biddingClosesAt);
+
+    await w.advance(open.biddingClosesAt! + 10_000 - Date.now());
+    const awarded = await w.momentDoc(m._id);
+    expect(awarded.status).toBe("awarded");
+    await w.t.run(async (ctx) => {
+      const hold = (await ctx.db.get(awarded.holdId!))!;
+      await ctx.db.patch(hold._id, { status: "converted" });
+      const bookingId = await ctx.db.insert("bookings", {
+        workspaceId: w.workspaceId,
+        billboardId: w.led,
+        slotIds: hold.slotIds,
+        amountMinor: hold.amountMinor,
+        currency: "USD",
+        traceId: hold.traceId,
+        holdId: hold._id,
+        quoteId: hold.quoteId,
+        campaignId: w.rivet.campaignId,
+        status: "confirmed",
+      });
+      await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: `0x${"ab".repeat(32)}`, network: "eip155:84532", amountMinor: hold.amountMinor });
+    });
+    const playing = await w.t.query(api.player.screenState, { billboardId: w.led, now: Date.now() });
+    expect(playing.mode).toBe("playing");
+    expect(playing.nowPlaying).toMatchObject({ company: "Rivet", wonAtMinor: b2, txShort: "0xabab…abab" });
+    expect(playing.nowPlaying?.txUrl).toBe(`https://sepolia.basescan.org/tx/0x${"ab".repeat(32)}`);
+  });
+});
+
 describe("one re-offer chain per screen", () => {
   const reoffersFor = async (w: Awaited<ReturnType<typeof liveWorld>>, billboardId: Id<"billboards">) =>
     (await w.pendingDetects()).filter((s) => s.args[0].billboardId === billboardId && s.args[0].trigger === "reoffer");

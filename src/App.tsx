@@ -3,7 +3,7 @@ import { useAuthActions } from "@convex-dev/auth/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
-import { useHashRoute } from "./lib/hooks";
+import { useHashParams, useHashRoute } from "./lib/hooks";
 import { ConsolePage } from "./console/ConsolePage";
 import { PlayerPage } from "./player/PlayerPage";
 import { BookPage } from "./book/BookPage";
@@ -19,9 +19,10 @@ type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 
 export function App() {
   const route = useHashRoute();
-  // The screen itself stays public by billboard id.
+  const params = useHashParams();
+  // The screen itself stays public by billboard id. `?camera=1` also counts people on this device.
   const playerMatch = route.match(/^\/player\/([^/]+)$/);
-  if (playerMatch) return <PlayerPage billboardId={playerMatch[1] as Id<"billboards">} />;
+  if (playerMatch) return <PlayerPage billboardId={playerMatch[1] as Id<"billboards">} camera={params.get("camera") === "1"} />;
   return <Shell route={route} />;
 }
 
