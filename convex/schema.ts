@@ -1242,6 +1242,8 @@ export default defineSchema({
     topUpCount: v.optional(v.number()),
     lastAction: v.optional(v.string()),
     lastActionAt: v.optional(v.number()),
+    /** Last USDC faucet claim made by `ensureWallet` (at most one per 24 h per company). */
+    faucetClaimedAt: v.optional(v.number()),
   }).index("by_advertiser", ["advertiserId"]),
 
   flashOffers: defineTable(flashOfferFields)

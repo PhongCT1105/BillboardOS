@@ -22,7 +22,7 @@ import { sellerRespond, type SellerDecision } from "./lib/negotiation";
 import { MAX_OFFERS, PAY_WINDOW_MS, rankReplies, replyAllowed, type Standing } from "./lib/moment";
 import { addMomentStep, releaseWorkspace } from "./lib/momentHooks";
 import { endHold, takeHold } from "./holds";
-import { scheduleReoffer, spentTodayMinor } from "./moments";
+import { scheduleReoffer, spentTodayForAdvertiserMinor } from "./moments";
 
 /**
  * The live auction after a spot is announced (ADR 0006): the join window,
@@ -496,7 +496,7 @@ export const placeBid = internalMutation({
       fail(broken, messages[broken], { minNextMinor });
     }
     // Standing instructions are enforced server-side too, and the key's budget cap applies.
-    const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayMinor(ctx, agent.key._id, now));
+    const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayForAdvertiserMinor(ctx, agent.key.advertiserId, now));
     if (why) fail("STANDING_INSTRUCTIONS", `Refused: ${why}`);
     await assertWithinBudget(ctx, agent.key, amount);
 

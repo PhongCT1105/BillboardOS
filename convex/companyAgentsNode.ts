@@ -110,9 +110,14 @@ export const ensureWallet = internalAction({
       const { usdcMinor } = await balancesOf(cdp, account.address);
       let note = "";
       if (usdcMinor < USDC_FAUCET_BELOW_MINOR) {
-        const { transactionHash } = await cdp.evm.requestFaucet({ address: account.address, network: NETWORK, token: "usdc" });
-        note = `; faucet USDC requested, tx ${transactionHash}`;
-        await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });
+        // One automatic claim per company per 24 h; top-ups (5 a day) are the way to ask for more.
+        if (await ctx.runMutation(internal.companyAgents.claimFaucetSlot, { advertiserId: args.advertiserId })) {
+          const { transactionHash } = await cdp.evm.requestFaucet({ address: account.address, network: NETWORK, token: "usdc" });
+          note = `; faucet USDC requested, tx ${transactionHash}`;
+          await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });
+        } else {
+          note = "; faucet already claimed in the last 24 h (use top up)";
+        }
       }
       await ctx.runMutation(internal.companyAgents.setWallet, { advertiserId: args.advertiserId, walletAddress: account.address, balanceMinor: usdcMinor });
       await log(`wallet ${account.address}: ${usd(usdcMinor)} USDC${note}`);
@@ -198,6 +203,7 @@ export const act = internalAction({
       advertiserId: args.advertiserId,
       now: Date.now(),
       offerId: typeof payload.offerId === "string" ? payload.offerId : undefined,
+      holdId: payload.type === "flash_won" && typeof payload.holdId === "string" ? payload.holdId : undefined,
     });
     if (!me) return null;
     const log = logger(ctx, args.advertiserId);
@@ -211,15 +217,26 @@ export const act = internalAction({
       await log(`${type}: cannot act: INTERNAL_API_SECRET missing (key store locked)`);
       return null;
     }
-    const key = await decryptSecret(secret, me.keyCiphertext, me.keyIv);
-    const post = async (path: string, body: Record<string, unknown>) => {
-      const res = await fetch(`${siteUrl()}${path}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const json = (await res.json().catch(() => ({}))) as { error?: { code?: string } };
-      return `HTTP ${res.status}${json.error?.code ? ` ${json.error.code}` : ""}`;
+    let key: string;
+    try {
+      key = await decryptSecret(secret, me.keyCiphertext, me.keyIv);
+    } catch (error) {
+      await log(`${type}: cannot act: the stored key can't be decrypted (${errText(error)}); set the agent up again`);
+      return null;
+    }
+    /** POST to our own agent API; the outcome (or the network error) goes to lastAction, never thrown. */
+    const post = async (path: string, body: Record<string, unknown>): Promise<string> => {
+      try {
+        const res = await fetch(`${siteUrl()}${path}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const json = (await res.json().catch(() => ({}))) as { error?: { code?: string } };
+        return `HTTP ${res.status}${json.error?.code ? ` ${json.error.code}` : ""}`;
+      } catch (error) {
+        return `request failed: ${errText(error)}`;
+      }
     };
     const standing = me.standing;
     // The private cap: never above the max per spot, the budget left today, or the wallet balance.
@@ -295,11 +312,21 @@ export const act = internalAction({
     if (type === "flash_won") {
       if (!payload.holdId || !payload.purchaseUrl || !payload.amountMinor) return null;
       const holdId = payload.holdId as Id<"holds">;
+      // Idempotent: a retried webhook (or a late one) for a hold that is paid, released or expired does nothing.
+      if (me.holdActive !== true) {
+        await log(`flash_won: hold ${payload.holdId} is no longer payable; nothing to do`);
+        return null;
+      }
       const blocked = async (reason: string) => {
         await ctx.runMutation(internal.moments.paymentBlocked, { holdId, reason });
         await ctx.runMutation(internal.liveAuction.paymentFailed, { holdId, reason });
         await log(`flash_won: payment blocked: ${reason}`);
       };
+      // The bearer key only ever goes to our own deployment.
+      if (!payload.purchaseUrl.startsWith(`${siteUrl()}/`)) {
+        await blocked("the purchase URL is not on this deployment; the agent key was not sent");
+        return null;
+      }
       if (!canPay()) {
         await blocked("no CDP keys on this deployment, so the company wallet can't sign");
         return null;

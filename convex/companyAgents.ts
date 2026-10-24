@@ -4,7 +4,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags, standingInstructions } from "./schema";
 import { issueAgentKey } from "./agentKeys";
-import { spentTodayMinor } from "./moments";
+import { spentTodayForAdvertiserMinor } from "./moments";
 import { recordAudit } from "./lib/audit";
 import { encryptSecret } from "./lib/demoCrypto";
 import { keyStatus } from "./lib/agentKeys";
@@ -34,6 +34,7 @@ const TOP_UPS_PER_DAY = 5;
 const TOP_UP_MINOR = 200;
 const FEED_OFFERS = 10;
 const MAX_BIDS_SCANNED = 100;
+const FAUCET_EVERY_MS = 24 * 60 * 60_000;
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 
@@ -194,7 +195,7 @@ export const mine = query({
       standing: key?.standing ?? null,
       walletAddress: agent.walletAddress ?? null,
       balanceMinor: agent.balanceMinor ?? null,
-      spentTodayMinor: await spentTodayMinor(ctx, agent.agentKeyId, Date.now()),
+      spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, agent.advertiserId, Date.now()),
       lastAction: agent.lastAction ?? null,
     };
   },
@@ -364,7 +365,7 @@ export const enqueue = internalMutation({
  * own, the spot's value and its audience match (everything `agentCap` needs).
  */
 export const forAct = internalQuery({
-  args: { advertiserId: v.id("advertisers"), now: v.number(), offerId: v.optional(v.string()) },
+  args: { advertiserId: v.id("advertisers"), now: v.number(), offerId: v.optional(v.string()), holdId: v.optional(v.string()) },
   returns: v.union(
     v.null(),
     v.object({
@@ -378,6 +379,8 @@ export const forAct = internalQuery({
       spentTodayMinor: v.number(),
       balanceMinor: v.union(v.number(), v.null()),
       offer: v.union(v.null(), v.object({ valueMinor: v.union(v.number(), v.null()), matchScore: v.number() })),
+      /** Given a hold this company's agent took: can it still be paid? */
+      holdActive: v.union(v.boolean(), v.null()),
     }),
   ),
   handler: async (ctx, args) => {
@@ -388,6 +391,10 @@ export const forAct = internalQuery({
     const offerId = args.offerId ? ctx.db.normalizeId("flashOffers", args.offerId) : null;
     const offer = offerId ? await ctx.db.get(offerId) : null;
     const moment = offer && offer.advertiserId === agent.advertiserId ? await ctx.db.get(offer.momentId) : null;
+    const holdId = args.holdId ? ctx.db.normalizeId("holds", args.holdId) : null;
+    const hold = holdId ? await ctx.db.get(holdId) : null;
+    const holdKey = hold?.agentKeyId ? await ctx.db.get(hold.agentKeyId) : null;
+    const holdActive = !args.holdId ? null : hold !== null && holdKey?.advertiserId === agent.advertiserId && hold.status === "active" && hold.expiresAt > args.now;
     return {
       enabled: agent.enabled,
       keyCiphertext: agent.keyCiphertext,
@@ -396,9 +403,10 @@ export const forAct = internalQuery({
       walletAddress: agent.walletAddress ?? null,
       company,
       standing: key?.standing ?? null,
-      spentTodayMinor: await spentTodayMinor(ctx, agent.agentKeyId, args.now),
+      spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, agent.advertiserId, args.now),
       balanceMinor: agent.balanceMinor ?? null,
       offer: offer && moment ? { valueMinor: moment.valueMinor ?? null, matchScore: offer.matchScore } : null,
+      holdActive,
     };
   },
 });
@@ -421,5 +429,22 @@ export const setWallet = internalMutation({
     const agent = await agentOf(ctx, args.advertiserId);
     if (agent) await ctx.db.patch(agent._id, { walletAddress: args.walletAddress, balanceMinor: args.balanceMinor, balanceAt: Date.now() });
     return null;
+  },
+});
+
+/**
+ * Take this company's one automatic faucet claim for the next 24 h (the CDP
+ * faucet allows about 10 USDC a day for the whole project). Atomic, so
+ * repeated setups or off/on toggles can't claim twice. True when taken.
+ */
+export const claimFaucetSlot = internalMutation({
+  args: { advertiserId: v.id("advertisers") },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const agent = await agentOf(ctx, args.advertiserId);
+    const now = Date.now();
+    if (!agent || (agent.faucetClaimedAt !== undefined && now - agent.faucetClaimedAt < FAUCET_EVERY_MS)) return false;
+    await ctx.db.patch(agent._id, { faucetClaimedAt: now });
+    return true;
   },
 });

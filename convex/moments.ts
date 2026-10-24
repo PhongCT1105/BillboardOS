@@ -70,6 +70,30 @@ export async function spentTodayMinor(ctx: QueryCtx, agentKeyId: Id<"agentKeys">
   return total;
 }
 
+/** Agent keys looked at when summing a company's spend today. */
+const MAX_COMPANY_KEYS_SCANNED = 200;
+
+/**
+ * Money a company committed in the last 24 h across all of its agent keys
+ * (active + converted holds): the daily budget's "spent". Counting per company,
+ * not per key, means a re-issued key (agent reconfigured or toggled off/on)
+ * never gets a fresh daily budget. Keys revoked or expired more than 24 h ago
+ * can't hold anything created since, so they are skipped.
+ */
+export async function spentTodayForAdvertiserMinor(ctx: QueryCtx, advertiserId: Id<"advertisers">, now: number): Promise<number> {
+  const keys = await ctx.db
+    .query("agentKeys")
+    .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+    .order("desc")
+    .take(MAX_COMPANY_KEYS_SCANNED);
+  let total = 0;
+  for (const k of keys) {
+    if ((k.revokedAt !== undefined && k.revokedAt < now - DAY) || k.expiresAt < now - DAY) continue;
+    total += await spentTodayMinor(ctx, k._id, now);
+  }
+  return total;
+}
+
 /** The spot: the rest of the current slot (>= 3 min left, available) else the next available slot. */
 async function pickSpot(ctx: QueryCtx, billboard: Doc<"billboards">, now: number) {
   const slots = await ctx.db
@@ -211,7 +235,7 @@ async function findTargets(
       const why = standingCovers(k.standing, {
         floorMinor: input.minimumMinor,
         relevantViewers: fit.relevantViewers,
-        spentTodayMinor: await spentTodayMinor(ctx, k._id, input.now),
+        spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, k.advertiserId, input.now),
       });
       if (why) {
         reason = why;
@@ -541,7 +565,7 @@ export const reply = internalMutation({
     /** Whole cents, within the key's standing instructions and budget cap. */
     async function checkAmount(amount: number): Promise<void> {
       if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 10_000_000) fail("INVALID_INPUT", "amountMinor must be whole cents for a counter");
-      const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayMinor(ctx, agent.key._id, now));
+      const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayForAdvertiserMinor(ctx, agent.key.advertiserId, now));
       if (why) fail("STANDING_INSTRUCTIONS", `Refused: ${why}`);
       await assertWithinBudget(ctx, agent.key, amount);
     }
@@ -643,6 +667,9 @@ export const paymentBlocked = internalMutation({
       .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
       .first();
     if (!moment) return { rehearsal: false };
+    // Only while the winner can still pay: a late or repeated report never touches a paid (or moved-on) moment.
+    const blockedHold = await ctx.db.get(args.holdId);
+    if (moment.status !== "awarded" || !blockedHold || blockedHold.status !== "active") return { rehearsal: false };
     const reason = args.reason.slice(0, 200);
     await ctx.db.patch(moment._id, { paymentBlocked: reason });
     await addMomentStep(ctx, moment, "payment_blocked", `Payment blocked: ${reason}`, "No money moved. Nothing is shown as paid without a settlement transaction.");

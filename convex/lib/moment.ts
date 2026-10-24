@@ -117,7 +117,7 @@ export function standingCovers(s: Standing | undefined, input: { floorMinor: num
 export function replyAllowed(s: Standing | undefined, amountMinor: number, spentTodayMinor: number): string | null {
   if (!s) return null;
   if (amountMinor > s.maxPricePerSpotMinor) return `over the key's standing max of $${(s.maxPricePerSpotMinor / 100).toFixed(2)} per spot`;
-  if (spentTodayMinor + amountMinor > s.dailyBudgetMinor) return "over the key's daily budget";
+  if (spentTodayMinor + amountMinor > s.dailyBudgetMinor) return "over the company's daily budget";
   return null;
 }
 

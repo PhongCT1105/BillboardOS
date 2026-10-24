@@ -11,6 +11,27 @@ import { onMomentPaid, releaseWorkspace } from "./lib/momentHooks";
 import { rankReplies, standingCovers } from "./lib/moment";
 import { decryptSecret, encryptSecret } from "./lib/demoCrypto";
 
+/**
+ * A stand-in for the CDP SDK, used only by tests that set the CDP env (all
+ * others leave it unset, so the agents never load the SDK). It records faucet
+ * claims instead of calling Coinbase.
+ */
+const cdpFake = vi.hoisted(() => ({ faucetClaims: [] as string[], usdcAtomic: 0n }));
+vi.mock("@coinbase/cdp-sdk", () => ({
+  CdpClient: class {
+    evm = {
+      getOrCreateAccount: async ({ name }: { name: string }) => ({
+        address: `0x${Array.from(name).map((c) => c.charCodeAt(0).toString(16)).join("").slice(0, 40).padEnd(40, "0")}`,
+      }),
+      listTokenBalances: async () => ({ balances: [{ token: { symbol: "USDC" }, amount: { amount: cdpFake.usdcAtomic, decimals: 6 } }] }),
+      requestFaucet: async ({ address, token }: { address: string; token: string }) => {
+        cdpFake.faucetClaims.push(`${token}:${address}`);
+        return { transactionHash: `0x${"ab".repeat(32)}` };
+      },
+    };
+  },
+}));
+
 // Sunday 2026-10-25, 09:07 PDT.
 const START = Date.UTC(2026, 9, 25, 16, 7);
 const SITE = "https://site.test";
@@ -1085,6 +1106,206 @@ describe("company agents", () => {
   });
   afterEach(() => {
     delete process.env.COMPANY_AGENT_DELAY_MS;
+    delete process.env.CDP_API_KEY_ID;
+    delete process.env.CDP_API_KEY_SECRET;
+    delete process.env.CDP_WALLET_SECRET;
+  });
+
+  /** LaunchKit already committed `amountMinor` today, through one of its agent keys. */
+  async function committedToday(w: Awaited<ReturnType<typeof liveWorldWithAgents>>, agentKeyId: Id<"agentKeys">, amountMinor: number) {
+    await w.t.run(async (ctx) => {
+      const slot = (await ctx.db
+        .query("slots")
+        .withIndex("by_billboard_and_startAt", (q) => q.eq("billboardId", w.led))
+        .order("desc")
+        .first())!;
+      const quoteId = await ctx.db.insert("quotes", {
+        workspaceId: w.workspaceId,
+        campaignId: w.launchKit.campaignId,
+        billboardId: w.led,
+        slotIds: [slot._id],
+        amountMinor,
+        currency: "USD",
+        expiresAt: Date.now() + 60_000,
+        pricingBasis: ["earlier spot today"],
+        confidence: "medium",
+        policyVersion: "test",
+        status: "open",
+        traceId: "test:earlier",
+        agentKeyId,
+      });
+      await ctx.db.insert("holds", {
+        workspaceId: w.workspaceId,
+        quoteId,
+        billboardId: w.led,
+        slotIds: [slot._id],
+        amountMinor,
+        currency: "USD",
+        expiresAt: Date.now() + 60_000,
+        status: "converted",
+        idempotencyKey: `test:earlier:${agentKeyId}`,
+        actor: "test",
+        traceId: "test:earlier",
+        agentKeyId,
+      });
+    });
+  }
+
+  test("turning the agent off and on doesn't reset today's budget", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents();
+    await w.setBalance(w.launchKit, 500);
+    await w.setBalance(w.rivet, 500);
+    // $4.50 of LaunchKit's $5.00 daily budget is already spent, under its first key.
+    const firstKey = (await w.agentRow(w.launchKit)).agentKeyId;
+    await committedToday(w, firstKey, 450);
+    await w.launchKit.customer.mutation(api.companyAgents.setEnabled, { enabled: false });
+    await w.launchKit.customer.mutation(api.companyAgents.setEnabled, { enabled: true });
+    const row = await w.agentRow(w.launchKit);
+    expect(row.agentKeyId).not.toBe(firstKey);
+    const newKey = await w.agentKey(w.launchKit);
+
+    // Shown and used per company: the fresh key starts at $4.50 spent, not $0.
+    expect((await w.launchKit.customer.query(api.companyAgents.mine, {}))!.spentTodayMinor).toBe(450);
+    const me = await w.t.query(internal.companyAgents.forAct, { advertiserId: w.launchKit.advertiserId, now: Date.now() });
+    expect(me!.spentTodayMinor).toBe(450);
+
+    // The camera announces (detect runs; the webhooks haven't been delivered yet).
+    await w.camera(w.led, 10);
+    vi.advanceTimersByTime(1);
+    await w.t.finishInProgressScheduledFunctions();
+    const [m] = await w.momentsOf(w.led);
+    expect(m.priceMinor).toBeGreaterThan(50);
+    const lk = (await w.offersOf(m._id)).find((o) => o.advertiserId === w.launchKit.advertiserId)!;
+    expect(lk.status).toBe("sent");
+    // Server side: the new key can't accept the opening price, it is over the company's daily budget.
+    const refused = await w.t.fetch(`/api/agent/offers/${lk._id}/reply`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${newKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "accept" }),
+    });
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: { code: string; message: string } }).error).toMatchObject({
+      code: "STANDING_INSTRUCTIONS",
+      message: expect.stringContaining("daily budget"),
+    });
+    // Agent side: its cap is the $0.50 left, so it counters at or under it.
+    await w.flush();
+    const replies = (await w.t.run(async (ctx) => ctx.db.query("auditEvents").take(500))).filter((a) => a.type === "moment.reply" && a.subjectId === lk._id);
+    expect(replies.length).toBeGreaterThanOrEqual(1);
+    expect(replies.every((a) => /^countered \$0\.[0-4]\d|^countered \$0\.50/.test(a.reason))).toBe(true);
+    expect((await w.offersOf(m._id)).find((o) => o._id === lk._id)!.replyAmountMinor!).toBeLessThanOrEqual(50);
+
+    // With $4.90 spent, the company isn't even offered a spot at the $0.25 minimum.
+    await committedToday(w, row.agentKeyId, 40);
+    await w.runAll();
+    vi.advanceTimersByTime(60_000);
+    await w.t.run(async (ctx) => {
+      const slots = await ctx.db.query("slots").take(200);
+      for (const sl of slots) if (sl.state !== "available") await ctx.db.patch(sl._id, { state: "available", holdId: undefined });
+    });
+    await w.camera(w.led, 12);
+    await w.runAll();
+    const all = await w.momentsOf(w.led);
+    const latest = all[all.length - 1];
+    expect(latest._id).not.toBe(m._id);
+    expect((await w.offersOf(latest._id)).some((o) => o.advertiserId === w.launchKit.advertiserId)).toBe(false);
+    expect(latest.steps.find((st) => st.key === "targeted")!.detail).toContain("daily budget exhausted");
+  });
+
+  test("the wallet faucet is claimed at most once a day per company, however often the agent is set up", async () => {
+    process.env.CDP_API_KEY_ID = "test-id";
+    process.env.CDP_API_KEY_SECRET = "test-secret";
+    process.env.CDP_WALLET_SECRET = "test-wallet-secret";
+    cdpFake.faucetClaims = [];
+    cdpFake.usdcAtomic = 0n; // under $1: the agent wants the faucet
+    const w = await liveWorldWithAgents(); // setup ran ensureWallet once for each company
+    const lkClaims = () => cdpFake.faucetClaims.filter((c) => c.startsWith("usdc:")).length;
+    expect(lkClaims()).toBe(2); // one per company
+    const before = await w.agentRow(w.launchKit);
+    expect(before.walletAddress).toMatch(/^0x[0-9a-f]{40}$/);
+    expect(before.balanceMinor).toBe(0);
+    expect(before.faucetClaimedAt).toBeDefined();
+
+    // Setting up again and toggling off/on schedule ensureWallet again, but never claim again today.
+    await w.launchKit.customer.mutation(api.companyAgents.setup, { campaignId: w.launchKit.campaignId, ...AGENT_SETUP });
+    await w.launchKit.customer.mutation(api.companyAgents.setEnabled, { enabled: false });
+    await w.launchKit.customer.mutation(api.companyAgents.setEnabled, { enabled: true });
+    await w.flush();
+    expect(lkClaims()).toBe(2);
+    expect((await w.agentRow(w.launchKit)).lastAction).toContain("faucet already claimed");
+
+    // A day later it may claim again.
+    vi.advanceTimersByTime(24 * 60 * 60_000 + 1);
+    await w.t.action(internal.companyAgentsNode.ensureWallet, { advertiserId: w.launchKit.advertiserId });
+    expect(lkClaims()).toBe(3);
+  });
+
+  /** liveWorld with LaunchKit's agent set up, but offers still going to the hand-issued keys: LaunchKit wins a sale. */
+  async function wonSale() {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    await w.launchKit.customer.mutation(api.companyAgents.setup, { campaignId: w.launchKit.campaignId, ...AGENT_SETUP });
+    await w.flush();
+    const { m, lk, rv } = await w.announce();
+    await w.reply(w.launchKit, lk, "accept");
+    await w.reply(w.rivet, rv, "pass");
+    const sold = await w.momentDoc(m._id);
+    expect(sold.status).toBe("awarded");
+    const hold = (await w.t.run(async (ctx) => ctx.db.get(sold.holdId!)))!;
+    const won = { type: "flash_won", offerId: lk, holdId: hold._id, amountMinor: hold.amountMinor, purchaseUrl: `${SITE}/a2a/hosts/${w.workspaceId}/purchases/${hold._id}` };
+    return { w, m: sold, hold, won };
+  }
+
+  test("a repeated flash_won for a paid hold does nothing, and a late payment-blocked report never touches a paid moment", async () => {
+    const { w, m, hold, won } = await wonSale();
+    // Paid (as the x402 route would record it).
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(hold._id, { status: "converted" });
+      const bookingId = await ctx.db.insert("bookings", {
+        workspaceId: w.workspaceId,
+        billboardId: w.led,
+        slotIds: hold.slotIds,
+        amountMinor: hold.amountMinor,
+        currency: "USD",
+        traceId: hold.traceId,
+        holdId: hold._id,
+        quoteId: hold.quoteId,
+        campaignId: w.launchKit.campaignId,
+        status: "confirmed",
+      });
+      await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: `0x${"cd".repeat(32)}`, amountMinor: hold.amountMinor });
+    });
+    const fetchesBefore = vi.mocked(fetch).mock.calls.length;
+    await w.t.action(internal.companyAgentsNode.act, { advertiserId: w.launchKit.advertiserId, payload: won });
+    await w.t.mutation(internal.moments.paymentBlocked, { holdId: hold._id, reason: "late report" });
+    const after = await w.momentDoc(m._id);
+    expect(after.status).toBe("paid");
+    expect(after.paymentBlocked).toBeUndefined();
+    expect(after.steps.some((s) => s.key === "payment_blocked")).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.length).toBe(fetchesBefore); // no probe, no payment
+    const row = (await w.t.run(async (ctx) =>
+      ctx.db
+        .query("companyAgents")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", w.launchKit.advertiserId))
+        .first(),
+    ))!;
+    expect(row.lastAction).toContain("no longer payable");
+  });
+
+  test("the agent never sends its key to a purchase URL off our deployment", async () => {
+    const { w, m, won } = await wonSale();
+    process.env.CDP_API_KEY_ID = "test-id";
+    process.env.CDP_API_KEY_SECRET = "test-secret";
+    process.env.CDP_WALLET_SECRET = "test-wallet-secret";
+    await w.t.action(internal.companyAgentsNode.act, {
+      advertiserId: w.launchKit.advertiserId,
+      payload: { ...won, purchaseUrl: "https://elsewhere.test/purchases/x" },
+    });
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).startsWith("https://elsewhere.test/"))).toBe(false);
+    const after = await w.momentDoc(m._id);
+    expect(after.paymentBlocked).toContain("not on this deployment");
+    expect(after.status).toBe("failed"); // nobody else joined
   });
 
   test("setup issues an encrypted key with standing and our webhook, and sets the profile", async () => {
