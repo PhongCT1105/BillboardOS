@@ -5,6 +5,7 @@ import { useHashRoute } from "./lib/hooks";
 import { ConsolePage } from "./console/ConsolePage";
 import { PlayerPage } from "./player/PlayerPage";
 import { BookPage } from "./book/BookPage";
+import { FinancePage } from "./finance/FinancePage";
 
 export function App() {
   const route = useHashRoute();
@@ -26,6 +27,9 @@ export function App() {
             <NavLink href="#/console" active={route === "/console"}>
               Console
             </NavLink>
+            <NavLink href="#/finance" active={route === "/finance"}>
+              Finance
+            </NavLink>
             <NavLink href="#/book" active={route === "/book"}>
               Book a slot
             </NavLink>
@@ -42,7 +46,7 @@ export function App() {
           </nav>
         </div>
       </header>
-      {route === "/book" ? <BookPage /> : <ConsolePage />}
+      {route === "/book" ? <BookPage /> : route === "/finance" ? <FinancePage /> : <ConsolePage />}
     </div>
   );
 }

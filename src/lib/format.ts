@@ -41,3 +41,14 @@ export function errorMessage(err: unknown): string {
   }
   return err instanceof Error ? err.message : "Something went wrong";
 }
+
+const day = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+
+export function shortDate(ms: number): string {
+  return day.format(ms);
+}
+
+/** "partially_applied" -> "partially applied" */
+export function words(value: string): string {
+  return value.replaceAll("_", " ");
+}

@@ -20,7 +20,7 @@ export function ExceptionList({ exceptions }: { exceptions: Doc<"financeExceptio
       {exceptions === undefined ? (
         <div className="mt-4 h-24 animate-pulse rounded bg-panel" />
       ) : exceptions.length === 0 ? (
-        <p className="mt-3 text-muted">Nothing needs review. Every payment matched a live hold.</p>
+        <p className="mt-3 text-muted">Nothing needs review.</p>
       ) : (
         <ul className="mt-4 flex flex-col gap-4">
           {exceptions.map((ex) => {
