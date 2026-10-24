@@ -6,6 +6,7 @@ import { modules, signedInOperator, joinCompanies } from "./test.setup";
 import { combineStages, effectiveMultiplier, priceQuote } from "./lib/pricing";
 import { eventStage, marketStage, scarcityStage } from "./lib/stages";
 import { matchScore } from "./lib/match";
+import { recordSaleHistory } from "./lib/marketHistory";
 
 // 09:07 PDT. slots[0] = 09:15 local ... slots[4] = 10:15 local.
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -198,5 +199,30 @@ describe("billboards.recommend", () => {
     expect(rows[0].explanation).toContain("software 60%");
     const finance = await t.query(api.billboards.recommend, { targetAudience: { finance: 1 } });
     expect(finance[0].matchScore).toBe(0);
+  });
+  test("a 5-minute live sale is recorded as its 15-minute equivalent", async () => {
+    const { t, seed, slots } = await setup();
+    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[4]._id] });
+    const h = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "partial", actor: "buyer" });
+    await t.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: `0x${"9".repeat(64)}`,
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:partial",
+    });
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("priceHistory").collect()) await ctx.db.delete(row._id);
+      const booking = (await ctx.db.query("bookings").collect())[0];
+      await ctx.db.patch(booking._id, { amountMinor: 100 });
+      const fresh = (await ctx.db.get(booking._id))!;
+      await recordSaleHistory(ctx, fresh, "auction", START, 5 * MIN);
+    });
+    const history = await t.run(async (ctx) => ctx.db.query("priceHistory").collect());
+    expect(history).toHaveLength(1);
+    expect(history[0].unitPriceMinor).toBe(300);
+    expect(history[0].kind).toBe("auction");
   });
 });

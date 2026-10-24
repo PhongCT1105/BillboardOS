@@ -291,7 +291,16 @@ export async function applyVerifiedPayment(
 
   // Market evidence for future quotes (market-history stage).
   const booked = await ctx.db.get(bookingId);
-  if (booked) await recordSaleHistory(ctx, booked, hold.auctionId ? "auction" : "posted", now);
+  const liveMoment = await ctx.db.query("moments").withIndex("by_hold", (q) => q.eq("holdId", hold._id)).first();
+  if (booked) {
+    await recordSaleHistory(
+      ctx,
+      booked,
+      liveMoment || hold.auctionId ? "auction" : "posted",
+      now,
+      liveMoment ? liveMoment.spotEndAt - liveMoment.spotStartAt : undefined,
+    );
+  }
   await markAuctionSettled(ctx, hold, bookingId);
 
   // Creative already approved (platform-wide, or ready for this host's screens) -> straight to scheduled (P0-07, ADR 0006).
