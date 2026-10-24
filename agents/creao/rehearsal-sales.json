@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "traceId": "creao-rehearsal-001",
+  "phase": "qualify",
+  "researchEnabled": false,
+  "snapshot": {
+    "id": "synthetic-snapshot-001",
+    "mode": "rehearsal",
+    "dataLabel": "SIMULATED: all screen, audience, event, company and campaign data in this rehearsal are fictional.",
+    "observedAt": "2026-10-24T18:00:00Z",
+    "validUntil": "2026-10-24T18:20:00Z",
+    "screen": {"id": "demo-screen-1", "name": "Demo Conference Screen", "city": "San Francisco", "audienceTags": {"developers": 0.7, "local_visitors": 0.3}},
+    "audience": {"peoplePer15Min": 30, "baselinePer15Min": 15, "confidence": 0.85, "source": "simulated"},
+    "event": {"name": "Fictional Developer Meetup", "source": "simulated", "audience": "developers and startup founders"},
+    "slots": [{"id": "demo-slot-1", "startAt": "2026-10-24T19:00:00Z", "endAt": "2026-10-24T19:15:00Z", "state": "available", "screenPriceMinor": 4000, "floorMinor": 2000, "ceilingMinor": 8000, "auctionAllowed": true, "auctionMinLeadSeconds": 660}],
+    "campaigns": [
+      {"id": "demo-devtools", "company": "Demo DevTools", "status": "active", "targetAudience": ["developers"], "targetCity": "San Francisco", "creativeApproved": true, "agentConnected": true, "offersOptIn": true, "budgetRemainingMinor": 30000, "maxPriceMinor": 6500, "companyEvidence": "Fictional growing developer-tools startup; no verified external brand research."},
+      {"id": "demo-coffee", "company": "Demo Corner Coffee", "status": "active", "targetAudience": ["local_visitors", "developers"], "targetCity": "San Francisco", "creativeApproved": true, "agentConnected": true, "offersOptIn": true, "budgetRemainingMinor": 9000, "maxPriceMinor": 5000, "companyEvidence": "Fictional cafe within walking distance of this screen."},
+      {"id": "demo-enterprise", "company": "Demo Global Enterprise", "status": "active", "targetAudience": ["developers"], "targetCity": "San Francisco", "creativeApproved": true, "agentConnected": false, "offersOptIn": false, "budgetRemainingMinor": 500000, "maxPriceMinor": 20000, "companyEvidence": "Fictional large company, but no connected buying agent or outreach consent."}
+    ],
+    "policy": {"companyMultiplierMin": 0.75, "companyMultiplierMax": 1.5, "maxTargets": 3, "sellerWriteApiConnected": false, "externalOutreachAuthorized": false}
+  }
+}
