@@ -57,3 +57,4 @@ nav:
   - Decisions:
       - 0001 Scope: decisions/0001-scope.md
       - 0002 Sponsor-native stack: decisions/0002-sponsor-native-stack.md
+      - 0003 Pricing harness and bidding: decisions/0003-pricing-harness-and-bidding.md
