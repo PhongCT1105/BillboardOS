@@ -10,6 +10,12 @@ const app = defineApp({
      * until it is set: `npx convex env set INTERNAL_API_SECRET <value>`.
      */
     INTERNAL_API_SECRET: v.optional(v.string()),
+    /** Server-only CREAO API Trigger configuration. */
+    CREAO_API_BASE_URL: v.optional(v.string()),
+    CREAO_SALES_AGENT_ID: v.optional(v.string()),
+    CREAO_SALES_API_KEY: v.optional(v.string()),
+    CREAO_REVENUE_AGENT_ID: v.optional(v.string()),
+    CREAO_REVENUE_API_KEY: v.optional(v.string()),
   },
 });
 

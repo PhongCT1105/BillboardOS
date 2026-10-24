@@ -11,6 +11,7 @@ import { ActivityFeed } from "./ActivityFeed";
 import { AddScreenForm } from "../auth/Onboarding";
 import { LiveAuctions } from "../auctions/LiveAuctions";
 import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
+import { CreaoRehearsalPanel } from "./CreaoRehearsalPanel";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
@@ -28,6 +29,7 @@ export function ConsolePage() {
           <p className="mt-2 max-w-[60ch] text-muted">Add your first screen; 12 hours of 15-minute slots go on sale right away.</p>
         </div>
         <AddScreenForm />
+        <CreaoRehearsalPanel />
       </main>
     );
   }
@@ -80,6 +82,7 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
   return (
     <div className="flex flex-col gap-10">
       <KpiStrip summary={row} audience={audience} />
+      <CreaoRehearsalPanel />
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex flex-col gap-10">
           <LiveAuctions billboardId={billboardId} />
