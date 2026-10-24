@@ -64,7 +64,7 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
         <Fact
           label="Live crowd (trailing 15 min)"
           value={live.screen.liveCrowd === null ? "no reading" : String(live.screen.liveCrowd)}
-          tag={live.screen.liveCrowdSource === "simulated" ? "SIMULATED" : live.screen.liveCrowdSource === "camera" ? "camera" : undefined}
+          tag={live.screen.liveCrowdSource === "camera" ? "camera" : undefined}
         />
         <Fact
           label="Event"
@@ -86,7 +86,7 @@ function Empty() {
   return (
     <div className="rounded-xl border border-dashed border-line px-6 py-16 text-center">
       <p className="text-lg">Waiting for a crowd.</p>
-      <p className="mt-1 text-sm text-muted">The seller agent fires when relevant viewers cross the threshold. Use the camera sensor, or the labeled simulation.</p>
+      <p className="mt-1 text-sm text-muted">The seller agent fires when relevant viewers cross the threshold. Point the camera sensor at the crowd.</p>
     </div>
   );
 }
@@ -96,7 +96,7 @@ function Fact(props: { label: string; value: string; tag?: string }) {
     <div className="rounded-lg border border-line bg-panel px-4 py-3">
       <p className="text-xs text-muted">{props.label}</p>
       <p className="mt-1 truncate text-xl font-semibold">{props.value}</p>
-      {props.tag && <p className={`mt-0.5 text-xs font-medium ${props.tag === "SIMULATED" ? "text-amber-300" : "text-faint"}`}>{props.tag}</p>}
+      {props.tag && <p className="mt-0.5 text-xs font-medium text-faint">{props.tag}</p>}
     </div>
   );
 }
@@ -148,7 +148,6 @@ function MomentDetail({ m, now, playing }: { m: Moment; now: number; playing: Fu
         <section className="rounded-xl border border-line bg-panel p-5">
           <p className="text-xs tracking-widest text-muted uppercase">Seller agent reasoning</p>
           <p className="mt-2 text-lg leading-snug">{m.reasoning}</p>
-          {m.trigger === "simulated" && <p className="mt-2 text-xs font-semibold text-amber-300">Triggered by a SIMULATED crowd reading</p>}
         </section>
 
         <section className="rounded-xl border border-line bg-panel p-5">
@@ -162,7 +161,6 @@ function MomentDetail({ m, now, playing }: { m: Moment; now: number; playing: Fu
                   <div className="min-w-0">
                     <p className="font-medium">
                       {o.company}
-                      {o.simulatedAgent && <span className="ml-2 rounded border border-line px-1.5 py-0.5 text-[11px] font-normal text-muted">simulated customer agent</span>}
                     </p>
                     <p className="text-xs text-faint">
                       {Math.round(o.matchScore * 100)}% audience match · ~{o.relevantViewers} relevant · webhook {o.deliveryStatus}
@@ -187,7 +185,7 @@ function MomentDetail({ m, now, playing }: { m: Moment; now: number; playing: Fu
               <li key={i} className="grid grid-cols-[64px_minmax(0,1fr)] gap-3 text-sm">
                 <span className="tabular text-right font-mono text-muted">+{((s.at - m.startedAt) / 1000).toFixed(2)}s</span>
                 <span>
-                  <span className={s.label.includes("REHEARSAL") || s.label.includes("SIMULATED") ? "font-semibold text-amber-300" : "text-fg"}>{s.label}</span>
+                  <span className="text-fg">{s.label}</span>
                   {s.detail && <span className="block text-xs text-faint">{s.detail}</span>}
                 </span>
               </li>
@@ -209,11 +207,6 @@ function MomentDetail({ m, now, playing }: { m: Moment; now: number; playing: Fu
               ) : (
                 <p className="mt-1 truncate font-mono text-sm text-muted">{m.paymentTx}</p>
               )}
-            </>
-          ) : m.paymentMode === "rehearsal" ? (
-            <>
-              <p className="mt-2 text-2xl font-semibold text-amber-300">REHEARSAL (simulated) payment</p>
-              <p className="mt-1 text-sm text-muted">No money moved. {m.paymentBlocked ? `Real payment was blocked: ${m.paymentBlocked}.` : ""}</p>
             </>
           ) : m.paymentBlocked ? (
             <>
@@ -275,9 +268,7 @@ function History({ rows }: { rows: Live["history"] }) {
                 <td className="px-4 py-2">{r.relevantViewers}</td>
                 <td className="px-4 py-2">{r.winner ?? <span className="text-faint">{STATUS_LABEL[r.status] ?? r.status}</span>}</td>
                 <td className="tabular px-4 py-2 text-right font-mono">{r.paidMinor !== null ? money(r.paidMinor) : "-"}</td>
-                <td className={`px-4 py-2 ${r.paymentMode === "rehearsal" ? "font-semibold text-amber-300" : ""}`}>
-                  {r.paymentMode === "rehearsal" ? "REHEARSAL (simulated)" : r.paymentMode === "x402" ? "x402" : "-"}
-                </td>
+                <td className="px-4 py-2">{r.paymentMode === "x402" ? "x402" : "-"}</td>
                 <td className="tabular px-4 py-2 text-right font-mono">{r.durationMs !== null ? `${(r.durationMs / 1000).toFixed(1)} s` : "-"}</td>
               </tr>
             ))}

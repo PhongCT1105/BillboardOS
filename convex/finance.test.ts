@@ -685,7 +685,15 @@ describe("demo reset", () => {
     });
     const q1 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
     const h1 = await t.mutation(api.holds.create, { quoteId: q1.quoteId, idempotencyKey: "b1", actor: "buyer" });
-    await t.mutation(api.payments.recordManual, { holdId: h1.holdId, note: "demo" });
+    await t.mutation(internal.payments.recordVerified, {
+      holdId: h1.holdId,
+      provider: "x402",
+      externalRef: "0x64656d6f00000000000000000000000000000000000000000000000000000000",
+      amountMinor: h1.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:demo",
+    });
     const q2 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id, slots[2]._id] });
     await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "b2", actor: "buyer" });
 

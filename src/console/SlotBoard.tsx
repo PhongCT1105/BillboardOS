@@ -82,7 +82,6 @@ export function SlotBoard({ slots }: { slots: Doc<"slots">[] | undefined }) {
 }
 
 function SlotDetail({ slot, onClose }: { slot: Doc<"slots">; onClose: () => void }) {
-  const recordManual = useMutation(api.payments.recordManual);
   const openAuction = useMutation(api.auctions.open);
 
   async function startAuction() {
@@ -99,26 +98,6 @@ function SlotDetail({ slot, onClose }: { slot: Doc<"slots">; onClose: () => void
   }
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
-
-  async function markPaid() {
-    if (!slot.holdId) return;
-    setBusy(true);
-    setMessage(null);
-    try {
-      const result = await recordManual({ holdId: slot.holdId, note: "Operator console" });
-      setMessage(
-        result.outcome === "booked"
-          ? { tone: "ok", text: "Recorded as a simulated manual payment. Slot booked." }
-          : result.outcome === "exception"
-            ? { tone: "error", text: `Payment opened a finance exception: ${result.kind.replaceAll("_", " ")}.` }
-            : { tone: "error", text: result.message },
-      );
-    } catch (err) {
-      setMessage({ tone: "error", text: errorMessage(err) });
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="fade-in mt-4 flex flex-col gap-3 rounded-lg border border-line bg-panel p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -140,16 +119,6 @@ function SlotDetail({ slot, onClose }: { slot: Doc<"slots">; onClose: () => void
             className="rounded-md border border-accent px-4 py-2 text-sm text-fg transition-transform active:scale-[0.98] disabled:opacity-60"
           >
             Open auction
-          </button>
-        )}
-        {slot.state === "held" && slot.holdId && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={markPaid}
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink transition-transform active:scale-[0.98] disabled:opacity-60"
-          >
-            {busy ? "Recording" : "Record manual payment"}
           </button>
         )}
         <button

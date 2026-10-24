@@ -40,10 +40,6 @@ export async function creativeReady(
   return approval !== null;
 }
 
-export function isRehearsalRef(externalRef: string) {
-  return externalRef.startsWith("rehearsal:");
-}
-
 /** Screens looked at when picking the next queued one. */
 const MAX_SCREENS_SCANNED = 200;
 
@@ -80,24 +76,21 @@ export async function onMomentPaid(
     .withIndex("by_hold", (q) => q.eq("holdId", holdId))
     .first();
   if (!moment) return;
-  const rehearsal = isRehearsalRef(payment.externalRef);
   const now = Date.now();
   await ctx.db.patch(moment._id, {
     status: "paid",
     bookingId,
     paidMinor: payment.amountMinor,
-    paymentMode: rehearsal ? "rehearsal" : "x402",
-    paymentTx: rehearsal ? undefined : payment.externalRef,
+    paymentMode: "x402",
+    paymentTx: payment.externalRef,
     paymentNetwork: payment.network,
   });
   await addMomentStep(
     ctx,
     moment,
     "settled",
-    rehearsal ? "REHEARSAL (simulated) payment recorded" : "Settled over x402",
-    rehearsal
-      ? `No money moved: rehearsal settlement for $${(payment.amountMinor / 100).toFixed(2)} (host toggle).`
-      : `$${(payment.amountMinor / 100).toFixed(2)} USDC, tx ${payment.externalRef}${payment.network ? ` on ${payment.network}` : ""}`,
+    "Settled over x402",
+    `$${(payment.amountMinor / 100).toFixed(2)} USDC, tx ${payment.externalRef}${payment.network ? ` on ${payment.network}` : ""}`,
     now,
   );
   // No dead air: the next spot on this screen goes on sale a minute before this one ends.
@@ -114,12 +107,10 @@ export async function onMomentPaid(
   await recordAudit(ctx, {
     workspaceId: moment.workspaceId,
     traceId: `moment:${moment._id}`,
-    actor: rehearsal ? "REHEARSAL (simulated) payment" : `payment:${payment.provider}`,
+    actor: `payment:${payment.provider}`,
     type: "moment.paid",
     subjectId: moment._id,
-    reason: rehearsal
-      ? `REHEARSAL (simulated) payment of $${(payment.amountMinor / 100).toFixed(2)}; no money moved`
-      : `Flash spot paid $${(payment.amountMinor / 100).toFixed(2)} over x402 (tx ${payment.externalRef})`,
+    reason: `Flash spot paid $${(payment.amountMinor / 100).toFixed(2)} over x402 (tx ${payment.externalRef})`,
   });
 }
 

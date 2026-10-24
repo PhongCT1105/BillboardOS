@@ -40,7 +40,6 @@ function FlashBuys() {
                 </p>
                 <p className="text-xs text-faint">
                   {ago(b.at, now)}
-                  {b.simulatedAgent && " · simulated customer agent"}
                   {url && (
                     <>
                       {" · "}
@@ -51,9 +50,7 @@ function FlashBuys() {
                   )}
                 </p>
               </div>
-              {b.paymentMode === "rehearsal" ? (
-                <Pill tone="accent">REHEARSAL (simulated) payment</Pill>
-              ) : paid ? (
+              {paid ? (
                 <Pill tone="ok">paid over x402</Pill>
               ) : (
                 <Pill tone={won ? "accent" : "muted"}>{b.status}</Pill>

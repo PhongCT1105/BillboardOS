@@ -30,6 +30,9 @@ export const record = mutation({
   handler: async (ctx, args) => {
     // The sensor laptop signs in as a member of the screen's workspace.
     await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
+    if (args.source === "simulated") {
+      throw new ConvexError({ code: "INVALID_INPUT", message: 'source "simulated" is no longer accepted: only camera readings count' });
+    }
     if (
       !Number.isSafeInteger(args.countEstimate) ||
       args.countEstimate < 0 ||
@@ -106,6 +109,9 @@ export const addArrivals = mutation({
   handler: async (ctx, args) => {
     // The sensor laptop signs in as a member of the screen's workspace.
     await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
+    if (args.source === "simulated") {
+      throw new ConvexError({ code: "INVALID_INPUT", message: 'source "simulated" is no longer accepted: only camera readings count' });
+    }
     if (!Number.isSafeInteger(args.arrivals) || args.arrivals < 0 || args.arrivals > MAX_ARRIVALS_PER_CALL) {
       throw new ConvexError({
         code: "INVALID_INPUT",

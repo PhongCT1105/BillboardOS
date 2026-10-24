@@ -16,7 +16,6 @@
     "seed": "convex run seed:demo && convex run seed:pricingDemo",
     "buyer": "tsx server/buyer-agent.ts",
     "postinstall": "node -e \"require('fs').cpSync('node_modules/@mediapipe/tasks-vision/wasm','public/mediapipe',{recursive:true})\"",
-    "auction:demo": "tsx server/auction-agents.ts",
     "webhook:listen": "tsx server/webhook-receiver.ts",
     "a2a:demo": "tsx server/a2a-demo.ts",
     "deploy:web": "npx @convex-dev/static-hosting upload --build",

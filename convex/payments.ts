@@ -1,5 +1,5 @@
 import { v, type Infer } from "convex/values";
-import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
+import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { financeExceptionKind, paymentProvider } from "./schema";
 import { recordAudit } from "./lib/audit";
@@ -8,7 +8,6 @@ import { creativeReady, onMomentPaid } from "./lib/momentHooks";
 import { scheduleBooking } from "./lib/scheduling";
 import { recordSaleHistory } from "./lib/marketHistory";
 import { markAuctionSettled } from "./auctions";
-import { requireWorkspaceMember } from "./lib/tenancy";
 
 /**
  * Result of reporting a verified payment. Discriminated on `outcome`:
@@ -96,9 +95,8 @@ type PaymentInput = {
 };
 
 /**
- * Shared core of `recordVerified` and `recordManual`: decide book vs.
- * exception for a payment that has already been verified (or, for manual,
- * asserted by an operator). Idempotent on `externalRef`.
+ * Core of `recordVerified`: decide book vs.
+ * exception for a payment that has already been verified. Idempotent on `externalRef`.
  */
 export async function applyVerifiedPayment(
   ctx: MutationCtx,
@@ -309,9 +307,8 @@ export async function applyVerifiedPayment(
 }
 
 /**
- * Record a payment that an external verifier (x402 facilitator, Nessie,
- * manual) has already verified, and confirm the booking if and only if the
- * hold is still valid and the amount/asset match the quote.
+ * Record a payment that an external verifier (x402 facilitator, Nessie) has already
+ * verified, and confirm the booking if and only if the hold is still valid and the amount/asset match the quote.
  *
  * Idempotent on `externalRef`: a replayed report returns the original
  * outcome and never creates a second booking or payment.
@@ -336,42 +333,5 @@ export const recordVerified = internalMutation({
       actor: `payment:${args.provider}`,
       reasonPrefix: "Verified payment ",
     });
-  },
-});
-
-/**
- * Operator fallback until x402 is live: mark a hold as paid with a MANUAL
- * (simulated) payment of exactly the held amount in USD. Goes through the
- * same rules as verified payments (expired hold -> exception, replay-safe via
- * externalRef `manual:<holdId>`). Clearly labeled in the audit log.
- * Operator only (signed-in operator; identity recorded as the audit actor).
- */
-export const recordManual = mutation({
-  args: { holdId: v.id("holds"), note: v.string() },
-  returns: recordVerifiedResult,
-  handler: async (ctx, args): Promise<RecordVerifiedResult> => {
-    const note = args.note.trim().slice(0, 500);
-    const hold = await ctx.db.get(args.holdId);
-    if (!hold) {
-      return { outcome: "rejected", code: "HOLD_NOT_FOUND", message: "Hold not found" };
-    }
-    // Only a member of the workspace that owns the screen records cash for it.
-    const operator = await requireWorkspaceMember(ctx, hold.workspaceId);
-    const result = await applyVerifiedPayment(
-      ctx,
-      {
-        holdId: args.holdId,
-        provider: "manual",
-        externalRef: `manual:${args.holdId}`,
-        amountMinor: hold.amountMinor,
-        asset: "USD",
-        idempotencyKey: `manual:${args.holdId}`,
-      },
-      {
-        actor: operator.actor,
-        reasonPrefix: `MANUAL (simulated) payment${note ? ` [${note}]` : ""}: `,
-      },
-    );
-    return result;
   },
 });

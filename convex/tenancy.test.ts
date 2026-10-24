@@ -178,10 +178,15 @@ describe("host isolation", () => {
 
     const q = await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slot] });
     const hold = await m.custA.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "hA", actor: "web" });
-    expect(await errorCode(m.hostB.mutation(api.payments.recordManual, { holdId: hold.holdId, note: "x" }))).toBe(
-      "NOT_WORKSPACE_MEMBER",
-    );
-    await expect(m.hostA.mutation(api.payments.recordManual, { holdId: hold.holdId, note: "ok" })).resolves.toMatchObject({
+    await expect(m.anon.mutation(internal.payments.recordVerified, {
+      holdId: hold.holdId,
+      provider: "x402",
+      externalRef: "0x74656e616e63792d684100000000000000000000000000000000000000000000",
+      amountMinor: hold.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:tenancy-hA",
+    })).resolves.toMatchObject({
       outcome: "booked",
     });
 
@@ -295,11 +300,19 @@ describe("tenancy migration", () => {
     const seed = await op.mutation(internal.seed.demo, {});
     await op.mutation(internal.seed.finance, {});
     await joinCompanies(op);
-    // Produce rows in many tables: quote, hold, manual payment, booking, auction, reconciliation, collections.
+    // Produce rows in many tables: quote, hold, x402 payment, booking, auction, reconciliation, collections.
     const slots = await t.query(api.slots.listForBillboard, { billboardId: seed.billboardId, from: START, to: START + 24 * 60 * MIN });
     const q = await op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] });
     const h = await op.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "m1", actor: "web" });
-    await op.mutation(api.payments.recordManual, { holdId: h.holdId, note: "pre-migration" });
+    await op.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: "0x7072652d6d6967726174696f6e00000000000000000000000000000000000000",
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:pre-migration",
+    });
     await op.mutation(api.auctions.open, { slotIds: [slots[12]._id] });
     await op.mutation(internal.reconciliation.run, {});
     await op.mutation(internal.collections.plan, {});

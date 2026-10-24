@@ -874,7 +874,7 @@ function paymentLabel(payment: ReceiptPayment): string {
   if (payment.provider === "x402") {
     return `${(payment.amountMinor / 100).toFixed(2)} USDC${payment.network ? ` on ${networkName(payment.network)}` : ""}`;
   }
-  if (payment.provider === "manual") return "Simulated manual payment, recorded by the operator";
+  if (payment.provider === "manual") return "Legacy manual record";
   return `Bank payment of ${money(payment.amountMinor)}`;
 }
 

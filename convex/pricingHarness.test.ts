@@ -160,11 +160,19 @@ describe("quotes use every screen stage", () => {
 
   test("market history anchors later quotes in the same hour band", async () => {
     const { t, seed, slots } = await setup();
-    // Sell three late-morning slots at a premium via the manual payment path.
+    // Sell three late-morning slots at a premium via the x402 settlement path.
     for (const [i, key] of [[4, "a"], [5, "b"], [6, "c"]] as const) {
       const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[i]._id] });
       const h = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: key, actor: "buyer" });
-      await t.mutation(api.payments.recordManual, { holdId: h.holdId, note: "history" });
+      await t.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: `0x${key.charCodeAt(0).toString(16).padStart(64, "0")}`,
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: `x402:history-${key}`,
+    });
     }
     const history = await t.run(async (ctx) => ctx.db.query("priceHistory").collect());
     expect(history).toHaveLength(3);

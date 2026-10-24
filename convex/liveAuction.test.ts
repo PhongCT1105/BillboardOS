@@ -4,6 +4,7 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import * as momentsModule from "./moments";
+import * as paymentsModule from "./payments";
 import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { ensureUpcomingSlots } from "./lib/inventory";
 import { BIDDING_MS, EXTENSION_MS, MAX_EXTENSIONS, NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS, minNextLiveBid } from "./lib/liveAuction";
@@ -545,12 +546,26 @@ describe("announce", () => {
     expect((await w.t.mutation(internal.moments.detectFor, { billboardId: w.led, trigger: "arrivals" })).reason).toBe("holding");
   });
 
-  test("simulateCrowd is gone", async () => {
-    expect((momentsModule as Record<string, unknown>).simulateCrowd).toBeUndefined();
+  test("no simulated, rehearsal or manual path remains", async () => {
     const w = await liveWorld();
-    // `api` is a proxy that names any function, so check the deployment has none by that name.
-    const ref = (api.moments as unknown as Record<string, typeof api.moments.setRehearsalSettlement>).simulateCrowd;
-    await expect(w.host.mutation(ref, { billboardId: w.led } as never)).rejects.toThrow();
+    const exports = (m: object) => Object.keys(m);
+    expect(exports(momentsModule)).not.toContain("simulateCrowd");
+    expect(exports(momentsModule)).not.toContain("setRehearsalSettlement");
+    expect(exports(paymentsModule)).not.toContain("recordManual");
+    expect(Object.keys(modules).some((k) => /demoAgents/.test(k))).toBe(false);
+
+    const codeOf = (e: unknown) => (e as { data?: { code?: string } }).data?.code;
+    const viaAddArrivals = await w.host
+      .mutation(api.audience.addArrivals, { billboardId: w.led, arrivals: 10, peakInView: 4, confidence: 1, source: "simulated" })
+      .catch((e: unknown) => e);
+    expect(codeOf(viaAddArrivals)).toBe("INVALID_INPUT");
+    const viaRecord = await w.host
+      .mutation(api.audience.record, { billboardId: w.led, countEstimate: 10, confidence: 1, source: "simulated" })
+      .catch((e: unknown) => e);
+    expect(codeOf(viaRecord)).toBe("INVALID_INPUT");
+
+    const res = await w.t.fetch("/demo-agents/x/webhook", { method: "POST", body: "{}" });
+    expect(res.status).toBe(404);
   });
 });
 

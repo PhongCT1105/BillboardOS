@@ -101,7 +101,6 @@ export function PaymentCard(props: {
         </div>
       )}
 
-      <p className="text-[13px] leading-relaxed text-faint">No x402 wallet handy? The operator can record a simulated payment from the console.</p>
       {props.onRelease && (
         <button
           type="button"

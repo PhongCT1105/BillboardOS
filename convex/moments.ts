@@ -21,7 +21,6 @@ import {
   type Standing,
 } from "./lib/moment";
 import { addMomentStep, creativeReady, releaseWorkspace } from "./lib/momentHooks";
-import { applyVerifiedPayment } from "./payments";
 import { closeJoinCore, negotiationReply } from "./liveAuction";
 import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
 
@@ -655,41 +654,24 @@ export const markPaymentStarted = internalMutation({
 
 /**
  * The winner's agent could not pay (no x402 config or no wallet). Recorded as
- * blocked; never faked. If the host turned on rehearsal settlement, settle the
- * hold with a labeled REHEARSAL (simulated) payment so the flow can be rehearsed.
+ * blocked; never faked. Nothing is shown as paid without a settlement transaction.
  */
 export const paymentBlocked = internalMutation({
   args: { holdId: v.id("holds"), reason: v.string() },
-  returns: v.object({ rehearsal: v.boolean() }),
+  returns: v.null(),
   handler: async (ctx, args) => {
     const moment = await ctx.db
       .query("moments")
       .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
       .first();
-    if (!moment) return { rehearsal: false };
+    if (!moment) return null;
     // Only while the winner can still pay: a late or repeated report never touches a paid (or moved-on) moment.
     const blockedHold = await ctx.db.get(args.holdId);
-    if (moment.status !== "awarded" || !blockedHold || blockedHold.status !== "active") return { rehearsal: false };
+    if (moment.status !== "awarded" || !blockedHold || blockedHold.status !== "active") return null;
     const reason = args.reason.slice(0, 200);
     await ctx.db.patch(moment._id, { paymentBlocked: reason });
     await addMomentStep(ctx, moment, "payment_blocked", `Payment blocked: ${reason}`, "No money moved. Nothing is shown as paid without a settlement transaction.");
-    const workspace = (await ctx.db.get(moment.workspaceId))!;
-    if (!workspace.rehearsalSettlement) return { rehearsal: false };
-    const hold = await ctx.db.get(args.holdId);
-    if (!hold || hold.status !== "active") return { rehearsal: false };
-    await applyVerifiedPayment(
-      ctx,
-      {
-        holdId: hold._id,
-        provider: "manual",
-        externalRef: `rehearsal:${hold._id}`,
-        amountMinor: hold.amountMinor,
-        asset: "USD",
-        idempotencyKey: `rehearsal:${hold._id}`,
-      },
-      { actor: "REHEARSAL (simulated) payment", reasonPrefix: "REHEARSAL (simulated) payment, no money moved: " },
-    );
-    return { rehearsal: true };
+    return null;
   },
 });
 
@@ -748,25 +730,6 @@ export const updateSettings = mutation({
       type: "workspace.policy_changed",
       subjectId: args.workspaceId,
       reason: `Moment detector ${args.enabled ? "on" : "off"}: ${s.minPeopleInView}+ people in view, ${args.joinWindowSeconds}s join window, ${Math.round(s.minMatch * 100)}% match`,
-    });
-    return null;
-  },
-});
-
-/** Owner-only, OFF by default. When payments are unavailable, settle winners with a labeled REHEARSAL (simulated) payment. */
-export const setRehearsalSettlement = mutation({
-  args: { workspaceId: v.id("workspaces"), enabled: v.boolean() },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const owner = await requireWorkspaceMember(ctx, args.workspaceId, "owner");
-    await ctx.db.patch(args.workspaceId, { rehearsalSettlement: args.enabled });
-    await recordAudit(ctx, {
-      workspaceId: args.workspaceId,
-      traceId: `workspace:${args.workspaceId}`,
-      actor: owner.actor,
-      type: "workspace.policy_changed",
-      subjectId: args.workspaceId,
-      reason: `REHEARSAL (simulated) settlement ${args.enabled ? "ON: blocked flash-spot payments are settled as simulated, no money moves" : "OFF"}`,
     });
     return null;
   },

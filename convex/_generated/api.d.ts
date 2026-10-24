@@ -30,8 +30,6 @@ import type * as creatives from "../creatives.js";
 import type * as crons from "../crons.js";
 import type * as customerPortal from "../customerPortal.js";
 import type * as dashboard from "../dashboard.js";
-import type * as demoAgents from "../demoAgents.js";
-import type * as demoAgentsNode from "../demoAgentsNode.js";
 import type * as events from "../events.js";
 import type * as finance from "../finance.js";
 import type * as fixtures_financeAnswerKey from "../fixtures/financeAnswerKey.js";
@@ -120,8 +118,6 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   customerPortal: typeof customerPortal;
   dashboard: typeof dashboard;
-  demoAgents: typeof demoAgents;
-  demoAgentsNode: typeof demoAgentsNode;
   events: typeof events;
   finance: typeof finance;
   "fixtures/financeAnswerKey": typeof fixtures_financeAnswerKey;
