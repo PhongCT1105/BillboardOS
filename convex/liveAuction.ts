@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, type MutationCtx } from "./_generated/server";
+import { internalMutation, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
@@ -16,11 +16,13 @@ import {
   extendLive,
   joinOutcome,
   minNextLiveBid,
+  stuckAfter,
   type JoinReply,
 } from "./lib/liveAuction";
 import { sellerRespond, type SellerDecision } from "./lib/negotiation";
 import { MAX_OFFERS, PAY_WINDOW_MS, rankReplies, replyAllowed, type Standing } from "./lib/moment";
 import { addMomentStep, releaseWorkspace } from "./lib/momentHooks";
+import { holdLockKey, lockHeld } from "./lib/paymentLock";
 import { endHold, takeHold } from "./holds";
 import { scheduleReoffer, spentTodayForAdvertiserMinor } from "./moments";
 
@@ -36,6 +38,10 @@ import { scheduleReoffer, spentTodayForAdvertiserMinor } from "./moments";
 export { releaseWorkspace };
 
 const FLASH_HOLD_TTL_MS = 3 * 60_000;
+/** While a payment is settling at the pay deadline, look again this much later (within the hold's TTL). */
+const PAY_RECHECK_MS = 20_000;
+/** A payment_started step this recent counts as in flight (it is written just before the x402 route takes its lock). */
+const PAYMENT_STARTED_GRACE_MS = 20_000;
 const MAX_BIDS_SCANNED = 100;
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
@@ -77,6 +83,63 @@ async function endNoTakers(ctx: MutationCtx, momentId: Id<"moments">, label: str
     type: "moment.closed",
     subjectId: momentId,
     reason: `${label} (minimum ${usd(moment.floorMinor)})`.slice(0, 1000),
+  });
+  await releaseWorkspace(ctx, moment.workspaceId);
+}
+
+// ---------------------------------------------------------------- payment in flight, stuck moments
+
+/**
+ * A signed x402 payment for this hold may still be verifying or settling: the
+ * x402 route holds its purchase lock, or it marked payment_started for this
+ * hold moments ago. Defaulting the winner now could charge two companies.
+ */
+export async function paymentInFlight(ctx: QueryCtx, moment: Doc<"moments">, hold: Doc<"holds">, now: number): Promise<boolean> {
+  if (await lockHeld(ctx, holdLockKey(hold._id), now)) return true;
+  return moment.steps.some((s) => s.key === "payment_started" && s.at >= hold._creationTime && now - s.at < PAYMENT_STARTED_GRACE_MS);
+}
+
+/** When this live moment counts as stuck (see `stuckAfter`), or null when it never blocks the host. */
+export async function stuckAt(ctx: QueryCtx, m: Doc<"moments">): Promise<number | null> {
+  const hold = m.status === "awarded" && m.holdId ? await ctx.db.get(m.holdId) : null;
+  return stuckAfter(m, hold?.status === "active" ? hold.expiresAt : null);
+}
+
+/** Past its bound and not settling a payment: the moment no longer holds the host's one-auction lock. */
+export async function isStuck(ctx: QueryCtx, m: Doc<"moments">, now: number): Promise<boolean> {
+  const after = await stuckAt(ctx, m);
+  if (after === null || now <= after) return false;
+  if (m.holdId && (await lockHeld(ctx, holdLockKey(m.holdId), now))) return false;
+  return true;
+}
+
+/**
+ * End a stuck live moment (its scheduled close never ran): release any hold,
+ * tell every company still in the running it lost, mark the moment failed and
+ * free the host so the queue moves.
+ */
+export async function endStuckMoment(ctx: MutationCtx, moment: Doc<"moments">, actor: string, why: string): Promise<void> {
+  if (moment.holdId) {
+    const hold = await ctx.db.get(moment.holdId);
+    if (hold?.status === "active") await endHold(ctx, hold, "released", actor, `Stuck live moment ended: ${why}`);
+  }
+  for (const o of await offersOf(ctx, moment._id)) {
+    if (o.status === "sent") {
+      await ctx.db.patch(o._id, { status: "expired" });
+    } else if (o.status === "accepted" || o.status === "countered" || o.status === "won") {
+      await ctx.db.patch(o._id, { status: "lost" });
+      await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId: o._id, event: "flash_lost" });
+    }
+  }
+  await ctx.db.patch(moment._id, { status: "failed" });
+  await addMomentStep(ctx, moment, "stuck", "Ended a stuck moment", why);
+  await recordAudit(ctx, {
+    workspaceId: moment.workspaceId,
+    traceId: `moment:${moment._id}`,
+    actor,
+    type: "moment.closed",
+    subjectId: moment._id,
+    reason: `Stuck live moment ended (was ${moment.status}): ${why}`.slice(0, 1000),
   });
   await releaseWorkspace(ctx, moment.workspaceId);
 }
@@ -237,6 +300,15 @@ export const payDeadline = internalMutation({
     if (!moment || !offer || moment.winnerOfferId !== offer._id || moment.status !== "awarded" || !offer.holdId) return null;
     const hold = await ctx.db.get(offer.holdId);
     if (!hold || hold.status === "converted") return null; // paid: nothing to do
+    // A signed payment is still settling: defaulting now could charge the runner-up too. Look again soon.
+    const now = Date.now();
+    if (hold.status === "active" && now + PAY_RECHECK_MS < hold.expiresAt && (await paymentInFlight(ctx, moment, hold, now))) {
+      if (!moment.steps.some((s) => s.key === `pay_wait:${hold._id}`)) {
+        await addMomentStep(ctx, moment, `pay_wait:${hold._id}`, "Payment still settling", "The winner's x402 payment is in flight: waiting for it before offering the next best bid.", now);
+      }
+      await ctx.scheduler.runAfter(PAY_RECHECK_MS, internal.liveAuction.payDeadline, args);
+      return null;
+    }
     await defaultWinner(ctx, moment, offer, hold, {
       release: "Live spot winner did not pay within 60 s",
       evidence: `Live spot winner did not pay ${usd(hold.amountMinor)} within ${PAY_WINDOW_MS / 1000} s (moment ${moment._id}).`,
@@ -264,6 +336,9 @@ export const paymentFailed = internalMutation({
     const hold = await ctx.db.get(args.holdId);
     // Paid after all (or already moved on): nothing to do.
     if (!offer || offer.holdId !== args.holdId || !hold || hold.status !== "active") return null;
+    // Another attempt is still settling (a duplicate flash_won, or a client that gave up mid-settle):
+    // never award the runner-up on top of it. The pay deadline decides.
+    if (await paymentInFlight(ctx, moment, hold, Date.now())) return null;
     const reason = args.reason.slice(0, 200);
     await defaultWinner(ctx, moment, offer, hold, {
       release: `Live spot winner's payment failed: ${reason}`,

@@ -7,7 +7,6 @@ import { words } from "../lib/format";
 import { AgentFeed } from "./AgentFeed";
 import { Card, ErrorLine, Field, Section, Skeleton, inputCls, parseUsd, primaryBtn, secondaryBtn, useAction } from "./ui";
 
-const TOP_UP_MINOR = 200;
 const MAX_REACH = 10000;
 const usdText = (minor: number) => (minor / 100).toFixed(2);
 const usdc = (minor: number) => `${(minor / 100).toFixed(2)} USDC`;
@@ -88,7 +87,7 @@ export function AgentSetupPanel() {
   async function doTopUp() {
     setTopUpNote(null);
     const ok = await top.run(() => topUp({}));
-    if (ok !== undefined) setTopUpNote(`Requested ${usdc(TOP_UP_MINOR)} (test). It lands in a few seconds.`);
+    if (ok !== undefined) setTopUpNote("Claiming free test USDC from the faucet. It lands in a few seconds.");
   }
 
   return (
@@ -188,10 +187,13 @@ export function AgentSetupPanel() {
                       <span className="text-muted"> · </span>
                       <span className="font-mono text-muted" title={agent.walletAddress ?? undefined}>{shortAddr(agent.walletAddress ?? "")}</span>
                     </span>
-                    <button type="button" className={secondaryBtn} disabled={top.busy} onClick={doTopUp}>
+                    <button type="button" className={secondaryBtn} disabled={top.busy} onClick={doTopUp} title="Claims free test USDC from the Coinbase faucet (5 a day)">
                       {top.busy ? "Requesting…" : "Top up"}
                     </button>
                   </div>
+                )}
+                {agent && !walletMissing && (
+                  <span className="text-xs text-faint">Top up claims free test USDC from the faucet into this wallet, up to 5 times a day.</span>
                 )}
                 <ErrorLine error={top.error} />
                 {topUpNote && !top.error && <span className="text-xs text-emerald-300">{topUpNote}</span>}

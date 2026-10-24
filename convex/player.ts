@@ -404,6 +404,7 @@ export const screenState = query({
     if (moment.status === "awarded" || moment.status === "paid" || moment.status === "playing") {
       const winner = moment.winnerOfferId ? await ctx.db.get(moment.winnerOfferId) : null;
       const advertiser = winner ? await ctx.db.get(winner.advertiserId) : null;
+      const hold = moment.holdId ? await ctx.db.get(moment.holdId) : null;
       const settled = moment.status !== "awarded";
       // Only a settlement transaction hash counts as proof of payment.
       const tx = settled ? (moment.paymentTx ?? null) : null;
@@ -412,7 +413,8 @@ export const screenState = query({
         ...base,
         nowPlaying: {
           company: advertiser?.displayName ?? "A company",
-          wonAtMinor: moment.paidMinor ?? moment.currentMinor ?? moment.priceMinor,
+          // What the winner actually owes: a negotiated price or a runner-up's own last bid, not the auction's top bid.
+          wonAtMinor: moment.paidMinor ?? hold?.amountMinor ?? winner?.replyAmountMinor ?? moment.currentMinor ?? moment.priceMinor,
           txShort: tx ? (tx.length > 14 ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : tx) : null,
           txUrl: tx && moment.paymentNetwork ? (explorerTxUrl(moment.paymentNetwork, tx) ?? null) : null,
         },

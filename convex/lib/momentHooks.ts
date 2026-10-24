@@ -64,6 +64,9 @@ export async function releaseWorkspace(ctx: MutationCtx, workspaceId: Id<"worksp
   await ctx.scheduler.runAfter(0, internal.moments.detectFor, { billboardId: next._id, trigger: "queue" });
 }
 
+/** A settlement transaction hash (0x + 32 bytes hex), as opposed to a fallback payment reference. */
+export const isTxHash = (ref: string) => /^0x[0-9a-fA-F]{64}$/.test(ref);
+
 /** Payment applied and booking confirmed for a moment's hold. */
 export async function onMomentPaid(
   ctx: MutationCtx,
@@ -77,12 +80,14 @@ export async function onMomentPaid(
     .first();
   if (!moment) return;
   const now = Date.now();
+  // Only a real settlement transaction hash is proof of payment; a fallback reference never is.
+  const tx = isTxHash(payment.externalRef) ? payment.externalRef : undefined;
   await ctx.db.patch(moment._id, {
     status: "paid",
     bookingId,
     paidMinor: payment.amountMinor,
     paymentMode: "x402",
-    paymentTx: payment.externalRef,
+    paymentTx: tx,
     paymentNetwork: payment.network,
   });
   await addMomentStep(
@@ -90,7 +95,7 @@ export async function onMomentPaid(
     moment,
     "settled",
     "Settled over x402",
-    `$${(payment.amountMinor / 100).toFixed(2)} USDC, tx ${payment.externalRef}${payment.network ? ` on ${payment.network}` : ""}`,
+    `$${(payment.amountMinor / 100).toFixed(2)} USDC, ${tx ? `tx ${tx}` : `no transaction hash reported (ref ${payment.externalRef})`}${payment.network ? ` on ${payment.network}` : ""}`,
     now,
   );
   // No dead air: the next spot on this screen goes on sale a minute before this one ends.

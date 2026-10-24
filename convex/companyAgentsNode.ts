@@ -1,23 +1,21 @@
 "use node";
 /**
- * Company agents, the acting half (spec "How company agents bid"). Each one
- * talks to BillboardOS only over its public HTTP API, like a customer's own
- * service would, and pays from its own Base Sepolia CDP wallet:
- *   flash_offer         -> onAnnounce -> POST /api/agent/offers/{id}/reply
- *   auction_* events    -> onUpdate   -> POST /api/agent/offers/{id}/bid
- *   negotiation_counter -> onCounter  -> POST /api/agent/offers/{id}/reply
- *   flash_won           -> POST the x402 purchase URL -> 402 -> pay from wallet co-<advertiserId>
- * Its cap never exceeds its max per spot, what is left of its daily budget, or
- * its wallet balance. If it can't pay (no CDP keys on this deployment, an empty
- * wallet, x402 refused) the moment records "payment blocked" and the spot goes
- * to the runner-up. Nothing is faked as paid.
+ * Company agents, the wallet half (spec "How company agents bid"). Everything
+ * here needs the CDP SDK, so it runs on Node: the company's Base Sepolia
+ * wallet (`co-<advertiserId>`), its balance, top-ups and the x402 payment
+ * for a won spot. Announce, bid and counter run in V8 (companyAgentsAct.ts,
+ * Ruling R25) so a cold start never costs an agent the join window.
+ *   flash_won -> POST the x402 purchase URL -> 402 -> pay from wallet co-<advertiserId>
+ * If it can't pay (no CDP keys on this deployment, an empty wallet, x402
+ * refused) the moment records "payment blocked" and the spot goes to the
+ * runner-up. Nothing is faked as paid.
  */
 import { v } from "convex/values";
 import { internalAction, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { decryptSecret } from "./lib/demoCrypto";
-import { agentCap, bidDelayMs, onAnnounce, onCounter, onUpdate } from "./lib/companyAgent";
+import { agentSiteUrl, type AgentPayload } from "./lib/companyAgent";
 import { centsToAtomic } from "./lib/x402/money";
 
 const NETWORK = "base-sepolia";
@@ -28,38 +26,21 @@ const ATOMIC_PER_CENT = 10_000n;
 /** Faucet and transfer transactions take a few seconds to land: read the balance again after this. */
 const BALANCE_RECHECK_MS = 15_000;
 
-function siteUrl(): string {
-  return (process.env.CONVEX_SITE_URL ?? "https://billboardos.invalid").replace(/\/$/, "");
-}
-
 const canPay = () => Boolean(process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET && process.env.CDP_WALLET_SECRET);
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 const errText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 150);
+/** The operator's CDP account: the x402 receiver when X402_PAY_TO is empty, and the source of host top-ups. */
+const operatorWalletName = () => process.env.X402_RECEIVER_WALLET_NAME || "billboardos-operator";
 
-type Payload = {
-  type?: string;
-  offerId?: string;
-  // flash_offer
-  valueMinor?: number | null;
-  openingMinor?: number;
-  priceMinor?: number;
-  minimumMinor?: number;
-  relevantViewers?: number;
-  audienceMatch?: number;
-  // auction_started / auction_update
-  minNextMinor?: number;
-  youLead?: boolean;
-  bidsLeft?: number;
-  // negotiation_counter
-  sellerMinor?: number;
-  yourLastOfferMinor?: number | null;
-  roundsLeft?: number;
-  // flash_won
-  holdId?: string;
-  amountMinor?: number;
-  purchaseUrl?: string;
-  links?: { reply?: string; bid?: string };
-};
+/**
+ * Winners pay X402_PAY_TO when it is set; host top-ups send from the operator
+ * account. If they differ, the money never comes back to the top-up wallet.
+ */
+function payToMismatch(operatorAddress: string): string | null {
+  const payTo = process.env.X402_PAY_TO?.trim();
+  if (!payTo || payTo.toLowerCase() === operatorAddress.toLowerCase()) return null;
+  return `X402_PAY_TO (${payTo}) is not the operator wallet ${operatorAddress} (${operatorWalletName()}): winners pay one, top-ups drain the other. Leave X402_PAY_TO empty or set it to ${operatorAddress}.`;
+}
 
 async function cdpClient() {
   const { CdpClient } = await import("@coinbase/cdp-sdk");
@@ -143,27 +124,42 @@ export const refreshBalance = internalAction({
   },
 });
 
+const topUpResult = v.union(v.null(), v.object({ message: v.string(), warning: v.union(v.string(), v.null()) }));
+
 /**
- * Top up the company wallet: a real USDC transfer from the operator's
- * receiving wallet when it holds enough (claiming faucet ETH for gas first if
- * needed), otherwise faucet USDC straight to the company wallet.
+ * Top up the company wallet. "faucet" (the company's own request, R26): free
+ * test USDC from the CDP faucet straight to the company wallet; the operator
+ * wallet is never touched. "operator" (the host's top-up): a real USDC
+ * transfer from the operator account when it holds enough (claiming faucet
+ * ETH for gas first if needed), otherwise the faucet. Warns when X402_PAY_TO
+ * isn't the operator account (payments wouldn't come back to it).
  */
 export const topUp = internalAction({
-  args: { advertiserId: v.id("advertisers"), amountMinor: v.number() },
-  returns: v.null(),
-  handler: async (ctx, args): Promise<null> => {
+  args: { advertiserId: v.id("advertisers"), amountMinor: v.number(), source: v.union(v.literal("faucet"), v.literal("operator")) },
+  returns: topUpResult,
+  handler: async (ctx, args): Promise<{ message: string; warning: string | null } | null> => {
     const me = await ctx.runQuery(internal.companyAgents.forAct, { advertiserId: args.advertiserId, now: Date.now() });
     if (!me) return null;
     const log = logger(ctx, args.advertiserId);
     if (!canPay()) {
       await log("top up: no CDP keys on this deployment");
-      return null;
+      return { message: "no CDP keys on this deployment", warning: null };
     }
     try {
       const cdp = await cdpClient();
       const company = await cdp.evm.getOrCreateAccount({ name: me.walletName });
-      const operator = await cdp.evm.getOrCreateAccount({ name: process.env.X402_RECEIVER_WALLET_NAME || "billboardos-operator" });
+      if (args.source === "faucet") {
+        const { transactionHash } = await cdp.evm.requestFaucet({ address: company.address, network: NETWORK, token: "usdc" });
+        const message = `top up: free test USDC claimed from the faucet, tx ${transactionHash}`;
+        await log(message);
+        await saveBalance(ctx, args.advertiserId, cdp);
+        await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });
+        return { message, warning: null };
+      }
+      const operator = await cdp.evm.getOrCreateAccount({ name: operatorWalletName() });
+      const warning = payToMismatch(operator.address);
       const op = await balancesOf(cdp, operator.address);
+      let message: string;
       if (op.usdcMinor >= args.amountMinor) {
         if (op.ethWei < MIN_OPERATOR_WEI) {
           await cdp.evm.requestFaucet({ address: operator.address, network: NETWORK, token: "eth" });
@@ -179,192 +175,145 @@ export const topUp = internalAction({
           token: "usdc",
           network: NETWORK,
         });
-        await log(`top up: ${usd(args.amountMinor)} USDC from the operator wallet, tx ${transactionHash}`);
+        message = `top up: ${usd(args.amountMinor)} USDC from the operator wallet, tx ${transactionHash}`;
       } else {
         const { transactionHash } = await cdp.evm.requestFaucet({ address: company.address, network: NETWORK, token: "usdc" });
-        await log(`top up: operator wallet short, faucet USDC requested, tx ${transactionHash}`);
+        message = `top up: operator wallet short, faucet USDC requested, tx ${transactionHash}`;
       }
+      await log(warning ? `${message}. WARNING: ${warning}` : message);
+      if (warning) console.warn(`[top up] ${warning}`);
       await saveBalance(ctx, args.advertiserId, cdp);
       await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });
+      return { message, warning };
     } catch (error) {
       await log(`top up: failed: ${errText(error)}`);
+      return { message: `failed: ${errText(error)}`, warning: null };
     }
-    return null;
   },
 });
 
-/** The agent reacts to one of our webhooks (already verified), over the public agent API. */
-export const act = internalAction({
+/**
+ * The operator account's address and balance, and whether X402_PAY_TO
+ * matches it (it must be empty or equal). For the runbook:
+ *   npx convex run companyAgentsNode:operatorWallet --prod
+ */
+export const operatorWallet = internalAction({
+  args: {},
+  returns: v.object({
+    walletName: v.string(),
+    address: v.union(v.string(), v.null()),
+    usdcMinor: v.union(v.number(), v.null()),
+    payTo: v.union(v.string(), v.null()),
+    warning: v.union(v.string(), v.null()),
+  }),
+  handler: async () => {
+    const payTo = process.env.X402_PAY_TO?.trim() || null;
+    if (!canPay()) return { walletName: operatorWalletName(), address: null, usdcMinor: null, payTo, warning: "no CDP keys on this deployment" };
+    const cdp = await cdpClient();
+    const operator = await cdp.evm.getOrCreateAccount({ name: operatorWalletName() });
+    const { usdcMinor } = await balancesOf(cdp, operator.address);
+    return { walletName: operatorWalletName(), address: operator.address, usdcMinor, payTo, warning: payToMismatch(operator.address) };
+  },
+});
+
+/**
+ * Pay for a won spot (flash_won, scheduled by companyAgentsAct.act): POST the
+ * x402 purchase URL, answer the 402 from the company's CDP wallet. A 409
+ * PURCHASE_IN_PROGRESS means another attempt for this hold is already paying:
+ * logged, never reported as blocked.
+ */
+export const pay = internalAction({
   args: { advertiserId: v.id("advertisers"), payload: v.any() },
   returns: v.null(),
   handler: async (ctx, args): Promise<null> => {
-    const payload = (args.payload ?? {}) as Payload;
+    const payload = (args.payload ?? {}) as AgentPayload;
+    if (!payload.holdId || !payload.purchaseUrl || !payload.amountMinor) return null;
     const me = await ctx.runQuery(internal.companyAgents.forAct, {
       advertiserId: args.advertiserId,
       now: Date.now(),
       offerId: typeof payload.offerId === "string" ? payload.offerId : undefined,
-      holdId: payload.type === "flash_won" && typeof payload.holdId === "string" ? payload.holdId : undefined,
+      holdId: payload.holdId,
     });
     if (!me) return null;
     const log = logger(ctx, args.advertiserId);
-    const type = payload.type ?? "unknown";
     if (!me.enabled) {
-      await log(`${type}: agent is off`);
+      await log("flash_won: agent is off");
       return null;
     }
+    const holdId = payload.holdId as Id<"holds">;
+    // Idempotent: a retried webhook (or a late one) for a hold that is paid, released or expired does nothing.
+    if (me.holdActive !== true) {
+      await log(`flash_won: hold ${payload.holdId} is no longer payable; nothing to do`);
+      return null;
+    }
+    const blocked = async (reason: string) => {
+      await ctx.runMutation(internal.moments.paymentBlocked, { holdId, reason });
+      await ctx.runMutation(internal.liveAuction.paymentFailed, { holdId, reason });
+      await log(`flash_won: payment blocked: ${reason}`);
+    };
     const secret = process.env.INTERNAL_API_SECRET;
     if (!secret) {
-      await log(`${type}: cannot act: INTERNAL_API_SECRET missing (key store locked)`);
+      await blocked("INTERNAL_API_SECRET missing, so the agent key can't be read");
       return null;
     }
     let key: string;
     try {
       key = await decryptSecret(secret, me.keyCiphertext, me.keyIv);
     } catch (error) {
-      await log(`${type}: cannot act: the stored key can't be decrypted (${errText(error)}); set the agent up again`);
+      await blocked(`the stored agent key can't be decrypted (${errText(error)})`);
       return null;
     }
-    /** POST to our own agent API; the outcome (or the network error) goes to lastAction, never thrown. */
-    const post = async (path: string, body: Record<string, unknown>): Promise<string> => {
-      try {
-        const res = await fetch(`${siteUrl()}${path}`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const json = (await res.json().catch(() => ({}))) as { error?: { code?: string } };
-        return `HTTP ${res.status}${json.error?.code ? ` ${json.error.code}` : ""}`;
-      } catch (error) {
-        return `request failed: ${errText(error)}`;
-      }
-    };
-    const standing = me.standing;
-    // The private cap: never above the max per spot, the budget left today, or the wallet balance.
-    const cap = (valueMinor: number | null | undefined, matchScore: number | undefined) =>
-      standing
-        ? agentCap({
-            valueMinor: valueMinor ?? 0,
-            matchScore: matchScore ?? 0,
-            maxPerSpotMinor: standing.maxPricePerSpotMinor,
-            budgetLeftMinor: standing.dailyBudgetMinor - me.spentTodayMinor,
-            balanceMinor: me.balanceMinor ?? 0,
-          })
-        : 0;
-
-    if (type === "flash_offer") {
-      if (!payload.links?.reply) return null;
-      const opening = payload.openingMinor ?? payload.priceMinor ?? 0;
-      const decision = onAnnounce({
-        openingMinor: opening,
-        minimumMinor: payload.minimumMinor ?? opening,
-        relevantViewers: payload.relevantViewers ?? 0,
-        minRelevantViewers: standing?.minRelevantViewers ?? Number.MAX_SAFE_INTEGER,
-        cap: cap(payload.valueMinor, payload.audienceMatch),
-      });
-      // The cap stays private: the host sees the decision, not our reasoning.
-      const result = await post(payload.links.reply, {
-        decision: decision.decision,
-        amountMinor: decision.decision === "pass" ? undefined : decision.amountMinor,
-        reasoning: `Company agent: ${decision.decision}`,
-      });
-      await log(`flash_offer: ${decision.decision}${decision.amountMinor ? ` ${usd(decision.amountMinor)}` : ""} (${decision.reasoning}) -> ${result}`);
+    // The bearer key only ever goes to our own deployment.
+    if (!payload.purchaseUrl.startsWith(`${agentSiteUrl()}/`)) {
+      await blocked("the purchase URL is not on this deployment; the agent key was not sent");
       return null;
     }
-
-    if (type === "auction_started" || type === "auction_update") {
-      if (!payload.links?.bid && !payload.offerId) return null;
-      const next = onUpdate({
-        youLead: payload.youLead === true,
-        bidsLeft: payload.bidsLeft ?? 0,
-        minNextMinor: payload.minNextMinor ?? Number.MAX_SAFE_INTEGER,
-        cap: cap(me.offer?.valueMinor, me.offer?.matchScore),
-      });
-      if (!next) {
-        await log(`${type}: ${payload.youLead ? "leading" : "holding"}`);
+    if (!canPay()) {
+      await blocked("no CDP keys on this deployment, so the company wallet can't sign");
+      return null;
+    }
+    const inProgress = async (res: Response) =>
+      res.status === 409 && ((await res.clone().json().catch(() => ({}))) as { error?: unknown }).error === "PURCHASE_IN_PROGRESS";
+    const init = { method: "POST", headers: { Authorization: `Bearer ${key}` } };
+    try {
+      const probe = await fetch(payload.purchaseUrl, init);
+      if (await inProgress(probe)) {
+        await log("flash_won: another payment for this hold is already settling; not paying twice");
         return null;
       }
-      const delayMs = process.env.COMPANY_AGENT_DELAY_MS === "0" ? 0 : bidDelayMs(Math.random());
-      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
-      const result = await post(payload.links?.bid ?? `/api/agent/offers/${payload.offerId}/bid`, {
-        amountMinor: next.bidMinor,
-        reasoning: "Outbid: raising by the minimum step",
-      });
-      await log(`${type}: bid ${usd(next.bidMinor)} -> ${result}`);
-      return null;
-    }
-
-    if (type === "negotiation_counter") {
-      if (!payload.links?.reply || payload.sellerMinor === undefined) return null;
-      const decision = onCounter({
-        sellerMinor: payload.sellerMinor,
-        lastOfferMinor: payload.yourLastOfferMinor ?? 0,
-        cap: cap(me.offer?.valueMinor, me.offer?.matchScore),
-      });
-      const result = await post(payload.links.reply, {
-        decision: decision.decision,
-        amountMinor: decision.decision === "pass" ? undefined : decision.amountMinor,
-        reasoning: `Company agent: ${decision.decision}`,
-      });
-      await log(`negotiation_counter: ${decision.decision}${decision.amountMinor ? ` ${usd(decision.amountMinor)}` : ""} (${decision.reasoning}) -> ${result}`);
-      return null;
-    }
-
-    if (type === "flash_won") {
-      if (!payload.holdId || !payload.purchaseUrl || !payload.amountMinor) return null;
-      const holdId = payload.holdId as Id<"holds">;
-      // Idempotent: a retried webhook (or a late one) for a hold that is paid, released or expired does nothing.
-      if (me.holdActive !== true) {
-        await log(`flash_won: hold ${payload.holdId} is no longer payable; nothing to do`);
+      if (probe.status !== 402) {
+        const body = (await probe.json().catch(() => ({}))) as { error?: string | { code?: string } };
+        const code = typeof body.error === "string" ? body.error : body.error?.code;
+        await blocked(code ?? `HTTP ${probe.status}`);
         return null;
       }
-      const blocked = async (reason: string) => {
-        await ctx.runMutation(internal.moments.paymentBlocked, { holdId, reason });
-        await ctx.runMutation(internal.liveAuction.paymentFailed, { holdId, reason });
-        await log(`flash_won: payment blocked: ${reason}`);
-      };
-      // The bearer key only ever goes to our own deployment.
-      if (!payload.purchaseUrl.startsWith(`${siteUrl()}/`)) {
-        await blocked("the purchase URL is not on this deployment; the agent key was not sent");
+      const { CdpX402Client } = await import("@coinbase/cdp-sdk/x402");
+      const { wrapFetchWithPayment, decodePaymentResponseHeader } = await import("@x402/fetch");
+      const network = (process.env.X402_NETWORK || "eip155:84532") as `${string}:${string}`;
+      const client = new CdpX402Client({
+        environment: process.env.X402_ENVIRONMENT === "production" ? "production" : "development",
+        walletConfig: { type: "eoa", accountName: me.walletName },
+        spendControls: { maxAmountPerPayment: { atomic: centsToAtomic(payload.amountMinor) }, allowedNetworks: [network] },
+      });
+      const paidFetch = wrapFetchWithPayment(globalThis.fetch, client);
+      const res = await paidFetch(payload.purchaseUrl, init);
+      if (await inProgress(res)) {
+        await log("flash_won: another payment for this hold is already settling; not paying twice");
         return null;
       }
-      if (!canPay()) {
-        await blocked("no CDP keys on this deployment, so the company wallet can't sign");
-        return null;
+      const header = res.headers.get("PAYMENT-RESPONSE") ?? res.headers.get("X-PAYMENT-RESPONSE");
+      const settled = header ? decodePaymentResponseHeader(header) : null;
+      if (res.status === 200 && settled?.success) {
+        await log(`flash_won: paid ${usd(payload.amountMinor)}, tx ${settled.transaction}`);
+        await saveBalance(ctx, args.advertiserId).catch(() => null);
+        // The transfer may not show in the balance yet: read it again once it lands.
+        await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });
+      } else {
+        await blocked(`payment failed (HTTP ${res.status}${settled?.errorReason ? `, ${settled.errorReason}` : ""})`);
       }
-      const init = { method: "POST", headers: { Authorization: `Bearer ${key}` } };
-      try {
-        const probe = await fetch(payload.purchaseUrl, init);
-        if (probe.status !== 402) {
-          const body = (await probe.json().catch(() => ({}))) as { error?: string | { code?: string } };
-          const code = typeof body.error === "string" ? body.error : body.error?.code;
-          await blocked(code ?? `HTTP ${probe.status}`);
-          return null;
-        }
-        const { CdpX402Client } = await import("@coinbase/cdp-sdk/x402");
-        const { wrapFetchWithPayment, decodePaymentResponseHeader } = await import("@x402/fetch");
-        const network = (process.env.X402_NETWORK || "eip155:84532") as `${string}:${string}`;
-        const client = new CdpX402Client({
-          environment: process.env.X402_ENVIRONMENT === "production" ? "production" : "development",
-          walletConfig: { type: "eoa", accountName: me.walletName },
-          spendControls: { maxAmountPerPayment: { atomic: centsToAtomic(payload.amountMinor) }, allowedNetworks: [network] },
-        });
-        const paidFetch = wrapFetchWithPayment(globalThis.fetch, client);
-        const res = await paidFetch(payload.purchaseUrl, init);
-        const header = res.headers.get("PAYMENT-RESPONSE") ?? res.headers.get("X-PAYMENT-RESPONSE");
-        const settled = header ? decodePaymentResponseHeader(header) : null;
-        if (res.status === 200 && settled?.success) {
-          await log(`flash_won: paid ${usd(payload.amountMinor)}, tx ${settled.transaction}`);
-          await saveBalance(ctx, args.advertiserId).catch(() => null);
-        } else {
-          await blocked(`payment failed (HTTP ${res.status}${settled?.errorReason ? `, ${settled.errorReason}` : ""})`);
-        }
-      } catch (error) {
-        await blocked(`payment failed: ${errText(error)} (empty wallet? top it up)`);
-      }
-      return null;
+    } catch (error) {
+      await blocked(`payment failed: ${errText(error)} (empty wallet? top it up)`);
     }
-
-    if (type === "flash_lost") await log("flash_lost: another company won the spot");
     return null;
   },
 });

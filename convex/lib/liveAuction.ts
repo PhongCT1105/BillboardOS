@@ -80,3 +80,31 @@ export function checkBid(s: {
   if (s.amountMinor < s.minNextMinor) return "BID_TOO_LOW";
   return null;
 }
+
+/** Grace past each phase's own close before a live moment counts as stuck (its scheduled close never ran). */
+export const STUCK_GRACE = { offeringMs: 10_000, biddingMs: 30_000, negotiatingMs: 30_000, awardedMs: 3 * 60_000 } as const;
+
+/**
+ * When a live moment in this status is clearly past its bound, so it no
+ * longer holds the host's one-auction lock: offering 10 s after joining
+ * closes, bidding 30 s after the hard close, negotiating 30 s after its time
+ * cap, awarded 3 min after it started (and never while its hold is still
+ * active: the pay deadline is still coming). Null for statuses that never block.
+ */
+export function stuckAfter(
+  m: { status: string; startedAt: number; offerClosesAt: number; biddingClosesAt?: number; hardClosesAt?: number },
+  activeHoldExpiresAt: number | null = null,
+): number | null {
+  switch (m.status) {
+    case "offering":
+      return m.offerClosesAt + STUCK_GRACE.offeringMs;
+    case "bidding":
+      return (m.hardClosesAt ?? m.biddingClosesAt ?? m.offerClosesAt) + STUCK_GRACE.biddingMs;
+    case "negotiating":
+      return m.startedAt + NEGOTIATION_TIME_CAP_MS + STUCK_GRACE.negotiatingMs;
+    case "awarded":
+      return Math.max(m.startedAt + STUCK_GRACE.awardedMs, activeHoldExpiresAt ?? 0);
+    default:
+      return null;
+  }
+}

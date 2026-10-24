@@ -22,8 +22,9 @@ import { explorerTxUrl } from "./lib/x402/money";
  * /company-agents/{advertiserId}/webhook, replies and bids over the real agent
  * API with its own key, and pays over the real x402 route from its own Base
  * Sepolia CDP wallet (`co-<advertiserId>`). The plaintext key is stored
- * AES-GCM encrypted and never returned by any query. The acting half (wallet
- * calls, payment) is in companyAgentsNode.ts.
+ * AES-GCM encrypted and never returned by any query. The acting half is in
+ * companyAgentsAct.ts (announce, bid, counter; V8) and companyAgentsNode.ts
+ * (wallet calls and the x402 payment; Node).
  */
 
 const MAX_SKEW_MS = 5 * 60_000;
@@ -299,16 +300,23 @@ export const feed = query({
   },
 });
 
-/** Count one top-up against the company's daily limit and schedule the transfer. */
-async function startTopUp(ctx: MutationCtx, agent: Doc<"companyAgents">): Promise<void> {
+/**
+ * Count one top-up against the company's daily limit (shared by the company
+ * and the host) and schedule it: "faucet" claims free test USDC, "operator"
+ * transfers from the operator wallet (host only, R26).
+ */
+async function startTopUp(ctx: MutationCtx, agent: Doc<"companyAgents">, source: "faucet" | "operator"): Promise<void> {
   const day = new Date(Date.now()).toISOString().slice(0, 10);
   const count = agent.topUpDay === day ? (agent.topUpCount ?? 0) : 0;
   if (count >= TOP_UPS_PER_DAY) fail("RATE_LIMITED", `At most ${TOP_UPS_PER_DAY} top-ups per day; try again tomorrow (UTC)`);
   await ctx.db.patch(agent._id, { topUpDay: day, topUpCount: count + 1 });
-  await ctx.scheduler.runAfter(0, internal.companyAgentsNode.topUp, { advertiserId: agent.advertiserId, amountMinor: TOP_UP_MINOR });
+  await ctx.scheduler.runAfter(0, internal.companyAgentsNode.topUp, { advertiserId: agent.advertiserId, amountMinor: TOP_UP_MINOR, source });
 }
 
-/** Ask for test USDC for the agent's wallet: a transfer from the operator wallet, else the faucet. 5 a day. */
+/**
+ * Ask for test USDC for the agent's wallet: a free claim from the CDP faucet,
+ * never the operator wallet (R26: only the host moves operator money). 5 a day.
+ */
 export const requestTopUp = mutation({
   args: {},
   returns: v.null(),
@@ -316,7 +324,7 @@ export const requestTopUp = mutation({
     const customer = await requireCustomer(ctx);
     const agent = await agentOf(ctx, customer.advertiserId);
     if (!agent) fail("NOT_FOUND", "Set up your company agent first");
-    await startTopUp(ctx, agent);
+    await startTopUp(ctx, agent, "faucet");
     return null;
   },
 });
@@ -367,7 +375,10 @@ export const hostList = query({
   },
 });
 
-/** Host: top up a company agent's wallet on its behalf (workspace members only; the company's same daily limit). */
+/**
+ * Host: top up a company agent's wallet from the operator wallet (faucet when
+ * it is short). Workspace members only; the company's same daily limit.
+ */
 export const hostTopUp = mutation({
   args: { advertiserId: v.id("advertisers") },
   returns: v.null(),
@@ -375,7 +386,7 @@ export const hostTopUp = mutation({
     const me = await resolveWorkspace(ctx);
     const agent = (await hostCompanies(ctx, me.workspaceId)).find((a) => a.advertiserId === args.advertiserId);
     if (!agent) fail("NOT_FOUND", "That company has no agent at this host");
-    await startTopUp(ctx, agent);
+    await startTopUp(ctx, agent, "operator");
     return null;
   },
 });
@@ -418,7 +429,8 @@ export const enqueue = internalMutation({
   args: { advertiserId: v.id("advertisers"), payload: v.any() },
   returns: v.null(),
   handler: async (ctx, args) => {
-    await ctx.scheduler.runAfter(0, internal.companyAgentsNode.act, { advertiserId: args.advertiserId, payload: args.payload });
+    // V8, not Node (R25): no cold start between the announce and the 2 s join window.
+    await ctx.scheduler.runAfter(0, internal.companyAgentsAct.act, { advertiserId: args.advertiserId, payload: args.payload });
     return null;
   },
 });

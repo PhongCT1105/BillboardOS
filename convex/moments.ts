@@ -22,7 +22,7 @@ import {
   type Standing,
 } from "./lib/moment";
 import { addMomentStep, creativeReady, releaseWorkspace } from "./lib/momentHooks";
-import { closeJoinCore, negotiationReply } from "./liveAuction";
+import { closeJoinCore, endStuckMoment, isStuck, negotiationReply, paymentInFlight, stuckAt } from "./liveAuction";
 import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
 
 /**
@@ -121,17 +121,30 @@ const BUSY_STATUSES: ReadonlySet<Doc<"moments">["status"]> = new Set(["offering"
 const REPRICE_MIN_PEOPLE = 2;
 const REPRICE_MIN_SHARE = 0.2;
 
-/**
- * One live auction (or negotiation) per host at a time: the screen running
- * one (auction, negotiation, or a winner paying), or null when the host is free.
- */
-export async function workspaceBusy(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<Id<"billboards"> | null> {
+async function busyMoments(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<Doc<"moments">[]> {
   const recent = await ctx.db
     .query("moments")
     .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
     .order("desc")
     .take(RECENT_MOMENTS);
-  return recent.find((m) => BUSY_STATUSES.has(m.status))?.billboardId ?? null;
+  return recent.filter((m) => BUSY_STATUSES.has(m.status));
+}
+
+/**
+ * One live auction (or negotiation) per host at a time: the screen running
+ * one (auction, negotiation, or a winner paying), or null when the host is
+ * free. A moment clearly past its bound (`stuckAfter`) no longer counts.
+ */
+export async function workspaceBusy(ctx: QueryCtx, workspaceId: Id<"workspaces">, now = Date.now()): Promise<Id<"billboards"> | null> {
+  for (const m of await busyMoments(ctx, workspaceId)) if (!(await isStuck(ctx, m, now))) return m.billboardId;
+  return null;
+}
+
+/** The host's live moments that are stuck past their bound (their scheduled close never ran). */
+export async function stuckMoments(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: number): Promise<Doc<"moments">[]> {
+  const out = [];
+  for (const m of await busyMoments(ctx, workspaceId)) if (await isStuck(ctx, m, now)) out.push(m);
+  return out;
 }
 
 /**
@@ -299,8 +312,12 @@ export async function detectCore(
   const settings = momentSettingsOf(workspace);
   if (!settings.enabled) return { momentId: null, reason: "moment detector is off for this host" };
 
+  // A moment stuck past its bound never holds the host forever: end it, then carry on.
+  for (const stuck of await stuckMoments(ctx, workspaceId, now)) {
+    await endStuckMoment(ctx, stuck, "system", `still ${stuck.status} long past its close; the host lock was released`);
+  }
   // One live auction or negotiation per host: other screens wait their turn (first come, first served).
-  const busyScreen = await workspaceBusy(ctx, workspaceId);
+  const busyScreen = await workspaceBusy(ctx, workspaceId, now);
   if (busyScreen === billboard._id) return { momentId: null, reason: "a moment is already in progress on this screen" };
   if (busyScreen !== null) {
     if (billboard.saleQueuedAt === undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: now });
@@ -647,7 +664,9 @@ export const markPaymentStarted = internalMutation({
       .query("moments")
       .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
       .first();
-    if (!moment || moment.steps.some((s) => s.key === "payment_started")) return null;
+    const hold = await ctx.db.get(args.holdId);
+    // Once per hold (a runner-up's payment gets its own step).
+    if (!moment || !hold || moment.steps.some((s) => s.key === "payment_started" && s.at >= hold._creationTime)) return null;
     await addMomentStep(ctx, moment, "payment_started", "Payment signed: verifying and settling", "x402 facilitator verify -> re-check hold -> settle on Base Sepolia.");
     return null;
   },
@@ -669,9 +688,29 @@ export const paymentBlocked = internalMutation({
     // Only while the winner can still pay: a late or repeated report never touches a paid (or moved-on) moment.
     const blockedHold = await ctx.db.get(args.holdId);
     if (moment.status !== "awarded" || !blockedHold || blockedHold.status !== "active") return null;
+    // Another attempt is still settling: it isn't blocked (yet).
+    if (await paymentInFlight(ctx, moment, blockedHold, Date.now())) return null;
     const reason = args.reason.slice(0, 200);
     await ctx.db.patch(moment._id, { paymentBlocked: reason });
     await addMomentStep(ctx, moment, "payment_blocked", `Payment blocked: ${reason}`, "No money moved. Nothing is shown as paid without a settlement transaction.");
+    return null;
+  },
+});
+
+/**
+ * Host: end a live moment that is stuck past its bound (its scheduled close
+ * never ran), so the host's queue moves again. Workspace members only; a
+ * moment still within its bound, or settling a payment, is left alone.
+ */
+export const endStuck = mutation({
+  args: { momentId: v.id("moments") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const moment = await ctx.db.get(args.momentId);
+    if (!moment) fail("NOT_FOUND", "Moment not found");
+    const member = await requireWorkspaceMember(ctx, moment.workspaceId);
+    if (!(await isStuck(ctx, moment, Date.now()))) fail("NOT_STUCK", "This moment is still running (or settling a payment); it ends on its own");
+    await endStuckMoment(ctx, moment, member.actor, `ended by the host (${member.actor})`);
     return null;
   },
 });
@@ -808,6 +847,8 @@ export const momentView = v.object({
   priceWhy: v.union(v.string(), v.null()),
   biddingClosesAt: v.union(v.number(), v.null()),
   extensions: v.number(),
+  /** When this moment counts as stuck (the presenter may then end it); null when it never blocks the host. */
+  stuckAfter: v.union(v.number(), v.null()),
   /** Every bid, counter and buyer offer, oldest first. */
   bids: v.array(bidView),
 });
@@ -890,6 +931,7 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
     priceWhy: m.priceWhy ?? null,
     biddingClosesAt: m.biddingClosesAt ?? null,
     extensions: m.extensions ?? 0,
+    stuckAfter: await stuckAt(ctx, m),
     bids,
   };
 }

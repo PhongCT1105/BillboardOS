@@ -7,9 +7,10 @@ import * as momentsModule from "./moments";
 import * as paymentsModule from "./payments";
 import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { ensureUpcomingSlots } from "./lib/inventory";
-import { BIDDING_MS, EXTENSION_MS, MAX_EXTENSIONS, NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS, minNextLiveBid } from "./lib/liveAuction";
+import { BIDDING_MS, EXTENSION_MS, MAX_EXTENSIONS, NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS, minNextLiveBid, stuckAfter } from "./lib/liveAuction";
 import { onMomentPaid, releaseWorkspace } from "./lib/momentHooks";
-import { rankReplies, standingCovers } from "./lib/moment";
+import { momentSettingsOf, rankReplies, standingCovers } from "./lib/moment";
+import { onAnnounce, onCounter } from "./lib/companyAgent";
 import { decryptSecret, encryptSecret } from "./lib/demoCrypto";
 
 /**
@@ -17,13 +18,21 @@ import { decryptSecret, encryptSecret } from "./lib/demoCrypto";
  * others leave it unset, so the agents never load the SDK). It records faucet
  * claims instead of calling Coinbase.
  */
-const cdpFake = vi.hoisted(() => ({ faucetClaims: [] as string[], usdcAtomic: 0n }));
+const cdpFake = vi.hoisted(() => ({ faucetClaims: [] as string[], usdcAtomic: 0n, accounts: [] as string[], transfers: [] as string[] }));
+const fakeAddress = vi.hoisted(() => (name: string) => `0x${Array.from(name).map((c) => c.charCodeAt(0).toString(16)).join("").slice(0, 40).padEnd(40, "0")}`);
 vi.mock("@coinbase/cdp-sdk", () => ({
   CdpClient: class {
     evm = {
-      getOrCreateAccount: async ({ name }: { name: string }) => ({
-        address: `0x${Array.from(name).map((c) => c.charCodeAt(0).toString(16)).join("").slice(0, 40).padEnd(40, "0")}`,
-      }),
+      getOrCreateAccount: async ({ name }: { name: string }) => {
+        cdpFake.accounts.push(name);
+        return {
+          address: fakeAddress(name),
+          transfer: async ({ to }: { to: string }) => {
+            cdpFake.transfers.push(`${name}->${to}`);
+            return { transactionHash: `0x${"ef".repeat(32)}` };
+          },
+        };
+      },
       listTokenBalances: async () => ({ balances: [{ token: { symbol: "USDC" }, amount: { amount: cdpFake.usdcAtomic, decimals: 6 } }] }),
       requestFaucet: async ({ address, token }: { address: string; token: string }) => {
         cdpFake.faucetClaims.push(`${token}:${address}`);
@@ -31,6 +40,17 @@ vi.mock("@coinbase/cdp-sdk", () => ({
       },
     };
   },
+}));
+
+/**
+ * The x402 client side, for the company agent's payment tests only: the
+ * wallet "signs" by passing the request through, and the PAYMENT-RESPONSE
+ * header decodes to a settled payment.
+ */
+vi.mock("@coinbase/cdp-sdk/x402", () => ({ CdpX402Client: class {} }));
+vi.mock("@x402/fetch", () => ({
+  wrapFetchWithPayment: (f: typeof fetch) => f,
+  decodePaymentResponseHeader: (header: string) => ({ success: true, transaction: header }),
 }));
 
 // Sunday 2026-10-25, 09:07 PDT.
@@ -275,6 +295,15 @@ describe("live auction settings", () => {
     const host = await signedInOperator(t, "host@moscone.test");
     expect(await host.query(api.moments.settings, {})).toEqual({ enabled: true, minPeopleInView: 1, joinWindowSeconds: 2, minMatch: 0.3 });
   });
+
+  test("the join window is clamped to 1-10 s whatever is stored", () => {
+    expect(momentSettingsOf({}).joinWindowMs).toBe(2_000);
+    expect(momentSettingsOf({ momentResponseWindowMs: 0 }).joinWindowMs).toBe(1_000);
+    expect(momentSettingsOf({ momentResponseWindowMs: -5 }).joinWindowMs).toBe(1_000);
+    expect(momentSettingsOf({ momentResponseWindowMs: 60_000 }).joinWindowMs).toBe(10_000);
+    expect(momentSettingsOf({ momentResponseWindowMs: Number.NaN }).joinWindowMs).toBe(2_000);
+    expect(momentSettingsOf({ momentResponseWindowMs: 4_000 }).joinWindowMs).toBe(4_000);
+  });
 });
 
 describe("pure moment logic", () => {
@@ -295,6 +324,26 @@ describe("pure moment logic", () => {
       2700,
     );
     expect(ranked.map((r) => r.offerId)).toEqual(["c", "b", "a"]);
+  });
+
+  test("an agent whose wallet balance is unknown says so instead of quoting a cap of 0", () => {
+    const announce = onAnnounce({ openingMinor: 70, minimumMinor: 25, relevantViewers: 10, minRelevantViewers: 3, cap: 0, balanceUnknown: true });
+    expect(announce).toMatchObject({ decision: "pass" });
+    expect(announce.reasoning).toMatch(/wallet balance unknown/i);
+    expect(announce.reasoning).not.toMatch(/cap of 0/);
+    expect(onCounter({ sellerMinor: 60, lastOfferMinor: 40, cap: 0, balanceUnknown: true }).reasoning).toMatch(/wallet balance unknown/i);
+    // A known empty wallet still gives the cap reason.
+    expect(onAnnounce({ openingMinor: 70, minimumMinor: 25, relevantViewers: 10, minRelevantViewers: 3, cap: 0 }).reasoning).toMatch(/cap of 0/);
+  });
+
+  test("stuck bounds: offering +10 s, bidding +30 s after the hard close, negotiating 18+30 s, awarded 3 min (or the hold's expiry)", () => {
+    const base = { startedAt: 1_000_000, offerClosesAt: 1_002_000 };
+    expect(stuckAfter({ ...base, status: "offering" })).toBe(1_012_000);
+    expect(stuckAfter({ ...base, status: "bidding", biddingClosesAt: 1_014_000, hardClosesAt: 1_020_000 })).toBe(1_050_000);
+    expect(stuckAfter({ ...base, status: "negotiating" })).toBe(1_048_000);
+    expect(stuckAfter({ ...base, status: "awarded" })).toBe(1_180_000);
+    expect(stuckAfter({ ...base, status: "awarded" }, 1_200_000)).toBe(1_200_000);
+    for (const status of ["paid", "playing", "no_takers", "failed"]) expect(stuckAfter({ ...base, status })).toBeNull();
   });
 
   test("agent key encryption round-trip, and a different secret can't read it", async () => {
@@ -872,6 +921,11 @@ describe("live auction lifecycle", () => {
     expect(offers.find((o) => o._id === lk)!.status).toBe("defaulted");
     const hold = (await w.t.run(async (ctx) => ctx.db.get(after.holdId!)))!;
     expect(hold.amountMinor).toBe(b2);
+    // The screen shows what the runner-up owes (its own last bid), not the auction's top bid.
+    expect(after.currentMinor).toBe(b3);
+    const settling = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(settling.mode).toBe("settling");
+    expect(settling.nowPlaying).toMatchObject({ company: "Rivet", wonAtMinor: b2 });
     const exceptions = await w.t.run(async (ctx) => ctx.db.query("financeExceptions").take(10));
     expect(exceptions.some((e) => e.kind === "winner_default")).toBe(true);
 
@@ -963,8 +1017,13 @@ describe("live auction lifecycle", () => {
         campaignId: w.launchKit.campaignId,
         status: "confirmed",
       });
-      await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: "0xabc", amountMinor: hold.amountMinor });
+      await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: "x402:0xpayer:fallback", amountMinor: hold.amountMinor });
     });
+    // A fallback reference is not a transaction hash: nothing is stored as proof of payment.
+    const paid = await w.momentDoc(m._id);
+    expect(paid.status).toBe("paid");
+    expect(paid.paymentTx).toBeUndefined();
+    expect(paid.steps.find((st) => st.key === "settled")!.detail).toContain("no transaction hash");
     await w.flush();
     const phoneMoments = await w.momentsOf(phone);
     expect(phoneMoments).toHaveLength(1);
@@ -1047,6 +1106,136 @@ describe("live auction lifecycle", () => {
       .map(([, init]) => (init?.headers as Record<string, string>)["X-BillboardOS-Event"]);
     expect(events.filter((e) => e === "auction_started")).toHaveLength(2);
     expect(events.filter((e) => e === "auction_update")).toHaveLength(2);
+  });
+});
+
+describe("payment in flight", () => {
+  /** Rivet outbids LaunchKit and wins; LaunchKit is the runner-up at its opening bid. */
+  async function awardedWithRunnerUp() {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk, rv } = await w.auction();
+    const O = m.priceMinor;
+    await w.bid(w.launchKit, lk, O);
+    await w.bid(w.rivet, rv, minNextLiveBid({ leaderMinor: O, openingMinor: O }));
+    await w.advance((await w.momentDoc(m._id)).biddingClosesAt! - Date.now() + 1);
+    const awarded = await w.momentDoc(m._id);
+    expect(awarded).toMatchObject({ status: "awarded", winnerOfferId: rv });
+    const holdId = awarded.holdId!;
+    /** The x402 route is verifying or settling a signed payment for the hold (as withLock records it). */
+    const lock = () => w.t.run(async (ctx) => ctx.db.insert("paymentLocks", { key: `hold:${holdId}`, expiresAt: Date.now() + 2 * MINUTE }));
+    const hold = async () => (await w.t.run(async (ctx) => ctx.db.get(holdId)))!;
+    const exceptions = async () => (await w.t.run(async (ctx) => ctx.db.query("financeExceptions").take(10))).filter((e) => e.kind === "winner_default");
+    return { w, m: awarded, lk, rv, holdId, lock, hold, exceptions };
+  }
+
+  test("the pay deadline while the winner's payment is settling: no default, it looks again 20 s later", async () => {
+    const { w, m, lk, rv, lock, hold, exceptions } = await awardedWithRunnerUp();
+    const lockId = await lock();
+    await w.advance(60_000);
+    const waiting = await w.momentDoc(m._id);
+    expect(waiting).toMatchObject({ status: "awarded", winnerOfferId: rv });
+    expect((await hold()).status).toBe("active");
+    expect((await w.offersOf(m._id)).find((o) => o._id === lk)!.status).toBe("lost");
+    expect(await exceptions()).toHaveLength(0);
+    expect(waiting.steps.some((st) => st.key.startsWith("pay_wait:"))).toBe(true);
+    const again = (await w.t.run(async (ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter(
+      (f) => f.name.includes("payDeadline") && f.state.kind === "pending",
+    );
+    expect(again).toHaveLength(1);
+    expect(again[0].scheduledTime).toBeGreaterThanOrEqual(Date.now() + 19_000);
+
+    // The attempt ended without paying (lock released, hold still active): the next look defaults to the runner-up.
+    await w.t.run(async (ctx) => ctx.db.delete(lockId));
+    await w.advance(20_000);
+    const after = await w.momentDoc(m._id);
+    expect(after).toMatchObject({ status: "awarded", winnerOfferId: lk });
+    expect(await exceptions()).toHaveLength(1);
+  });
+
+  test("payment failed while another attempt is settling: nothing happens", async () => {
+    const { w, m, rv, holdId, lock, hold, exceptions } = await awardedWithRunnerUp();
+    const lockId = await lock();
+    // A duplicate flash_won got 409 PURCHASE_IN_PROGRESS and reported it as a failure.
+    await w.t.mutation(internal.moments.paymentBlocked, { holdId, reason: "HTTP 409 PURCHASE_IN_PROGRESS" });
+    await w.t.mutation(internal.liveAuction.paymentFailed, { holdId, reason: "HTTP 409 PURCHASE_IN_PROGRESS" });
+    let now = await w.momentDoc(m._id);
+    expect(now).toMatchObject({ status: "awarded", winnerOfferId: rv });
+    expect(now.paymentBlocked).toBeUndefined();
+    expect((await hold()).status).toBe("active");
+    expect(await exceptions()).toHaveLength(0);
+
+    // Just signed (payment_started), before the route takes its lock: still in flight.
+    await w.t.run(async (ctx) => ctx.db.delete(lockId));
+    await w.t.mutation(internal.moments.markPaymentStarted, { holdId });
+    await w.t.mutation(internal.liveAuction.paymentFailed, { holdId, reason: "client gave up" });
+    now = await w.momentDoc(m._id);
+    expect(now).toMatchObject({ status: "awarded", winnerOfferId: rv });
+
+    // Nothing in flight any more: a real failure hands the spot to the runner-up at once.
+    vi.advanceTimersByTime(21_000);
+    await w.t.mutation(internal.liveAuction.paymentFailed, { holdId, reason: "wallet empty" });
+    now = await w.momentDoc(m._id);
+    expect(now.winnerOfferId).not.toBe(rv);
+    expect(await exceptions()).toHaveLength(1);
+  });
+});
+
+describe("stuck moments", () => {
+  test("a stale offering moment no longer blocks a new announce", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const phone = await w.addScreen("Phone");
+    const { m } = await w.announce();
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBe(w.led);
+
+    // Its join-window close never ran, and it is more than 10 s past it.
+    await w.t.run(async (ctx) => ctx.db.patch(m._id, { offerClosesAt: Date.now() - 10_001 }));
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBeNull();
+    await w.camera(phone, 10);
+    await w.flush();
+    const phoneMoments = await w.momentsOf(phone);
+    expect(phoneMoments).toHaveLength(1);
+    expect(phoneMoments[0].status).toBe("offering");
+    expect((await w.t.run(async (ctx) => ctx.db.get(phone)))!.saleQueuedAt).toBeUndefined();
+    const stale = await w.momentDoc(m._id);
+    expect(stale.status).toBe("failed");
+    expect(stale.steps.some((st) => st.key === "stuck")).toBe(true);
+    expect((await w.offersOf(m._id)).every((o) => o.status === "expired")).toBe(true);
+  });
+
+  test("the host ends a stuck moment: only past its bound, workspace members only", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m } = await w.announce();
+    const view = await w.host.query(api.moments.live, { billboardId: w.led, atMinute: Date.now() });
+    expect(view.latest!.stuckAfter).toBe(m.offerClosesAt + 10_000);
+    await expect(w.host.mutation(api.moments.endStuck, { momentId: m._id })).rejects.toThrow(/NOT_STUCK/);
+    await expect(w.launchKit.customer.mutation(api.moments.endStuck, { momentId: m._id })).rejects.toThrow(/NOT_WORKSPACE_MEMBER/);
+
+    await w.t.run(async (ctx) => ctx.db.patch(m._id, { offerClosesAt: Date.now() - 10_001 }));
+    await expect(w.launchKit.customer.mutation(api.moments.endStuck, { momentId: m._id })).rejects.toThrow(/NOT_WORKSPACE_MEMBER/);
+    await w.host.mutation(api.moments.endStuck, { momentId: m._id });
+    expect((await w.momentDoc(m._id)).status).toBe("failed");
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBeNull();
+  });
+
+  test("an awarded moment is never stuck while its winner's payment is settling", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorld();
+    const { m, lk } = await w.announce();
+    await w.reply(w.launchKit, lk, "accept");
+    await w.advance(2_000);
+    const sold = await w.momentDoc(m._id);
+    expect(sold.status).toBe("awarded");
+    // Past 3 min and the hold's expiry (its deadlines never ran), but the x402 route holds the lock.
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(sold._id, { startedAt: Date.now() - 4 * MINUTE });
+      await ctx.db.patch(sold.holdId!, { expiresAt: Date.now() - 1 });
+      await ctx.db.insert("paymentLocks", { key: `hold:${sold.holdId}`, expiresAt: Date.now() + MINUTE });
+    });
+    expect(await w.t.run(async (ctx) => momentsModule.workspaceBusy(ctx, w.workspaceId))).toBe(w.led);
+    await expect(w.host.mutation(api.moments.endStuck, { momentId: m._id })).rejects.toThrow(/NOT_STUCK/);
   });
 });
 
@@ -1439,7 +1628,7 @@ describe("company agents", () => {
       await onMomentPaid(ctx, hold._id, bookingId, { provider: "x402", externalRef: `0x${"cd".repeat(32)}`, amountMinor: hold.amountMinor });
     });
     const fetchesBefore = vi.mocked(fetch).mock.calls.length;
-    await w.t.action(internal.companyAgentsNode.act, { advertiserId: w.launchKit.advertiserId, payload: won });
+    await w.t.action(internal.companyAgentsNode.pay, { advertiserId: w.launchKit.advertiserId, payload: won });
     await w.t.mutation(internal.moments.paymentBlocked, { holdId: hold._id, reason: "late report" });
     const after = await w.momentDoc(m._id);
     expect(after.status).toBe("paid");
@@ -1460,7 +1649,7 @@ describe("company agents", () => {
     process.env.CDP_API_KEY_ID = "test-id";
     process.env.CDP_API_KEY_SECRET = "test-secret";
     process.env.CDP_WALLET_SECRET = "test-wallet-secret";
-    await w.t.action(internal.companyAgentsNode.act, {
+    await w.t.action(internal.companyAgentsNode.pay, {
       advertiserId: w.launchKit.advertiserId,
       payload: { ...won, purchaseUrl: "https://elsewhere.test/purchases/x" },
     });
@@ -1664,6 +1853,125 @@ describe("company agents", () => {
     const fresh = await w.agentKey(w.rivet);
     expect(fresh).not.toBe(oldKey);
     expect((await w.rivet.customer.query(api.companyAgents.mine, {}))!.enabled).toBe(true);
+  });
+
+  /** The company's agent row (wonSale's world has no agentRow helper). */
+  async function lastActionOf(w: Awaited<ReturnType<typeof liveWorld>>, advertiserId: Id<"advertisers">) {
+    const row = await w.t.run(async (ctx) =>
+      ctx.db
+        .query("companyAgents")
+        .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+        .first(),
+    );
+    return row?.lastAction ?? "";
+  }
+
+  function withCdpKeys() {
+    process.env.CDP_API_KEY_ID = "test-id";
+    process.env.CDP_API_KEY_SECRET = "test-secret";
+    process.env.CDP_WALLET_SECRET = "test-wallet-secret";
+  }
+
+  /** The purchase URL answers the probe with 402, then the signed retry with `paid`. */
+  function purchaseAnswers(purchaseUrl: string, paid: () => Response) {
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    let calls = 0;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input) === purchaseUrl) {
+        calls++;
+        return calls === 1 ? new Response(JSON.stringify({ error: "PAYMENT_REQUIRED" }), { status: 402 }) : paid();
+      }
+      return await base(input, init);
+    });
+    return () => calls;
+  }
+
+  test("a duplicate flash_won that finds a payment already settling backs off: not blocked, no runner-up", async () => {
+    const { w, m, won } = await wonSale();
+    withCdpKeys();
+    const calls = purchaseAnswers(won.purchaseUrl, () => new Response(JSON.stringify({ error: "PURCHASE_IN_PROGRESS" }), { status: 409 }));
+    await w.t.action(internal.companyAgentsNode.pay, { advertiserId: w.launchKit.advertiserId, payload: won });
+    expect(calls()).toBe(2);
+    const after = await w.momentDoc(m._id);
+    expect(after.status).toBe("awarded");
+    expect(after.paymentBlocked).toBeUndefined();
+    expect(after.steps.some((st) => st.key === "payment_blocked")).toBe(false);
+    expect((await w.offersOf(m._id)).find((o) => o._id === won.offerId)!.status).toBe("won");
+    expect(await lastActionOf(w, w.launchKit.advertiserId)).toContain("already settling");
+  });
+
+  test("after paying, the agent reads its wallet balance again 15 s later", async () => {
+    const { w, won } = await wonSale();
+    withCdpKeys();
+    const tx = `0x${"12".repeat(32)}`;
+    purchaseAnswers(won.purchaseUrl, () => new Response("{}", { status: 200, headers: { "PAYMENT-RESPONSE": tx } }));
+    const before = Date.now();
+    await w.t.action(internal.companyAgentsNode.pay, { advertiserId: w.launchKit.advertiserId, payload: won });
+    expect(await lastActionOf(w, w.launchKit.advertiserId)).toContain(`flash_won: paid`);
+    const refresh = (await w.t.run(async (ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter(
+      (f) => f.name.includes("refreshBalance") && f.state.kind === "pending",
+    );
+    expect(refresh).toHaveLength(1);
+    expect(refresh[0].scheduledTime).toBeGreaterThanOrEqual(before + 15_000);
+  });
+
+  test("an agent whose wallet balance was never read passes and says why", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const w = await liveWorldWithAgents(); // no CDP keys: the balance is never read
+    expect((await w.agentRow(w.launchKit)).balanceMinor).toBeUndefined();
+    await w.camera(w.led, 10);
+    await w.flush();
+    const lastAction = (await w.agentRow(w.launchKit)).lastAction!;
+    expect(lastAction).toMatch(/^flash_offer: pass/);
+    expect(lastAction).toMatch(/wallet balance unknown/i);
+    expect(lastAction).not.toMatch(/cap of 0/);
+  });
+
+  test("a company's own top-up claims from the faucet; only the host's top-up moves operator money (R26)", async () => {
+    const w = await liveWorldWithAgents();
+    await w.launchKit.customer.mutation(api.companyAgents.requestTopUp, {});
+    await w.host.mutation(api.companyAgents.hostTopUp, { advertiserId: w.rivet.advertiserId });
+    const topUps = (await w.t.run(async (ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter(
+      (f) => f.name.includes("topUp") && f.state.kind === "pending",
+    );
+    expect(topUps.map((f) => [f.args[0].advertiserId, f.args[0].source])).toEqual([
+      [w.launchKit.advertiserId, "faucet"],
+      [w.rivet.advertiserId, "operator"],
+    ]);
+
+    // The faucet path never opens the operator account.
+    withCdpKeys();
+    cdpFake.faucetClaims = [];
+    cdpFake.accounts = [];
+    cdpFake.transfers = [];
+    const result = await w.t.action(internal.companyAgentsNode.topUp, { advertiserId: w.launchKit.advertiserId, amountMinor: 200, source: "faucet" });
+    expect(result!.message).toContain("faucet");
+    expect(cdpFake.faucetClaims).toEqual([`usdc:${fakeAddress(`co-${w.launchKit.advertiserId}`)}`]);
+    expect(cdpFake.accounts).not.toContain("billboardos-operator");
+    expect(cdpFake.transfers).toHaveLength(0);
+  });
+
+  test("a host top-up warns when X402_PAY_TO is not the operator wallet", async () => {
+    const w = await liveWorldWithAgents();
+    withCdpKeys();
+    cdpFake.usdcAtomic = 0n; // operator short: falls back to the faucet, still warns
+    const operator = fakeAddress("billboardos-operator");
+    try {
+      process.env.X402_PAY_TO = `0x${"11".repeat(20)}`;
+      const result = await w.t.action(internal.companyAgentsNode.topUp, { advertiserId: w.launchKit.advertiserId, amountMinor: 200, source: "operator" });
+      expect(result!.warning).toContain("X402_PAY_TO");
+      expect(result!.warning).toContain(operator);
+      expect((await w.agentRow(w.launchKit)).lastAction).toContain("WARNING: X402_PAY_TO");
+      expect((await w.t.action(internal.companyAgentsNode.operatorWallet, {})).warning).toContain(operator);
+
+      // Same account (any letter case), or unset: no warning.
+      process.env.X402_PAY_TO = `0x${operator.slice(2).toUpperCase()}`;
+      expect((await w.t.action(internal.companyAgentsNode.topUp, { advertiserId: w.launchKit.advertiserId, amountMinor: 200, source: "operator" }))!.warning).toBeNull();
+      delete process.env.X402_PAY_TO;
+      expect(await w.t.action(internal.companyAgentsNode.operatorWallet, {})).toMatchObject({ address: operator, payTo: null, warning: null });
+    } finally {
+      delete process.env.X402_PAY_TO;
+    }
   });
 
   test("top up is limited to 5 per day", async () => {

@@ -19,6 +19,9 @@ export function agentCap(i: {
   return Math.max(0, Math.min(Math.round(i.valueMinor * (0.5 + i.matchScore)), i.maxPerSpotMinor, i.budgetLeftMinor, i.balanceMinor));
 }
 
+/** Said when the wallet hasn't been read yet: the cap can't be trusted, so the agent sits out. */
+export const BALANCE_UNKNOWN = "Wallet balance unknown (not read yet), so I can't commit to a price";
+
 /** Reaction to a spot announcement: accept the opening price, counter lower, or pass. */
 export function onAnnounce(i: {
   openingMinor: number;
@@ -26,10 +29,13 @@ export function onAnnounce(i: {
   relevantViewers: number;
   minRelevantViewers: number;
   cap: number;
+  /** The wallet balance hasn't been read: pass and say so (the cap would be a meaningless 0). */
+  balanceUnknown?: boolean;
 }): AgentDecision {
   if (i.relevantViewers < i.minRelevantViewers) {
     return { decision: "pass", reasoning: `Only ${i.relevantViewers} relevant viewers, under my minimum of ${i.minRelevantViewers}` };
   }
+  if (i.balanceUnknown) return { decision: "pass", reasoning: BALANCE_UNKNOWN };
   if (i.cap >= i.openingMinor) {
     return { decision: "accept", amountMinor: i.openingMinor, reasoning: `Opening price ${i.openingMinor} is within my cap of ${i.cap}` };
   }
@@ -47,7 +53,8 @@ export function onUpdate(i: { youLead: boolean; bidsLeft: number; minNextMinor: 
 }
 
 /** Reaction to the seller's counter-offer: accept, meet halfway within the cap, or pass. */
-export function onCounter(i: { sellerMinor: number; lastOfferMinor: number; cap: number }): AgentDecision {
+export function onCounter(i: { sellerMinor: number; lastOfferMinor: number; cap: number; balanceUnknown?: boolean }): AgentDecision {
+  if (i.balanceUnknown) return { decision: "pass", reasoning: BALANCE_UNKNOWN };
   if (i.sellerMinor <= i.cap) {
     return { decision: "accept", amountMinor: i.sellerMinor, reasoning: `Seller's ${i.sellerMinor} is within my cap of ${i.cap}` };
   }
@@ -61,4 +68,35 @@ export function onCounter(i: { sellerMinor: number; lastOfferMinor: number; cap:
 /** Human-feeling reaction delay: 300 to 1000 ms. */
 export function bidDelayMs(rand: number): number {
   return 300 + Math.floor(clamp(rand, 0, 1) * 700);
+}
+
+/** A webhook payload as the company agent reads it (every field optional: it is outside input). */
+export type AgentPayload = {
+  type?: string;
+  offerId?: string;
+  // flash_offer
+  valueMinor?: number | null;
+  openingMinor?: number;
+  priceMinor?: number;
+  minimumMinor?: number;
+  relevantViewers?: number;
+  audienceMatch?: number;
+  // auction_started / auction_update
+  minNextMinor?: number;
+  youLead?: boolean;
+  bidsLeft?: number;
+  // negotiation_counter
+  sellerMinor?: number;
+  yourLastOfferMinor?: number | null;
+  roundsLeft?: number;
+  // flash_won
+  holdId?: string;
+  amountMinor?: number;
+  purchaseUrl?: string;
+  links?: { reply?: string; bid?: string };
+};
+
+/** Our own deployment's HTTP origin (the agent only ever calls it). */
+export function agentSiteUrl(): string {
+  return (process.env.CONVEX_SITE_URL ?? "https://billboardos.invalid").replace(/\/$/, "");
 }

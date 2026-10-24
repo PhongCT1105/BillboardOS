@@ -196,6 +196,20 @@ function Stopwatch({ m, now }: { m: Moment; now: number }) {
   );
 }
 
+/** Shown only once a moment is past its bound (its close never ran): end it so the host's queue moves. */
+function EndStuck({ momentId }: { momentId: Id<"moments"> }) {
+  const endStuck = useMutation(api.moments.endStuck);
+  const end = useAction();
+  return (
+    <div className="mt-2 flex flex-col items-end gap-1">
+      <button type="button" className={secondaryBtn} disabled={end.busy} onClick={() => void end.run(() => endStuck({ momentId }))}>
+        {end.busy ? "Ending…" : "End stuck moment"}
+      </button>
+      <ErrorLine error={end.error} />
+    </div>
+  );
+}
+
 function MomentDetail({ m, now }: { m: Moment; now: number }) {
   const closesLeft = m.status === "bidding" && m.biddingClosesAt !== null ? Math.max(0, m.biddingClosesAt - now) : m.status === "offering" ? Math.max(0, m.offerClosesAt - now) : null;
   const price = m.winner ? money(m.winner.amountMinor) : money(m.priceMinor);
@@ -216,6 +230,7 @@ function MomentDetail({ m, now }: { m: Moment; now: number }) {
                 {m.extensions > 0 && <span className="ml-2 text-sm text-faint">extended {m.extensions}x</span>}
               </p>
             )}
+            {m.stuckAfter !== null && now > m.stuckAfter && <EndStuck momentId={m.momentId} />}
           </div>
         </section>
 
@@ -510,7 +525,7 @@ function TopUpPanel() {
   return (
     <Card>
       <h2 className="font-semibold">Top up a company</h2>
-      <p className="mt-1 text-sm text-muted">Send test USDC to a company agent's wallet so it can pay. Five top-ups a day per company.</p>
+      <p className="mt-1 text-sm text-muted">Send $2.00 test USDC from the operator wallet to a company agent's wallet so it can pay (the faucet covers it if the operator wallet is short). Five top-ups a day per company, shared with the company's own faucet top-ups.</p>
       {companies === undefined ? null : companies.length === 0 ? (
         <p className="mt-4 text-sm text-muted">No company has set up an agent yet.</p>
       ) : (

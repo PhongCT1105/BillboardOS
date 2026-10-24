@@ -45,7 +45,11 @@ export function momentSettingsOf(ws: {
   return {
     enabled: ws.momentEnabled ?? d.enabled,
     minPeopleInView: ws.momentMinPeopleInView ?? d.minPeopleInView,
-    joinWindowMs: ws.momentResponseWindowMs ?? d.joinWindowMs,
+    // Clamped: a stored value outside the limits (older rows, direct writes) never gives a 0 s or endless window.
+    joinWindowMs: Math.min(
+      MOMENT_LIMITS.joinWindowMs.max,
+      Math.max(MOMENT_LIMITS.joinWindowMs.min, Number.isFinite(ws.momentResponseWindowMs) ? ws.momentResponseWindowMs! : d.joinWindowMs),
+    ),
     minMatch: ws.momentMinMatch ?? d.minMatch,
   };
 }
