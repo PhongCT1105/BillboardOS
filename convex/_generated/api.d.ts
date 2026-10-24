@@ -25,6 +25,7 @@ import type * as fixtures_financeAnswerKey from "../fixtures/financeAnswerKey.js
 import type * as fixtures_financeFixture from "../fixtures/financeFixture.js";
 import type * as holds from "../holds.js";
 import type * as http from "../http.js";
+import type * as lib_audienceWindow from "../lib/audienceWindow.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_collections from "../lib/collections.js";
 import type * as lib_constants from "../lib/constants.js";
@@ -66,6 +67,7 @@ declare const fullApi: ApiFromModules<{
   "fixtures/financeFixture": typeof fixtures_financeFixture;
   holds: typeof holds;
   http: typeof http;
+  "lib/audienceWindow": typeof lib_audienceWindow;
   "lib/audit": typeof lib_audit;
   "lib/collections": typeof lib_collections;
   "lib/constants": typeof lib_constants;

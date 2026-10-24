@@ -12,8 +12,15 @@
 
 export const PRICING_POLICY_VERSION = "pricing-v1";
 
-/** Expected people per 15-minute bucket at "normal" demand. */
+/** Default "normal traffic" (people per 15-minute bucket); billboards may override. */
 export const BASELINE_AUDIENCE_PER_BUCKET = 120;
+
+/** A billboard's normal traffic, falling back to the default for missing/invalid values. */
+export function effectiveBaseline(perBucket: number | undefined | null): number {
+  return perBucket !== undefined && perBucket !== null && Number.isFinite(perBucket) && perBucket > 0
+    ? perBucket
+    : BASELINE_AUDIENCE_PER_BUCKET;
+}
 export const DEMAND_MULTIPLIER_MIN = 0.8;
 export const DEMAND_MULTIPLIER_MAX = 2.0;
 /** Audience aggregates older than this (relative to `now`) are ignored. */
@@ -38,7 +45,54 @@ export type AudienceSample = {
   source: "camera" | "simulated";
   /** 0..1 */
   confidence: number;
+  /** Set when the sample is a trailing 15-minute window (see trailingAudience). */
+  window?: { coverage: number };
 };
+
+/** Audience buckets are 15 minutes, aligned to the clock (matches slot length). */
+export const AUDIENCE_BUCKET_MS = 15 * 60 * 1000;
+/** If less than half of the trailing window has measurements, confidence is capped (reads "low"). */
+export const LOW_COVERAGE_CONFIDENCE_CAP = 0.3;
+
+export type AudienceBucket = {
+  bucketStart: number;
+  countEstimate: number;
+  source: "camera" | "simulated";
+  confidence: number;
+};
+
+/**
+ * Audience over the trailing 15 minutes ending at `now`:
+ *   current bucket count + previous bucket count x (share of the previous bucket
+ *   still inside the window).
+ * E.g. 5 min into a bucket: current + previous x 10/15.
+ * Missing buckets contribute nothing; if under half the window is covered by
+ * data, confidence is capped at LOW_COVERAGE_CONFIDENCE_CAP. Neither bucket -> null.
+ */
+export function trailingAudience(buckets: AudienceBucket[], now: number): AudienceSample | null {
+  const B = AUDIENCE_BUCKET_MS;
+  const currentStart = now - (now % B);
+  const cur = buckets.find((b) => b.bucketStart === currentStart) ?? null;
+  const prev = buckets.find((b) => b.bucketStart === currentStart - B) ?? null;
+  if (!cur && !prev) return null;
+
+  const elapsed = now - currentStart;
+  const prevShare = (B - elapsed) / B;
+  const countEstimate = Math.round(
+    (cur?.countEstimate ?? 0) + (prev ? prev.countEstimate * prevShare : 0),
+  );
+  const curWeight = cur ? elapsed : 0;
+  const prevWeight = prev ? B - elapsed : 0;
+  const coverage = (curWeight + prevWeight) / B;
+  let confidence =
+    curWeight + prevWeight > 0
+      ? ((cur ? cur.confidence * curWeight : 0) + (prev ? prev.confidence * prevWeight : 0)) /
+        (curWeight + prevWeight)
+      : (cur ?? prev)!.confidence;
+  if (coverage < 0.5) confidence = Math.min(confidence, LOW_COVERAGE_CONFIDENCE_CAP);
+  const source = cur?.source === "simulated" || prev?.source === "simulated" ? "simulated" : "camera";
+  return { countEstimate, bucketStart: now, source, confidence, window: { coverage } };
+}
 
 export type SlotPricingInput = {
   baseRateMinor: number;
@@ -106,7 +160,9 @@ export function hourFactorFor(timestampMs: number, utcOffsetMinutes: number): nu
 export function demandFromAudience(
   audience: AudienceSample | null,
   now: number,
+  baselinePerBucket?: number,
 ): DemandResult {
+  const baseline = effectiveBaseline(baselinePerBucket);
   if (audience === null) {
     return {
       multiplier: 1,
@@ -131,7 +187,7 @@ export function demandFromAudience(
     };
   }
 
-  const raw = audience.countEstimate / BASELINE_AUDIENCE_PER_BUCKET;
+  const raw = audience.countEstimate / baseline;
   const clamped = Math.min(DEMAND_MULTIPLIER_MAX, Math.max(DEMAND_MULTIPLIER_MIN, raw));
   // Shrink toward 1.0 by confidence: an uncertain count moves the price less.
   const multiplier = round2(1 + (clamped - 1) * audience.confidence);
@@ -139,11 +195,14 @@ export function demandFromAudience(
     audience.confidence >= 0.75 ? "high" : audience.confidence >= 0.4 ? "medium" : "low";
 
   const sourceLabel = audience.source === "simulated" ? "SIMULATED sensor" : "camera aggregate";
+  const measured = audience.window
+    ? `Audience ${audience.countEstimate} people in the last 15 min (${sourceLabel}, confidence ${audience.confidence.toFixed(2)}, ${Math.round(audience.window.coverage * 100)}% of the window measured)`
+    : `Audience ${audience.countEstimate} people/15min (${sourceLabel}, confidence ${audience.confidence.toFixed(2)})`;
   return {
     multiplier,
     confidence,
     basis: [
-      `Audience ${audience.countEstimate} people/15min (${sourceLabel}, confidence ${audience.confidence.toFixed(2)}) vs baseline ${BASELINE_AUDIENCE_PER_BUCKET}`,
+      `${measured}; ${baseline} people per 15 min is normal here`,
       `Demand multiplier x${multiplier.toFixed(2)} (raw x${round2(raw).toFixed(2)}, clamped to [${DEMAND_MULTIPLIER_MIN}, ${DEMAND_MULTIPLIER_MAX}], weighted by confidence)`,
     ],
   };
@@ -176,11 +235,13 @@ export function priceQuote(args: {
   slotStartTimes: number[];
   audience: AudienceSample | null;
   now: number;
+  /** Billboard's normal traffic per 15 min; defaults to BASELINE_AUDIENCE_PER_BUCKET. */
+  audienceBaselinePerBucket?: number;
 }): QuotePrice {
   if (args.slotStartTimes.length === 0) {
     throw new Error("priceQuote requires at least one slot");
   }
-  const demand = demandFromAudience(args.audience, args.now);
+  const demand = demandFromAudience(args.audience, args.now, args.audienceBaselinePerBucket);
   const slotPrices = args.slotStartTimes.map((slotStartAt) =>
     priceSlot(
       {

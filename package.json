@@ -15,12 +15,14 @@
     "test:watch": "vitest",
     "seed": "convex run seed:demo",
     "server": "tsx server/x402-server.ts",
-    "buyer": "tsx server/buyer-agent.ts"
+    "buyer": "tsx server/buyer-agent.ts",
+    "postinstall": "node -e \"require('fs').cpSync('node_modules/@mediapipe/tasks-vision/wasm','public/mediapipe',{recursive:true})\""
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.60.0",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
+    "@mediapipe/tasks-vision": "^1.1.1",
     "@phosphor-icons/react": "^2.1.10",
     "@x402/core": "^2.28.0",
     "@x402/evm": "^2.28.0",

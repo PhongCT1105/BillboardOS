@@ -80,6 +80,9 @@ describe("quotes", () => {
       source: "camera",
       confidence: 1,
     });
+    // Pricing uses a trailing 15-min window; at 16:07 only 7/15 of it is measured
+    // (confidence capped). Two minutes later more than half is covered.
+    vi.setSystemTime(START + 2 * 60 * 1000);
     const busy = await t.mutation(api.quotes.create, {
       campaignId: seed.campaignId,
       slotIds: [slots[0]._id],

@@ -6,6 +6,7 @@ import { ConsolePage } from "./console/ConsolePage";
 import { PlayerPage } from "./player/PlayerPage";
 import { BookPage } from "./book/BookPage";
 import { FinancePage } from "./finance/FinancePage";
+import { SensorPage } from "./sensor/SensorPage";
 
 export function App() {
   const route = useHashRoute();
@@ -15,6 +16,8 @@ export function App() {
   if (playerMatch) {
     return <PlayerPage billboardId={playerMatch[1] as Id<"billboards">} />;
   }
+
+  const sensorMatch = route.match(/^\/sensor\/([^/]+)$/);
 
   return (
     <div className="min-h-[100dvh]">
@@ -34,6 +37,11 @@ export function App() {
               Book a slot
             </NavLink>
             {billboards?.[0] && (
+              <NavLink href={`#/sensor/${billboards[0]._id}`} active={route.startsWith("/sensor/")}>
+                Sensor
+              </NavLink>
+            )}
+            {billboards?.[0] && (
               <a
                 href={`#/player/${billboards[0]._id}`}
                 target="_blank"
@@ -46,7 +54,15 @@ export function App() {
           </nav>
         </div>
       </header>
-      {route === "/book" ? <BookPage /> : route === "/finance" ? <FinancePage /> : <ConsolePage />}
+      {sensorMatch ? (
+        <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />
+      ) : route === "/book" ? (
+        <BookPage />
+      ) : route === "/finance" ? (
+        <FinancePage />
+      ) : (
+        <ConsolePage />
+      )}
     </div>
   );
 }

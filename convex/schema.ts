@@ -182,6 +182,7 @@ export const auditEventType = v.union(
   v.literal("seed.completed"),
   v.literal("demo.reset"),
   v.literal("inventory.generated"),
+  v.literal("billboard.baseline_changed"),
   v.literal("campaign.created"),
   v.literal("quote.created"),
   v.literal("quote.expired"),
@@ -248,6 +249,8 @@ export const billboardFields = {
   /** Baseline price per slot before demand / hour-of-day adjustment. */
   baseRateMinor: v.number(),
   deviceStatus,
+  /** "Normal traffic" in people per 15 min for demand pricing; missing = 120. */
+  audienceBaselinePerBucket: v.optional(v.number()),
 };
 
 export const slotFields = {
@@ -373,6 +376,8 @@ export const audienceAggregateFields = {
   source: audienceSource,
   /** 0..1 */
   confidence: v.number(),
+  /** Max people simultaneously in view during the bucket (dwell proxy). */
+  peakInView: v.optional(v.number()),
 };
 
 export const playbackEventFields = {

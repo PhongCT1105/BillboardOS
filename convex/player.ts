@@ -3,7 +3,8 @@ import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
-import { AUDIENCE_STALE_AFTER_MS, priceQuote } from "./lib/pricing";
+import { priceQuote } from "./lib/pricing";
+import { loadTrailingAudience } from "./lib/audienceWindow";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
@@ -121,31 +122,16 @@ export const nowPlaying = query({
       )
       .take(HOUSE_AD_MAX_SLOTS);
     const available = upcoming.filter((s) => s.state === "available");
-    const audience = await ctx.db
-      .query("audienceAggregates")
-      .withIndex("by_billboard_and_bucketStart", (q) =>
-        q
-          .eq("billboardId", billboard._id)
-          .gte("bucketStart", at - AUDIENCE_STALE_AFTER_MS)
-          .lte("bucketStart", at),
-      )
-      .order("desc")
-      .first();
+    const { sample: audience } = await loadTrailingAudience(ctx.db, billboard._id, at);
     let fromPriceMinor: number | null = null;
     for (const slot of available) {
       const price = priceQuote({
         baseRateMinor: billboard.baseRateMinor,
         reserveFloorMinor: billboard.reserveFloorMinor,
         utcOffsetMinutes: billboard.utcOffsetMinutes,
+        audienceBaselinePerBucket: billboard.audienceBaselinePerBucket,
         slotStartTimes: [slot.startAt],
-        audience: audience
-          ? {
-              countEstimate: audience.countEstimate,
-              bucketStart: audience.bucketStart,
-              source: audience.source,
-              confidence: audience.confidence,
-            }
-          : null,
+        audience,
         now: at,
       });
       if (fromPriceMinor === null || price.amountMinor < fromPriceMinor) {

@@ -5,11 +5,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { currency, pricingConfidence } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { MAX_KEY_LENGTH, MAX_SLOTS_PER_QUOTE, QUOTE_TTL_MS } from "./lib/constants";
-import {
-  AUDIENCE_STALE_AFTER_MS,
-  PRICING_POLICY_VERSION,
-  priceQuote,
-} from "./lib/pricing";
+import { PRICING_POLICY_VERSION, priceQuote } from "./lib/pricing";
+import { loadTrailingAudience } from "./lib/audienceWindow";
 import { assertBoundedString } from "./lib/validators";
 
 /**
@@ -98,31 +95,16 @@ export const create = mutation({
       });
     }
 
-    // Most recent non-stale audience bucket (bounded on both sides).
-    const audience = await ctx.db
-      .query("audienceAggregates")
-      .withIndex("by_billboard_and_bucketStart", (q) =>
-        q
-          .eq("billboardId", billboardId)
-          .gte("bucketStart", now - AUDIENCE_STALE_AFTER_MS)
-          .lte("bucketStart", now),
-      )
-      .order("desc")
-      .first();
+    // Audience over the trailing 15 minutes (current + share of previous bucket).
+    const audience = await loadTrailingAudience(ctx.db, billboardId, now);
 
     const price = priceQuote({
       baseRateMinor: billboard.baseRateMinor,
       reserveFloorMinor: billboard.reserveFloorMinor,
       utcOffsetMinutes: billboard.utcOffsetMinutes,
+      audienceBaselinePerBucket: billboard.audienceBaselinePerBucket,
       slotStartTimes: slots.map((s) => s.startAt),
-      audience: audience
-        ? {
-            countEstimate: audience.countEstimate,
-            bucketStart: audience.bucketStart,
-            source: audience.source,
-            confidence: audience.confidence,
-          }
-        : null,
+      audience: audience.sample,
       now,
     });
 
@@ -137,7 +119,7 @@ export const create = mutation({
       expiresAt,
       pricingBasis: price.pricingBasis,
       confidence: price.confidence,
-      audienceAggregateId: audience?._id,
+      audienceAggregateId: audience.newest?._id,
       policyVersion: PRICING_POLICY_VERSION,
       status: "open",
       traceId,
