@@ -197,9 +197,6 @@ export async function detectCore(
   if (last) {
     const busy = last.status === "offering" || last.status === "awarded" || ((last.status === "paid" || last.status === "playing") && last.spotEndAt > now);
     if (busy) return { momentId: null, reason: "a moment is already in progress on this screen" };
-    if (trigger !== "simulated" && now - last.startedAt < settings.cooldownMs) {
-      return { momentId: null, reason: `cooling down (${Math.round(settings.cooldownMs / 60_000)} min per screen)` };
-    }
   }
 
   const { sample } = await loadTrailingAudience(ctx.db, billboard._id, now);
@@ -213,7 +210,7 @@ export async function detectCore(
       crowdSimulated: sample?.source === "simulated",
       screenTags: billboard.audienceTags,
       event: e ? { name: e.name, tags: e.audienceTags, uplift: e.upliftMultiplier } : null,
-      threshold: settings.minRelevantViewers,
+      threshold: settings.minPeopleInView,
     });
     if (!detection || d.relevantViewers > detection.relevantViewers) {
       detection = d;
@@ -246,7 +243,7 @@ export async function detectCore(
     return { momentId: null, reason: `${detection.reasoning}; no eligible customers (${skipped.join("; ") || "no ready creatives"})` };
   }
   const minutes = Math.round(covered / 60_000);
-  const offerClosesAt = now + settings.responseWindowMs;
+  const offerClosesAt = now + settings.joinWindowMs;
   const momentId = await ctx.db.insert("moments", {
     workspaceId: billboard.workspaceId,
     billboardId: billboard._id,
@@ -326,13 +323,13 @@ export async function detectCore(
       slots: [{ slotId: slot._id, startAt: spotStartAt, endAt: slot.endAt, screenPriceMinor: priceMinor }],
       matchCount: 1,
       priceMinor,
-      reason: `Flash offer from ${workspace.name}: ${minutes} min on ${billboard.name} for ${usd(priceMinor)}, ~${t.relevantViewers} relevant viewers. Reply within ${Math.round(settings.responseWindowMs / 1000)} s.`,
+      reason: `Flash offer from ${workspace.name}: ${minutes} min on ${billboard.name} for ${usd(priceMinor)}, ~${t.relevantViewers} relevant viewers. Reply within ${Math.round(settings.joinWindowMs / 1000)} s.`,
       createdAt: now,
       inbox: { status: "delivered" },
     });
     await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId, event: "flash_offer" });
   }
-  await addMomentStep(ctx, moment, "offers_sent", `${targets.length} flash offer${targets.length === 1 ? "" : "s"} sent`, `Signed webhooks + inbox; window closes in ${Math.round(settings.responseWindowMs / 1000)} s.`);
+  await addMomentStep(ctx, moment, "offers_sent", `${targets.length} flash offer${targets.length === 1 ? "" : "s"} sent`, `Signed webhooks + inbox; window closes in ${Math.round(settings.joinWindowMs / 1000)} s.`);
   await ctx.scheduler.runAt(offerClosesAt, internal.moments.close, { momentId });
   return { momentId, reason: "offers sent" };
 }
@@ -650,7 +647,7 @@ export const paymentBlocked = internalMutation({
     await ctx.db.patch(moment._id, { paymentBlocked: reason });
     await addMomentStep(ctx, moment, "payment_blocked", `Payment blocked: ${reason}`, "No money moved. Nothing is shown as paid without a settlement transaction.");
     const workspace = (await ctx.db.get(moment.workspaceId))!;
-    if (!momentSettingsOf(workspace).rehearsalSettlement) return { rehearsal: false };
+    if (!workspace.rehearsalSettlement) return { rehearsal: false };
     const hold = await ctx.db.get(args.holdId);
     if (!hold || hold.status !== "active") return { rehearsal: false };
     await applyVerifiedPayment(
@@ -673,11 +670,9 @@ export const paymentBlocked = internalMutation({
 
 export const settingsView = v.object({
   enabled: v.boolean(),
-  minRelevantViewers: v.number(),
-  cooldownMinutes: v.number(),
-  responseWindowSeconds: v.number(),
+  minPeopleInView: v.number(),
+  joinWindowSeconds: v.number(),
   minMatch: v.number(),
-  rehearsalSettlement: v.boolean(),
 });
 
 export const settings = query({
@@ -688,11 +683,9 @@ export const settings = query({
     const s = momentSettingsOf((await ctx.db.get(me.workspaceId))!);
     return {
       enabled: s.enabled,
-      minRelevantViewers: s.minRelevantViewers,
-      cooldownMinutes: Math.round(s.cooldownMs / 60_000),
-      responseWindowSeconds: Math.round(s.responseWindowMs / 1000),
+      minPeopleInView: s.minPeopleInView,
+      joinWindowSeconds: Math.round(s.joinWindowMs / 1000),
       minMatch: s.minMatch,
-      rehearsalSettlement: s.rehearsalSettlement,
     };
   },
 });
@@ -701,27 +694,24 @@ export const updateSettings = mutation({
   args: {
     workspaceId: v.id("workspaces"),
     enabled: v.boolean(),
-    minRelevantViewers: v.number(),
-    cooldownMinutes: v.number(),
-    responseWindowSeconds: v.number(),
+    minPeopleInView: v.number(),
+    joinWindowSeconds: v.number(),
     minMatch: v.number(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     const owner = await requireWorkspaceMember(ctx, args.workspaceId, "owner");
     const s = {
-      minRelevantViewers: args.minRelevantViewers,
-      cooldownMs: Math.round(args.cooldownMinutes * 60_000),
-      responseWindowMs: Math.round(args.responseWindowSeconds * 1000),
+      minPeopleInView: args.minPeopleInView,
+      joinWindowMs: Math.round(args.joinWindowSeconds * 1000),
       minMatch: args.minMatch,
     };
     const problem = validateMomentSettings(s);
     if (problem) fail("INVALID_INPUT", problem);
     await ctx.db.patch(args.workspaceId, {
       momentEnabled: args.enabled,
-      momentMinRelevantViewers: s.minRelevantViewers,
-      momentCooldownMs: s.cooldownMs,
-      momentResponseWindowMs: s.responseWindowMs,
+      momentMinPeopleInView: s.minPeopleInView,
+      momentResponseWindowMs: s.joinWindowMs,
       momentMinMatch: s.minMatch,
     });
     await recordAudit(ctx, {
@@ -730,7 +720,7 @@ export const updateSettings = mutation({
       actor: owner.actor,
       type: "workspace.policy_changed",
       subjectId: args.workspaceId,
-      reason: `Moment detector ${args.enabled ? "on" : "off"}: ${s.minRelevantViewers}+ relevant viewers, ${args.cooldownMinutes} min cooldown, ${args.responseWindowSeconds}s window, ${Math.round(s.minMatch * 100)}% match`,
+      reason: `Moment detector ${args.enabled ? "on" : "off"}: ${s.minPeopleInView}+ people in view, ${args.joinWindowSeconds}s join window, ${Math.round(s.minMatch * 100)}% match`,
     });
     return null;
   },
@@ -819,7 +809,7 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
       offerId: o._id,
       company,
       campaignBrief: brief,
-      simulatedAgent: o.simulatedAgent,
+      simulatedAgent: o.simulatedAgent ?? false,
       priceMinor: o.priceMinor,
       relevantViewers: o.relevantViewers,
       matchScore: o.matchScore,
@@ -829,7 +819,7 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
       repliedAt: o.repliedAt ?? null,
       deliveryStatus: o.delivery.status,
     });
-    if (m.winnerOfferId === o._id) winner = { company, amountMinor: o.replyAmountMinor ?? o.priceMinor, simulatedAgent: o.simulatedAgent };
+    if (m.winnerOfferId === o._id) winner = { company, amountMinor: o.replyAmountMinor ?? o.priceMinor, simulatedAgent: o.simulatedAgent ?? false };
   }
   return {
     momentId: m._id,
@@ -970,7 +960,7 @@ export const myBuys = query({
         minutes: Math.round((m.spotEndAt - m.spotStartAt) / 60_000),
         amountMinor: o.replyAmountMinor ?? null,
         relevantViewers: o.relevantViewers,
-        simulatedAgent: o.simulatedAgent,
+        simulatedAgent: o.simulatedAgent ?? false,
         paymentMode: mine ? (m.paymentMode ?? null) : null,
         paymentTx: mine ? (m.paymentTx ?? null) : null,
         paymentNetwork: mine ? (m.paymentNetwork ?? null) : null,

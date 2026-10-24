@@ -44,7 +44,6 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
   const atMinute = Math.floor(now / 15_000) * 15_000;
   // Keep showing the last result while a query re-subscribes with new time args (no flicker on stage).
   const live = useSticky(useQuery(api.moments.live, { billboardId, atMinute }));
-  const settings = useQuery(api.moments.settings, {});
   const playing = useSticky(useQuery(api.player.nowPlaying, { billboardId, atMinute: Math.floor(now / MINUTE) * MINUTE }));
   const simulate = useMutation(api.moments.simulateCrowd);
   const [people, setPeople] = useState("30");
@@ -77,11 +76,6 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
           <p className="mt-1 text-sm text-muted">{live.screen.locationLabel}</p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
-          {settings?.rehearsalSettlement && (
-            <span className="rounded-md border border-amber-400/60 bg-amber-400/10 px-2.5 py-1.5 text-xs font-semibold text-amber-300">
-              REHEARSAL settlement ON: blocked payments are simulated
-            </span>
-          )}
           <label className="flex flex-col gap-1 text-xs text-muted">
             People
             <input
@@ -337,7 +331,6 @@ function SettingsPanel() {
   const me = useQuery(api.workspaces.get, {});
   const settings = useQuery(api.moments.settings, {});
   const save = useMutation(api.moments.updateSettings);
-  const setRehearsal = useMutation(api.moments.setRehearsalSettlement);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!me || !settings) return null;
@@ -347,7 +340,7 @@ function SettingsPanel() {
       <button type="button" onClick={() => setOpen(!open)} className="flex w-full items-center justify-between text-left">
         <span className="font-semibold">Seller agent: moment settings</span>
         <span className="text-sm text-muted">
-          {settings.enabled ? "on" : "off"} · {settings.minRelevantViewers}+ relevant · {settings.responseWindowSeconds}s window · {settings.cooldownMinutes} min cooldown
+          {settings.enabled ? "on" : "off"} · {settings.minPeopleInView}+ in view · {settings.joinWindowSeconds}s join window
         </span>
       </button>
       {open && (
@@ -361,9 +354,8 @@ function SettingsPanel() {
               await save({
                 workspaceId: me.workspaceId,
                 enabled: f.get("enabled") === "on",
-                minRelevantViewers: Number(f.get("min")),
-                cooldownMinutes: Number(f.get("cooldown")),
-                responseWindowSeconds: Number(f.get("window")),
+                minPeopleInView: Number(f.get("min")),
+                joinWindowSeconds: Number(f.get("window")),
                 minMatch: Number(f.get("match")) / 100,
               });
             } catch (err) {
@@ -374,9 +366,8 @@ function SettingsPanel() {
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" name="enabled" defaultChecked={settings.enabled} disabled={!owner} /> Detector on
           </label>
-          <SettingField name="min" label="Min relevant viewers" value={settings.minRelevantViewers} disabled={!owner} />
-          <SettingField name="cooldown" label="Cooldown (min)" value={settings.cooldownMinutes} disabled={!owner} />
-          <SettingField name="window" label="Reply window (s)" value={settings.responseWindowSeconds} disabled={!owner} />
+          <SettingField name="min" label="Min people in view" value={settings.minPeopleInView} disabled={!owner} />
+          <SettingField name="window" label="Join window (s)" value={settings.joinWindowSeconds} disabled={!owner} />
           <SettingField name="match" label="Min audience match (%)" value={Math.round(settings.minMatch * 100)} disabled={!owner} />
           {owner && (
             <button type="submit" className="col-span-2 self-start rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink md:col-span-1">
@@ -386,25 +377,6 @@ function SettingsPanel() {
           {error && <p className="col-span-full text-sm text-danger">{error}</p>}
         </form>
       )}
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
-        <div className="max-w-[70ch]">
-          <p className="text-sm font-semibold text-amber-300">Rehearsal settlement {settings.rehearsalSettlement ? "ON" : "OFF"}</p>
-          <p className="text-xs text-muted">
-            Only for rehearsing before payment keys exist: when a winner's x402 payment is blocked, settle its hold with a REHEARSAL (simulated) payment. No money moves and it is labeled everywhere. Off by default.
-          </p>
-        </div>
-        {owner ? (
-          <button
-            type="button"
-            onClick={() => void setRehearsal({ workspaceId: me.workspaceId, enabled: !settings.rehearsalSettlement })}
-            className="rounded-md border border-amber-400/60 px-3 py-1.5 text-sm text-amber-200 hover:bg-amber-400/10"
-          >
-            Turn {settings.rehearsalSettlement ? "off" : "on"}
-          </button>
-        ) : (
-          <span className="text-xs text-faint">Owners only</span>
-        )}
-      </div>
     </section>
   );
 }

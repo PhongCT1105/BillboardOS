@@ -134,7 +134,7 @@ describe("live moment", () => {
     expect(w.seed.companies.every((c) => c.label === "simulated customer agent" && c.webhookUrl.startsWith(`${SITE}/demo-agents/`))).toBe(true);
     expect(JSON.stringify(w.seed)).not.toMatch(/bos_agent_[0-9a-f]{8}_/);
     const settings = await w.host.query(api.moments.settings, {});
-    expect(settings).toMatchObject({ enabled: true, minRelevantViewers: 15, cooldownMinutes: 10, responseWindowSeconds: 8, rehearsalSettlement: false });
+    expect(settings).toMatchObject({ enabled: true, minPeopleInView: 1, joinWindowSeconds: 2 });
     const ready = await w.host.query(api.creatives.readyForWorkspace, {});
     expect(ready.filter((r) => r.ready).length).toBe(3);
     // Operators (non-owners) can't flip the rehearsal toggle.
@@ -280,9 +280,8 @@ describe("live moment", () => {
     await w.host.mutation(api.moments.updateSettings, {
       workspaceId: w.workspaceId,
       enabled: true,
-      minRelevantViewers: 500,
-      cooldownMinutes: 1,
-      responseWindowSeconds: 8,
+      minPeopleInView: 500,
+      joinWindowSeconds: 8,
       minMatch: 0.3,
     });
     vi.advanceTimersByTime(2 * 60 * 60_000);

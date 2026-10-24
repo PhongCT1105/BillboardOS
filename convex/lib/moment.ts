@@ -7,27 +7,24 @@ import { matchScore, normalizeTags, type AudienceTags } from "./match";
 
 export type MomentSettings = {
   enabled: boolean;
-  minRelevantViewers: number;
-  cooldownMs: number;
-  responseWindowMs: number;
+  /** People in view needed before a screen goes live. */
+  minPeopleInView: number;
+  /** How long a company agent has to join an auction. */
+  joinWindowMs: number;
   /** Campaign audience match needed to be offered the spot (0..1). */
   minMatch: number;
-  rehearsalSettlement: boolean;
 };
 
 export const DEFAULT_MOMENT_SETTINGS: MomentSettings = {
   enabled: true,
-  minRelevantViewers: 15,
-  cooldownMs: 10 * 60_000,
-  responseWindowMs: 8_000,
+  minPeopleInView: 1,
+  joinWindowMs: 2_000,
   minMatch: 0.3,
-  rehearsalSettlement: false,
 };
 
 export const MOMENT_LIMITS = {
-  minRelevantViewers: { min: 1, max: 10_000 },
-  cooldownMs: { min: 60_000, max: 24 * 60 * 60_000 },
-  responseWindowMs: { min: 3_000, max: 60_000 },
+  minPeopleInView: { min: 1, max: 10_000 },
+  joinWindowMs: { min: 1_000, max: 10_000 },
   minMatch: { min: 0, max: 1 },
 } as const;
 
@@ -40,30 +37,26 @@ export const MAX_OFFERS = 5;
 
 export function momentSettingsOf(ws: {
   momentEnabled?: boolean;
-  momentMinRelevantViewers?: number;
-  momentCooldownMs?: number;
+  momentMinPeopleInView?: number;
   momentResponseWindowMs?: number;
   momentMinMatch?: number;
-  rehearsalSettlement?: boolean;
 }): MomentSettings {
   const d = DEFAULT_MOMENT_SETTINGS;
   return {
     enabled: ws.momentEnabled ?? d.enabled,
-    minRelevantViewers: ws.momentMinRelevantViewers ?? d.minRelevantViewers,
-    cooldownMs: ws.momentCooldownMs ?? d.cooldownMs,
-    responseWindowMs: ws.momentResponseWindowMs ?? d.responseWindowMs,
+    minPeopleInView: ws.momentMinPeopleInView ?? d.minPeopleInView,
+    joinWindowMs: ws.momentResponseWindowMs ?? d.joinWindowMs,
     minMatch: ws.momentMinMatch ?? d.minMatch,
-    rehearsalSettlement: ws.rehearsalSettlement ?? d.rehearsalSettlement,
   };
 }
 
-export function validateMomentSettings(s: Omit<MomentSettings, "enabled" | "rehearsalSettlement">): string | null {
+export function validateMomentSettings(s: Omit<MomentSettings, "enabled">): string | null {
   const L = MOMENT_LIMITS;
-  for (const key of ["minRelevantViewers", "cooldownMs", "responseWindowMs", "minMatch"] as const) {
+  for (const key of ["minPeopleInView", "joinWindowMs", "minMatch"] as const) {
     const value = s[key];
     if (!Number.isFinite(value) || value < L[key].min || value > L[key].max) return `${key} must be between ${L[key].min} and ${L[key].max}`;
   }
-  if (!Number.isInteger(s.minRelevantViewers)) return "minRelevantViewers must be a whole number";
+  if (!Number.isInteger(s.minPeopleInView)) return "minPeopleInView must be a whole number";
   return null;
 }
 
@@ -137,7 +130,8 @@ export type Standing = {
   maxPricePerSpotMinor: number;
   minRelevantViewers: number;
   dailyBudgetMinor: number;
-  policy: "auto_accept" | "counter" | "pass";
+  /** Legacy: kept so old rows validate; no new code writes it. */
+  policy?: "auto_accept" | "counter" | "pass";
   counterRatio?: number;
 };
 
@@ -149,8 +143,8 @@ export function validateStanding(s: Standing): string | null {
   if (!Number.isSafeInteger(s.dailyBudgetMinor) || s.dailyBudgetMinor <= 0 || s.dailyBudgetMinor > 10_000_000) {
     return "dailyBudgetMinor must be whole cents in (0, 10000000]";
   }
-  if (s.policy === "counter" && (s.counterRatio === undefined || !Number.isFinite(s.counterRatio) || s.counterRatio < 0.5 || s.counterRatio > 1)) {
-    return "counterRatio must be between 0.5 and 1 for the counter policy";
+  if (s.counterRatio !== undefined && (!Number.isFinite(s.counterRatio) || s.counterRatio < 0.5 || s.counterRatio > 1)) {
+    return "counterRatio must be between 0.5 and 1";
   }
   return null;
 }
