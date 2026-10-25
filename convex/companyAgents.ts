@@ -4,21 +4,20 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags, standingInstructions } from "./schema";
 import { issueAgentKey } from "./agentKeys";
-import { spentTodayForAdvertiserMinor } from "./moments";
 import { recordAudit } from "./lib/audit";
 import { encryptSecret } from "./lib/demoCrypto";
 import { keyStatus } from "./lib/agentKeys";
-import { MAX_BIDS_PER_COMPANY } from "./lib/liveAuction";
 import { validateTags } from "./lib/match";
-import { validateStanding, type Standing } from "./lib/moment";
+import { campaignsReadyFor, spentTodayForAdvertiserMinor, validateStanding, type Standing } from "./lib/sale";
 import { requireCampaignAccess, requireCustomer, resolveWorkspace } from "./lib/tenancy";
 import { signWebhook } from "./lib/webhook";
-import { explorerTxUrl } from "./lib/x402/money";
 import { budgetProblem, limitsFromBudget } from "./lib/companyAgent";
 import { isYouTubeCreative, parseYouTubeUrl } from "./lib/youtube";
 import { attachYouTubeCreative } from "./creatives";
 import { youtubeOf } from "./creativeReview";
-import { companyStage, knowledgeMethod, oembedStatus } from "./schemaParts/knowledge";
+import { oembedStatus } from "./schemaParts/knowledge";
+import { researchMethod } from "./schemaParts/sales";
+import { requestResearch, researchOf } from "./research";
 
 /**
  * Company agents (spec "Accounts, wallets and agents"): each advertiser sets
@@ -38,15 +37,11 @@ const KEY_DAYS = 365;
 const MAX_BUDGET_MINOR = 10_000_000;
 const TOP_UPS_PER_DAY = 5;
 const TOP_UP_MINOR = 200;
-const FEED_OFFERS = 10;
-const MAX_BIDS_SCANNED = 100;
 const FAUCET_EVERY_MS = 24 * 60 * 60_000;
 const MAX_CAMPAIGNS_SCANNED = 20;
 const VIDEO_CAMPAIGN_BUDGET_MINOR = 5000;
-/** Placeholder audience for the seconds before the video's card exists (same as a new screen's). */
+/** Placeholder audience until the research agent has read the company. */
 const STARTER_AUDIENCE: Record<string, number> = { startups: 0.5, software: 0.5 };
-
-const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 
 function fail(code: string, message: string): never {
   throw new ConvexError({ code, message });
@@ -145,13 +140,11 @@ export const quickSetup = mutation({
       await attachYouTubeCreative(ctx, campaign, customer.actor, parsed);
     }
     await ctx.db.patch(campaign._id, { audienceSource: "video" });
-    // Until the video's card is in, start from the company's current card (or the campaign's guess).
-    const card = await ctx.db
-      .query("knowledgeCards")
-      .withIndex("by_advertiser", (q) => q.eq("advertiserId", customer.advertiserId))
-      .unique();
-    const fromCard = card && Object.keys(card.audienceTags).length > 0 && !validateTags(card.audienceTags) ? card.audienceTags : null;
-    const targetAudience = fromCard ?? campaign.targetAudience ?? STARTER_AUDIENCE;
+    // Until the research agent has read the video, start from what it knew (or the campaign's guess).
+    const research = await researchOf(ctx, customer.advertiserId);
+    const fromResearch = research && !validateTags(research.audienceTags) ? research.audienceTags : null;
+    const targetAudience = fromResearch ?? campaign.targetAudience ?? STARTER_AUDIENCE;
+    await requestResearch(ctx, customer.advertiserId);
     const { maxPerSpotMinor, minRelevantViewers } = limitsFromBudget(args.dailyBudgetMinor);
     const { agentId } = await configureAgent(ctx, {
       campaign: (await ctx.db.get(campaign._id))!,
@@ -189,7 +182,8 @@ async function campaignForVideo(ctx: MutationCtx, advertiserId: Id<"advertisers"
   return (await ctx.db.get(campaignId))!;
 }
 
-async function configureAgent(
+/** Set up (or reconfigure) a company's built-in agent: a fresh sealed key with these limits, and its wallet. */
+export async function configureAgent(
   ctx: MutationCtx,
   input: { campaign: Doc<"campaigns">; actor: string; targetAudience: Record<string, number>; standing: Standing },
 ): Promise<{ agentId: Id<"companyAgents"> }> {
@@ -277,17 +271,16 @@ export const mine = query({
           status: oembedStatus,
         }),
       ),
-      /** The company's knowledge card: what we worked out (its audience is the ICP). */
+      /** What the research agent learned: who the company sells to (matching) and its price factor. */
       profile: v.union(
         v.null(),
         v.object({
           summary: v.string(),
           category: v.string(),
-          stage: companyStage,
           audienceTags: v.record(v.string(), v.number()),
-          method: knowledgeMethod,
-          /** A quick guess on screen while Claude writes the real card. */
-          building: v.boolean(),
+          priceFactor: v.number(),
+          reasoning: v.string(),
+          method: researchMethod,
           updatedAt: v.number(),
         }),
       ),
@@ -300,10 +293,7 @@ export const mine = query({
     const key = await ctx.db.get(agent.agentKeyId);
     const campaign = await ctx.db.get(agent.campaignId);
     const yt = campaign && isYouTubeCreative(campaign) ? await youtubeOf(ctx, campaign._id) : null;
-    const card = await ctx.db
-      .query("knowledgeCards")
-      .withIndex("by_advertiser", (q) => q.eq("advertiserId", agent.advertiserId))
-      .unique();
+    const research = await researchOf(ctx, agent.advertiserId);
     return {
       advertiserId: agent.advertiserId,
       video: yt
@@ -317,15 +307,15 @@ export const mine = query({
             status: yt.oembedStatus,
           }
         : null,
-      profile: card
+      profile: research
         ? {
-            summary: card.summary,
-            category: card.category,
-            stage: card.stage,
-            audienceTags: card.audienceTags,
-            method: card.method,
-            building: card.refining === true,
-            updatedAt: card.updatedAt,
+            summary: research.summary,
+            category: research.category,
+            audienceTags: research.audienceTags,
+            priceFactor: research.priceFactor,
+            reasoning: research.reasoning,
+            method: research.method,
+            updatedAt: research.researchedAt,
           }
         : null,
       enabled: agent.enabled,
@@ -337,104 +327,6 @@ export const mine = query({
       spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, agent.advertiserId, Date.now()),
       lastAction: agent.lastAction ?? null,
     };
-  },
-});
-
-const feedKind = v.union(
-  v.literal("announce"),
-  v.literal("bid"),
-  v.literal("rival_bid"),
-  v.literal("counter"),
-  v.literal("won"),
-  v.literal("lost"),
-  v.literal("paid"),
-  v.literal("blocked"),
-);
-const feedEntry = v.object({
-  at: v.number(),
-  kind: feedKind,
-  text: v.string(),
-  amountMinor: v.optional(v.number()),
-  txUrl: v.optional(v.string()),
-});
-type FeedEntry = typeof feedEntry.type;
-
-/**
- * The company's live feed, newest first: each announcement with its price
- * story, every bid (the rival is only ever "Another company"), counters, the
- * win or loss, and the payment (with its Basescan link) or why it was blocked.
- */
-export const feed = query({
-  args: { limit: v.optional(v.number()) },
-  returns: v.array(feedEntry),
-  handler: async (ctx, args) => {
-    const customer = await requireCustomer(ctx);
-    const limit = Math.max(1, Math.min(200, Math.floor(args.limit ?? 50)));
-    const offers = await ctx.db
-      .query("flashOffers")
-      .withIndex("by_advertiser", (q) => q.eq("advertiserId", customer.advertiserId))
-      .order("desc")
-      .take(FEED_OFFERS);
-    const out: FeedEntry[] = [];
-    for (const o of offers) {
-      const m = await ctx.db.get(o.momentId);
-      if (!m) continue;
-      const billboard = await ctx.db.get(m.billboardId);
-      const minutes = Math.round((m.spotEndAt - m.spotStartAt) / 60_000);
-      out.push({
-        at: o.sentAt,
-        kind: "announce",
-        text: `${billboard?.name ?? "A screen"}: ${minutes}-minute spot, bidding opens at ${usd(m.priceMinor)} (minimum ${usd(m.floorMinor)}), ~${o.relevantViewers} matching people in view. ${m.priceWhy ?? m.reasoning}`,
-        amountMinor: m.priceMinor,
-      });
-      const bids = await ctx.db
-        .query("momentBids")
-        .withIndex("by_moment", (q) => q.eq("momentId", m._id))
-        .take(MAX_BIDS_SCANNED);
-      let myBids = 0;
-      for (const b of bids) {
-        const mine = b.offerId === o._id;
-        if (b.kind === "bid" && mine) {
-          myBids++;
-          out.push({ at: b.at, kind: "bid", text: `You bid ${usd(b.amountMinor)} (bid ${myBids} of ${MAX_BIDS_PER_COMPANY})`, amountMinor: b.amountMinor });
-        } else if (b.kind === "bid") {
-          out.push({ at: b.at, kind: "rival_bid", text: `Another company bid ${usd(b.amountMinor)}`, amountMinor: b.amountMinor });
-        } else if (b.kind === "buyer_offer" && mine) {
-          out.push({ at: b.at, kind: "counter", text: `You offered ${usd(b.amountMinor)}`, amountMinor: b.amountMinor });
-        } else if (b.kind === "seller_counter" && mine) {
-          out.push({ at: b.at, kind: "counter", text: `The host countered at ${usd(b.amountMinor)}`, amountMinor: b.amountMinor });
-        }
-      }
-      const hold = o.holdId ? await ctx.db.get(o.holdId) : null;
-      if (hold) {
-        out.push({ at: hold._creationTime, kind: "won", text: `You won the spot at ${usd(hold.amountMinor)}: pay within 60 s`, amountMinor: hold.amountMinor });
-        const paid = m.winnerOfferId === o._id && (m.status === "paid" || m.status === "playing") && m.paymentTx;
-        if (paid) {
-          const settled = m.steps.find((s) => s.key === "settled");
-          out.push({
-            at: settled?.at ?? hold._creationTime,
-            kind: "paid",
-            text: `Paid ${usd(m.paidMinor ?? hold.amountMinor)} USDC from your wallet over x402`,
-            amountMinor: m.paidMinor ?? hold.amountMinor,
-            txUrl: explorerTxUrl(m.paymentNetwork ?? "", m.paymentTx!),
-          });
-        } else if (o.status === "defaulted" || (o.status === "won" && m.paymentBlocked)) {
-          const blocked = m.steps.find((s) => s.key === "payment_blocked" && s.at >= hold._creationTime);
-          out.push({
-            at: blocked?.at ?? Math.min(hold.expiresAt, hold._creationTime + 60_000),
-            kind: "blocked",
-            text: blocked?.label ?? "Not paid within 60 s: the spot went to the next best offer",
-            amountMinor: hold.amountMinor,
-          });
-        }
-      }
-      if (o.status === "lost") {
-        const end = [...m.steps].reverse().find((s) => s.key === "winner" || s.key === "failed");
-        out.push({ at: end?.at ?? m.startedAt, kind: "lost", text: m.status === "failed" ? "Nobody got this spot" : "Another company won this spot" });
-      }
-    }
-    out.sort((a, b) => b.at - a.at);
-    return out.slice(0, limit);
   },
 });
 
@@ -469,15 +361,10 @@ export const requestTopUp = mutation({
 
 /** Companies with a company agent whose creative this host has approved (the host's demo companies). */
 async function hostCompanies(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<Doc<"companyAgents">[]> {
-  const approvals = await ctx.db
-    .query("creativeApprovals")
-    .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId))
-    .take(100);
   const seen = new Set<Id<"advertisers">>();
   const out: Doc<"companyAgents">[] = [];
-  for (const a of approvals) {
-    const campaign = await ctx.db.get(a.campaignId);
-    if (!campaign || seen.has(campaign.advertiserId)) continue;
+  for (const campaign of await campaignsReadyFor(ctx, workspaceId)) {
+    if (seen.has(campaign.advertiserId)) continue;
     seen.add(campaign.advertiserId);
     const agent = await agentOf(ctx, campaign.advertiserId);
     if (agent) out.push(agent);
@@ -485,7 +372,7 @@ async function hostCompanies(ctx: QueryCtx, workspaceId: Id<"workspaces">): Prom
   return out;
 }
 
-/** Host: the companies with agents (creative approved here) and their wallet balances, for the presenter's top-up control. */
+/** Host: the companies with agents (an ad ready on its screens) and their wallet balances, for the presenter's top-up control. */
 export const hostList = query({
   args: {},
   returns: v.array(
@@ -579,7 +466,7 @@ export const enqueue = internalMutation({
  * own, the spot's value and its audience match (everything `agentCap` needs).
  */
 export const forAct = internalQuery({
-  args: { advertiserId: v.id("advertisers"), now: v.number(), offerId: v.optional(v.string()), holdId: v.optional(v.string()) },
+  args: { advertiserId: v.id("advertisers"), now: v.number(), holdId: v.optional(v.string()) },
   returns: v.union(
     v.null(),
     v.object({
@@ -592,7 +479,6 @@ export const forAct = internalQuery({
       standing: v.union(standingInstructions, v.null()),
       spentTodayMinor: v.number(),
       balanceMinor: v.union(v.number(), v.null()),
-      offer: v.union(v.null(), v.object({ valueMinor: v.union(v.number(), v.null()), matchScore: v.number() })),
       /** Given a hold this company's agent took: can it still be paid? */
       holdActive: v.union(v.boolean(), v.null()),
     }),
@@ -602,9 +488,6 @@ export const forAct = internalQuery({
     if (!agent) return null;
     const key = await ctx.db.get(agent.agentKeyId);
     const company = (await ctx.db.get(agent.advertiserId))?.displayName ?? "company";
-    const offerId = args.offerId ? ctx.db.normalizeId("flashOffers", args.offerId) : null;
-    const offer = offerId ? await ctx.db.get(offerId) : null;
-    const moment = offer && offer.advertiserId === agent.advertiserId ? await ctx.db.get(offer.momentId) : null;
     const holdId = args.holdId ? ctx.db.normalizeId("holds", args.holdId) : null;
     const hold = holdId ? await ctx.db.get(holdId) : null;
     const holdKey = hold?.agentKeyId ? await ctx.db.get(hold.agentKeyId) : null;
@@ -619,7 +502,6 @@ export const forAct = internalQuery({
       standing: key?.standing ?? null,
       spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, agent.advertiserId, args.now),
       balanceMinor: agent.balanceMinor ?? null,
-      offer: offer && moment ? { valueMinor: moment.valueMinor ?? null, matchScore: offer.matchScore } : null,
       holdActive,
     };
   },

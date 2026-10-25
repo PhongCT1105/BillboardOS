@@ -80,6 +80,17 @@ async function world(opts: { companies?: string[]; screenTags?: Record<string, n
       ...(opts.screenTags === null ? {} : { audienceTags: opts.screenTags ?? { startups: 0.5, software: 0.5 } }),
     });
     await ensureUpcomingSlots(ctx, id, Date.now());
+    // A paired device (auto-sell only sells real screens).
+    const deviceId = await ctx.db.insert("screenDevices", {
+      deviceKeyHash: "test",
+      pairingCode: "TEST01",
+      codeExpiresAt: 0,
+      billboardId: id,
+      utcOffsetMinutes: -420,
+      lastSeenAt: Date.now(),
+      createdAt: Date.now(),
+    });
+    await ctx.db.patch(id, { deviceId });
     return id;
   });
 
@@ -127,30 +138,107 @@ async function world(opts: { companies?: string[]; screenTags?: Record<string, n
     );
   const bid = (c: { key: string }, roundId: Id<"rounds">, amountMinor: number | null, reasoning = "test") =>
     t.mutation(internal.rounds.submitBid, { token: c.key, roundId, amountMinor, reasoning });
-  return { t, host, workspaceId, led, companies, addCompany, start, round, bids, bid };
+  const camera = (people: number) =>
+    host.mutation(api.audience.addArrivals, { billboardId: led, arrivals: people, peakInView: people, confidence: 1, source: "camera" });
+  return { t, host, workspaceId, led, companies, addCompany, start, round, bids, bid, camera };
 }
 
-describe("rounds: start, invite, bid, close", () => {
-  test("S1: two bids, the higher wins and pays the runner-up's bid + 1¢", async () => {
+/** Run everything scheduled "now", step by step, without jumping the clock. */
+async function flush(t: TestClient, rounds = 10) {
+  for (let i = 0; i < rounds; i++) {
+    vi.advanceTimersByTime(1);
+    await t.finishInProgressScheduledFunctions();
+  }
+}
+
+const roundsOn = (w: { t: TestClient; led: Id<"billboards"> }) =>
+  w.t.run(async (ctx) =>
+    ctx.db
+      .query("rounds")
+      .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", w.led))
+      .take(20),
+  );
+
+/** A round priced at $2.00 (6 people in view, usually 3; floor $1.00), started by the camera. */
+async function pricedAt200(w: Awaited<ReturnType<typeof world>>) {
+  await w.camera(6);
+  await flush(w.t);
+  const [r] = await roundsOn(w);
+  return r._id;
+}
+
+describe("rounds: start, offer, deal", () => {
+  test("S1: every company gets the same offer; the first to accept takes the spot at that price", async () => {
     const w = await world();
     const [lk, rivet] = w.companies;
     const id = (await w.start())!;
     expect(await w.round(id)).toMatchObject({ status: "bidding", floorMinor: 100, askingMinor: 100, invitedCount: 2 });
-    await w.bid(lk, id, 300);
-    await w.bid(rivet, id, 180);
+    expect((await w.bids(id)).map((b) => [b.offerMinor, b.match, b.companyFactor])).toEqual([
+      [100, 0.5, 1],
+      [100, 0.5, 1],
+    ]);
+    expect(await w.bid(lk, id, 100)).toEqual({ status: "deal", priceMinor: 100 });
     const r = await w.round(id);
-    const winner = (await w.bids(id)).find((b) => b._id === r.winnerBidId)!;
-    expect(r).toMatchObject({ status: "awarded", priceMinor: 181 });
-    expect(winner.advertiserId).toBe(lk.advertiserId);
-    expect(r.outcome).toMatch(/LaunchKit/);
-    expect(r.outcome).toMatch(/Rivet/);
+    expect(r).toMatchObject({ status: "awarded", priceMinor: 100, outcome: "LaunchKit took the spot at $1.00." });
+    expect((await w.bids(id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(lk.advertiserId);
+    expect((await w.bids(id)).find((b) => b.advertiserId === rivet.advertiserId)?.status).toBe("lost");
+    // No company-vs-company bidding: a bigger offer after the deal is too late.
+    expect(await errorCode(w.bid(rivet, id, 300))).toBe("ROUND_CLOSED");
   });
 
-  test("S2: one invited company closes the round as soon as it answers", async () => {
+  test("S2: an offer under the price gets one counter halfway; the next offer at or above the floor is a deal", async () => {
+    const w = await world();
+    const [lk] = w.companies;
+    const id = await pricedAt200(w);
+    expect(await w.bid(lk, id, 120)).toEqual({ status: "countered", priceMinor: 160 });
+    expect((await w.round(id)).status).toBe("bidding");
+    await flush(w.t);
+    const counter = webhooks.find((h) => h.event === "round_counter");
+    expect(counter?.url).toBe("https://agent.test/launchkit");
+    expect(counter?.body).toMatchObject({ type: "round_counter", priceMinor: 160, yourLastOfferMinor: 120, finalCounter: true });
+    expect(await w.bid(lk, id, 130)).toEqual({ status: "deal", priceMinor: 130 });
+    expect(await w.round(id)).toMatchObject({ status: "awarded", priceMinor: 130, outcome: "LaunchKit took the spot at $1.30 after a counter." });
+  });
+
+  test("S2b: each company negotiates alone; a counter to one doesn't change the other's price", async () => {
+    const w = await world();
+    const [lk, rivet] = w.companies;
+    const id = await pricedAt200(w);
+    await w.bid(lk, id, 120);
+    expect((await w.bids(id)).find((b) => b.advertiserId === rivet.advertiserId)?.offerMinor).toBe(200);
+    expect(await w.bid(rivet, id, 200)).toEqual({ status: "deal", priceMinor: 200 });
+  });
+
+  test("matching: a company whose buyers aren't in the crowd gets no offer, and the outcome says so", async () => {
     const w = await world({ companies: ["LaunchKit"] });
+    await w.t.run(async (ctx) => ctx.db.patch(w.companies[0].campaignId, { targetAudience: { families: 1 } }));
     const id = (await w.start())!;
-    await w.bid(w.companies[0], id, 150);
-    expect(await w.round(id)).toMatchObject({ status: "awarded", priceMinor: 100 });
+    expect(await w.round(id)).toMatchObject({ status: "unsold", invitedCount: 0 });
+    expect((await w.round(id)).outcome).toMatch(/No company's buyers are in this crowd.*LaunchKit \(0% match\)/);
+  });
+
+  test("the research agent's price factor gives each company its own price (never under the floor)", async () => {
+    const w = await world();
+    const [lk, rivet] = w.companies;
+    await w.t.run(async (ctx) => {
+      for (const [c, f] of [[lk, 1.5], [rivet, 0.8]] as const) {
+        await ctx.db.insert("companyResearch", {
+          advertiserId: c.advertiserId,
+          summary: "test",
+          category: "test",
+          audienceTags: { startups: 1 },
+          priceFactor: f,
+          reasoning: "test",
+          sources: [],
+          method: "rules",
+          researchedAt: Date.now(),
+        });
+      }
+    });
+    const id = await pricedAt200(w);
+    const bids = await w.bids(id);
+    expect(bids.find((b) => b.advertiserId === lk.advertiserId)?.offerMinor).toBe(300);
+    expect(bids.find((b) => b.advertiserId === rivet.advertiserId)?.offerMinor).toBe(160);
   });
 
   test("S3: nobody qualifies: unsold at once, with the reason", async () => {
@@ -170,25 +258,22 @@ describe("rounds: start, invite, bid, close", () => {
     expect(r.outcome).toMatch(/Budget used up/);
   });
 
-  test("S6: a screen without an audience profile still invites, with match unknown", async () => {
+  test("S6: a screen without an audience profile sells the same way", async () => {
     const w = await world({ screenTags: null });
     const id = (await w.start())!;
-    expect((await w.bids(id)).map((b) => b.match)).toEqual([null, null]);
-    await w.bid(w.companies[0], id, 120);
-    await w.bid(w.companies[1], id, null);
-    expect((await w.round(id)).status).toBe("awarded");
+    expect(await w.bid(w.companies[0], id, 100)).toEqual({ status: "deal", priceMinor: 100 });
   });
 
-  test("S7: an agent that never answers doesn't hold the round past 5 s", async () => {
+  test("S7: no deal by the deadline: unsold, with each company's last answer", async () => {
     const w = await world();
-    const id = (await w.start())!;
-    await w.bid(w.companies[1], id, 140);
-    expect((await w.round(id)).status).toBe("bidding");
-    vi.advanceTimersByTime(5_100);
+    const id = await pricedAt200(w);
+    await w.bid(w.companies[1], id, 120);
+    vi.advanceTimersByTime(10_100);
     await w.t.finishInProgressScheduledFunctions();
     const r = await w.round(id);
-    expect(r).toMatchObject({ status: "awarded", priceMinor: 100 });
-    expect((await w.bids(id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(w.companies[1].advertiserId);
+    expect(r.status).toBe("unsold");
+    expect(r.outcome).toMatch(/LaunchKit: no answer/);
+    expect(r.outcome).toMatch(/Rivet: offered \$1\.20, host asked \$1\.60/);
   });
 
   test("S10: no second round while one is open", async () => {
@@ -197,53 +282,38 @@ describe("rounds: start, invite, bid, close", () => {
     expect(await w.start()).toBeNull();
   });
 
-  test("S11: a bid over the agent's own limit or under the floor is refused; a later valid bid counts", async () => {
+  test("S11: an offer over the agent's own limit or under the floor is refused; a later valid one counts", async () => {
     const w = await world();
     const id = (await w.start())!;
     expect(await errorCode(w.bid(w.companies[0], id, 600))).toBe("OVER_LIMIT");
     expect(await errorCode(w.bid(w.companies[0], id, 50))).toBe("BELOW_FLOOR");
-    expect(await w.bid(w.companies[0], id, 300)).toEqual({ status: "bid" });
+    expect(await w.bid(w.companies[0], id, 100)).toEqual({ status: "deal", priceMinor: 100 });
   });
 
-  test("only invited companies can answer", async () => {
+  test("only invited companies can answer; a pass is final", async () => {
     const w = await world();
     const id = (await w.start())!;
     const late = await w.addCompany("Latecomer");
     expect(await errorCode(w.bid(late, id, 200))).toBe("NOT_INVITED");
+    await w.bid(w.companies[0], id, null);
+    expect(await errorCode(w.bid(w.companies[0], id, 100))).toBe("ALREADY_ANSWERED");
   });
 
-  test("closing twice changes nothing the second time", async () => {
+  test("closing after a deal changes nothing", async () => {
     const w = await world();
     const id = (await w.start())!;
-    await w.bid(w.companies[0], id, 200);
-    await w.t.run(async (ctx) => closeRoundCore(ctx, id));
+    await w.bid(w.companies[0], id, 100);
     const first = await w.round(id);
     await w.t.run(async (ctx) => closeRoundCore(ctx, id));
     expect(await w.round(id)).toEqual(first);
     expect(first.status).toBe("awarded");
   });
-
-  test("a bid after the round closed is refused", async () => {
-    const w = await world();
-    const id = (await w.start())!;
-    await w.bid(w.companies[0], id, 200);
-    await w.bid(w.companies[1], id, null);
-    expect(await errorCode(w.bid(w.companies[1], id, 300))).toBe("ROUND_CLOSED");
-  });
 });
 
-/** Run everything scheduled "now", step by step, without jumping the clock. */
-async function flush(t: TestClient, rounds = 10) {
-  for (let i = 0; i < rounds; i++) {
-    vi.advanceTimersByTime(1);
-    await t.finishInProgressScheduledFunctions();
-  }
-}
-
 describe("rounds: agents talk over webhooks and the agent API", () => {
-  test("S9: each invited agent gets a signed round_offer and bids over HTTP", async () => {
+  test("S9: each invited agent gets a signed round_offer and answers over HTTP", async () => {
     const w = await world();
-    const [lk, rivet] = w.companies;
+    const [lk] = w.companies;
     const id = (await w.start())!;
     await flush(w.t);
     const offers = webhooks.filter((h) => h.event === "round_offer");
@@ -252,58 +322,69 @@ describe("rounds: agents talk over webhooks and the agent API", () => {
       type: "round_offer",
       roundId: id,
       floorMinor: 100,
-      askingMinor: 100,
+      priceMinor: 100,
+      finalCounter: false,
       links: { bid: `/api/agent/rounds/${id}/bid` },
     });
-    const post = (key: string, body: unknown) =>
-      w.t.fetch(`/api/agent/rounds/${id}/bid`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    const first = await post(lk.key, { amountMinor: 200, reasoning: "Fits our launch" });
-    expect(first.status).toBe(200);
-    expect(await first.json()).toEqual({ status: "bid" });
-    expect(await (await post(rivet.key, { amountMinor: null, reasoning: "Not today" })).json()).toEqual({ status: "passed" });
+    const res = await w.t.fetch(`/api/agent/rounds/${id}/bid`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${lk.key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ amountMinor: 100, reasoning: "Fits our launch" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "deal", priceMinor: 100 });
     expect((await w.round(id)).status).toBe("awarded");
   });
 
-  test("the built-in company agent answers its round_offer with the rule-based bid", async () => {
+  async function builtIn(maxPerSpotMinor: number) {
     const w = await world({ companies: ["LaunchKit"] });
     const lk = w.companies[0];
     await lk.customer.mutation(api.companyAgents.setup, {
       campaignId: lk.campaignId,
       targetAudience: { startups: 1 },
       minRelevantViewers: 1,
-      maxPerSpotMinor: 500,
+      maxPerSpotMinor,
       dailyBudgetMinor: 1000,
     });
     await w.t.run(async (ctx) => {
       const agent = (await ctx.db.query("companyAgents").first())!;
       await ctx.db.patch(agent._id, { balanceMinor: 1000 });
     });
+    return w;
+  }
+
+  test("the built-in company agent takes an offer within its limits", async () => {
+    const w = await builtIn(500);
     const id = (await w.start())!;
     await flush(w.t, 20);
     const [row] = await w.bids(id);
-    const expected = ruleBasedStrategy({ floorMinor: 100, askingMinor: 100, match: row.match, crowd: null, maxPerSpotMinor: 500, budgetLeftMinor: 1000, balanceMinor: 1000 });
+    const expected = ruleBasedStrategy({ floorMinor: 100, priceMinor: 100, maxPerSpotMinor: 500, budgetLeftMinor: 1000, balanceMinor: 1000 });
     expect(row).toMatchObject({ amountMinor: expected.amountMinor, reasoning: expected.reasoning });
-    // It won and tried to pay; with no CDP keys here the payment is blocked, so the round ends unsold, saying why.
+    // It got the spot and tried to pay; with no CDP keys here the payment is blocked, so the round ends unsold, saying why.
     const r = await w.round(id);
     expect(row.status).toBe("defaulted");
     expect(r.status).toBe("unsold");
     expect(r.outcome).toMatch(/^Payment failed: LaunchKit's payment failed: no CDP keys/);
   });
+
+  test("the built-in company agent negotiates: counters at its limit, then closes after the host's counter", async () => {
+    const w = await builtIn(150);
+    const id = await pricedAt200(w);
+    await flush(w.t, 40);
+    // $2.00 asked; it offered its $1.50 limit, the host countered $1.75, it held at $1.50: a deal (then the test wallet can't pay).
+    expect((await w.round(id)).priceMinor).toBe(150);
+    expect(await w.bids(id)).toMatchObject([{ countered: true, offerMinor: 175, amountMinor: 150 }]);
+  });
 });
 
-describe("rounds: award, pay, runner-up", () => {
+describe("rounds: deal, pay", () => {
   const TX = `0x${"ab".repeat(32)}`;
 
-  async function awarded() {
+  async function dealt() {
     const w = await world();
     const [lk, rivet] = w.companies;
     const id = (await w.start())!;
-    await w.bid(lk, id, 300);
-    await w.bid(rivet, id, 180);
+    await w.bid(lk, id, 100);
     return { ...w, lk, rivet, id };
   }
   const holdOf = (w: { t: TestClient }, holdId: Id<"holds">) => w.t.run(async (ctx) => (await ctx.db.get(holdId))!);
@@ -318,92 +399,55 @@ describe("rounds: award, pay, runner-up", () => {
       idempotencyKey: `pay-${holdId}`,
     });
 
-  test("the winner gets a hold at the price; paying it with a tx hash marks the round paid and books the spot", async () => {
-    const w = await awarded();
+  test("the deal is a hold at the price; paying it with a tx hash marks the round paid and books the spot", async () => {
+    const w = await dealt();
     const r = await w.round(w.id);
-    expect(r.holdId).toBeDefined();
-    expect(await holdOf(w, r.holdId!)).toMatchObject({ status: "active", amountMinor: 181 });
+    expect(await holdOf(w, r.holdId!)).toMatchObject({ status: "active", amountMinor: 100 });
     await flush(w.t);
     expect(webhooks.filter((h) => h.event === "round_won").map((h) => h.url)).toEqual(["https://agent.test/launchkit"]);
     expect(webhooks.filter((h) => h.event === "round_lost").map((h) => h.url)).toEqual(["https://agent.test/rivet"]);
-    expect(webhooks.find((h) => h.event === "round_won")?.body).toMatchObject({ holdId: r.holdId, amountMinor: 181 });
+    expect(webhooks.find((h) => h.event === "round_won")?.body).toMatchObject({ holdId: r.holdId, amountMinor: 100 });
 
-    expect(await pay(w, r.holdId!, 181)).toMatchObject({ outcome: "booked" });
+    expect(await pay(w, r.holdId!, 100)).toMatchObject({ outcome: "booked" });
     const paid = await w.round(w.id);
     expect(paid).toMatchObject({ status: "paid", paymentTx: TX });
-    expect(paid.outcome).toMatch(/Paid \$1\.81 over x402/);
+    expect(paid.outcome).toMatch(/Paid \$1\.00 over x402/);
     const booking = await w.t.run(async (ctx) => ctx.db.query("bookings").withIndex("by_hold", (q) => q.eq("holdId", r.holdId!)).first());
     expect(booking).not.toBeNull();
   });
 
-  test("S8: the winner's payment fails: the runner-up gets the spot at its own bid; with nobody left, unsold", async () => {
-    const w = await awarded();
+  test("S8: the payment fails: hold released, unsold with the reason (the next round offers the spot again)", async () => {
+    const w = await dealt();
     const first = await w.round(w.id);
     await w.t.mutation(internal.rounds.paymentFailed, { holdId: first.holdId!, reason: "wallet empty" });
-    const second = await w.round(w.id);
     expect(await holdOf(w, first.holdId!)).toMatchObject({ status: "released" });
-    expect(second).toMatchObject({ status: "awarded", priceMinor: 180 });
-    expect((await w.bids(w.id)).find((b) => b._id === second.winnerBidId)?.advertiserId).toBe(w.rivet.advertiserId);
-    expect(await holdOf(w, second.holdId!)).toMatchObject({ status: "active", amountMinor: 180 });
-
-    await w.t.mutation(internal.rounds.paymentFailed, { holdId: second.holdId!, reason: "wallet empty" });
-    const third = await w.round(w.id);
-    expect(third.status).toBe("unsold");
-    expect(third.outcome).toMatch(/^Payment failed/);
+    expect(await w.round(w.id)).toMatchObject({ status: "unsold", outcome: "Payment failed: LaunchKit's payment failed: wallet empty." });
   });
 
   test("the pay deadline passes with no payment in flight: same as a failed payment", async () => {
-    const w = await awarded();
+    const w = await dealt();
     vi.advanceTimersByTime(61_000);
     await w.t.finishInProgressScheduledFunctions();
-    const r = await w.round(w.id);
-    expect(r).toMatchObject({ status: "awarded", priceMinor: 180 });
-    expect((await w.bids(w.id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(w.rivet.advertiserId);
+    expect((await w.round(w.id)).outcome).toMatch(/^Payment failed: LaunchKit's payment failed: not paid within 60 s/);
   });
 
-  test("the spot sold elsewhere before the close: unsold, said so", async () => {
+  test("the spot sold elsewhere before the deal: unsold, said so", async () => {
     const w = await world();
     const id = (await w.start())!;
     await w.t.run(async (ctx) => ctx.db.patch((await ctx.db.get(id))!.slotId, { state: "booked" }));
-    await w.bid(w.companies[0], id, 300);
-    await w.bid(w.companies[1], id, 180);
+    expect(await w.bid(w.companies[0], id, 100)).toEqual({ status: "unavailable", priceMinor: null });
     expect(await w.round(id)).toMatchObject({ status: "unsold", outcome: "Spot was sold elsewhere." });
-  });
-
-  test("the winner's key was revoked before the award: the next bid wins at its own amount", async () => {
-    const w = await world();
-    const [lk, rivet] = w.companies;
-    const id = (await w.start())!;
-    await w.bid(lk, id, 300);
-    await w.t.run(async (ctx) => ctx.db.patch(lk.agentKeyId, { revokedAt: Date.now() }));
-    await w.bid(rivet, id, 180);
-    const r = await w.round(id);
-    expect(r).toMatchObject({ status: "awarded", priceMinor: 180 });
-    expect((await w.bids(id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(rivet.advertiserId);
   });
 });
 
 describe("rounds: triggers", () => {
-  const roundsOn = (w: { t: TestClient; led: Id<"billboards"> }) =>
-    w.t.run(async (ctx) =>
-      ctx.db
-        .query("rounds")
-        .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", w.led))
-        .take(20),
-    );
-  const camera = (w: { host: TestClient; led: Id<"billboards"> }, people: number) =>
-    w.host.mutation(api.audience.addArrivals, { billboardId: w.led, arrivals: people, peakInView: people, confidence: 1, source: "camera" });
-
-  test("S5: the camera starts a round priced on the crowd; an agent capped under the asking price still wins", async () => {
+  test("S5: the camera starts a round priced on the crowd", async () => {
     const w = await world();
-    await camera(w, 6);
-    await flush(w.t);
-    const [r] = await roundsOn(w);
+    const id = await pricedAt200(w);
+    const r = await w.round(id);
     expect(r).toMatchObject({ trigger: "camera", crowd: 6, floorMinor: 100, askingMinor: 200 });
     expect(r.signals[0]).toMatchObject({ key: "crowd", factor: 2 });
-    await w.bid(w.companies[0], r._id, 150);
-    await w.bid(w.companies[1], r._id, null);
-    expect(await w.round(r._id)).toMatchObject({ status: "awarded", priceMinor: 150 });
+    expect(await w.bid(w.companies[0], id, 200)).toEqual({ status: "deal", priceMinor: 200 });
   });
 
   test("S10: the camera waits 60 s after a round; Sell now doesn't", async () => {
@@ -420,21 +464,23 @@ describe("rounds: triggers", () => {
 
   test("review: a burst of camera arrivals starts exactly one round", async () => {
     const w = await world();
-    await camera(w, 2);
-    await camera(w, 3);
-    await camera(w, 4);
+    await w.camera(2);
+    await w.camera(3);
+    await w.camera(4);
     await flush(w.t);
     expect(await roundsOn(w)).toHaveLength(1);
   });
 
-  test("S12: auto-sell is off by default; on, it starts one round per idle online screen, at most one per 2 minutes", async () => {
+  test("S12: auto-sell is on by default: one round per idle online screen, at most one per 2 minutes; off, it starts nothing", async () => {
     const w = await world();
-    await w.t.mutation(internal.rounds.autoSellTick, {});
-    expect(await roundsOn(w)).toHaveLength(0);
-    await w.host.mutation(api.rounds.setAutoSell, { enabled: true });
     await w.t.mutation(internal.rounds.autoSellTick, {});
     expect((await roundsOn(w)).map((r) => r.trigger)).toEqual(["timer"]);
     vi.advanceTimersByTime(60_000);
+    await w.t.finishInProgressScheduledFunctions();
+    await w.t.mutation(internal.rounds.autoSellTick, {});
+    expect(await roundsOn(w)).toHaveLength(1);
+    await w.host.mutation(api.rounds.setAutoSell, { enabled: false });
+    vi.advanceTimersByTime(120_000);
     await w.t.finishInProgressScheduledFunctions();
     await w.t.mutation(internal.rounds.autoSellTick, {});
     expect(await roundsOn(w)).toHaveLength(1);
@@ -442,9 +488,9 @@ describe("rounds: triggers", () => {
 });
 
 describe("rounds: screens and pages", () => {
-  test("the screen shows the bids while bidding, then plays the winner's YouTube ad once paid with a tx hash", async () => {
-    const w = await world({ companies: ["LaunchKit", "Rivet", "Quiet"] });
-    const [lk, rivet] = w.companies;
+  test("the screen shows the offer, then plays the buyer's YouTube ad once paid with a tx hash", async () => {
+    const w = await world();
+    const [lk] = w.companies;
     await w.t.run(async (ctx) => {
       await ctx.db.patch(lk.campaignId, { creativeStorageId: undefined, creativeContentType: "youtube" });
       await ctx.db.insert("youtubeCreatives", {
@@ -459,12 +505,8 @@ describe("rounds: screens and pages", () => {
       });
     });
     const id = (await w.start())!;
-    await w.bid(lk, id, 300);
-    await w.bid(rivet, id, 180);
-    const bidding = await w.t.query(api.player.screenState, { billboardId: w.led });
-    expect(bidding).toMatchObject({ mode: "auction", openingMinor: 100, minimumMinor: 100, ladder: [], sealedBids: 2 });
-
-    await w.bid(w.companies[2], id, null);
+    expect(await w.t.query(api.player.screenState, { billboardId: w.led })).toMatchObject({ mode: "auction", openingMinor: 100, minimumMinor: 100 });
+    await w.bid(lk, id, 100);
     expect((await w.t.query(api.player.screenState, { billboardId: w.led })).mode).toBe("settling");
     const r = await w.round(id);
     await w.t.mutation(internal.payments.recordVerified, {
@@ -479,62 +521,30 @@ describe("rounds: screens and pages", () => {
     const playing = await w.t.query(api.player.screenState, { billboardId: w.led });
     expect(playing).toMatchObject({
       mode: "playing",
-      nowPlaying: { company: "LaunchKit", wonAtMinor: 181, creative: { provider: "youtube", youtubeVideoId: "dQw4w9WgXcQ" } },
+      nowPlaying: { company: "LaunchKit", wonAtMinor: 100, creative: { provider: "youtube", youtubeVideoId: "dQw4w9WgXcQ" } },
     });
     expect(playing.nowPlaying?.txShort).not.toBeNull();
   });
 
-  test("the presenter sees every bid with its reasoning; the advertiser sees only its own", async () => {
+  test("the presenter sees every answer with its reasoning; the advertiser sees only its own", async () => {
     const w = await world();
     const [lk, rivet] = w.companies;
     const id = (await w.start())!;
-    await w.bid(lk, id, 200, "Founders in view");
     await w.bid(rivet, id, null, "Out of budget");
+    await w.bid(lk, id, 100, "Founders in view");
     const live = await w.host.query(api.rounds.live, {});
-    expect(live.autoSell).toBe(false);
-    expect(live.screens[0].round?.bids.map((b) => [b.company, b.amountMinor, b.reasoning]).sort()).toEqual([
-      ["LaunchKit", 200, "Founders in view"],
-      ["Rivet", null, "Out of budget"],
+    expect(live.autoSell).toBe(true);
+    expect(live.screens[0].round?.bids.map((b) => [b.company, b.amountMinor, b.offerMinor, b.reasoning]).sort()).toEqual([
+      ["LaunchKit", 100, 100, "Founders in view"],
+      ["Rivet", null, 100, "Out of budget"],
     ]);
     const mine = await lk.customer.query(api.rounds.myRounds, {});
     expect(mine).toHaveLength(1);
-    expect(mine[0]).toMatchObject({ screen: "LED", amountMinor: 200, bidStatus: "won", roundStatus: "awarded" });
+    expect(mine[0]).toMatchObject({ screen: "LED", amountMinor: 100, bidStatus: "won", roundStatus: "awarded" });
   });
 });
 
 describe("rounds: final review fixes", () => {
-  test("I-1: an auction opening on the slot mid-round ends the round unsold instead of leaving it stuck", async () => {
-    const w = await world();
-    const id = (await w.start())!;
-    await w.t.run(async (ctx) => {
-      const round = (await ctx.db.get(id))!;
-      const auctionId = await ctx.db.insert("auctions", {
-        workspaceId: round.workspaceId,
-        billboardId: round.billboardId,
-        slotIds: [round.slotId],
-        reserveMinor: 100,
-        currentMinor: 100,
-        status: "open",
-        openedAt: Date.now(),
-        endsAt: Date.now() + 60_000,
-        hardEndsAt: Date.now() + 120_000,
-        incrementRule: { percentBps: 500, minMinor: 5 },
-        softCloseMs: 10_000,
-        openedBy: "test",
-        openReason: "test",
-        traceId: "test",
-        extensions: 0,
-      });
-      await ctx.db.patch(round.slotId, { auctionId });
-    });
-    await w.bid(w.companies[0], id, 300);
-    await w.bid(w.companies[1], id, 180);
-    const r = await w.round(id);
-    expect(r.status).toBe("unsold");
-    expect(r.outcome).toMatch(/auction/i);
-    expect((await w.bids(id)).find((b) => b.advertiserId === w.companies[1].advertiserId)?.amountMinor).toBe(180);
-  });
-
   test("I-1: a round stuck past its close (its close never ran) is closed before a new round starts", async () => {
     const w = await world();
     const id = (await w.start())!;
@@ -560,12 +570,11 @@ describe("rounds: final review fixes", () => {
     expect((await w.host.mutation(api.rounds.sellNow, { billboardId: w.led })).reason).toMatch(/already sold/);
   });
 
-  test("I-3: the public screen shows how many sealed bids are in, never who bid what, until the close", async () => {
+  test("I-3: the public screen shows how many companies are negotiating, never who offered what", async () => {
     const w = await world({ companies: ["LaunchKit", "Rivet", "Quiet"] });
-    const id = (await w.start())!;
-    await w.bid(w.companies[0], id, 300);
-    await w.bid(w.companies[1], id, 180);
-    const s = await w.t.query(api.player.screenState, { billboardId: w.led });
-    expect(s).toMatchObject({ mode: "auction", ladder: [], sealedBids: 2 });
+    const id = await pricedAt200(w);
+    await w.bid(w.companies[0], id, 120);
+    await w.bid(w.companies[1], id, 150);
+    expect(await w.t.query(api.player.screenState, { billboardId: w.led })).toMatchObject({ mode: "auction", sealedBids: 2 });
   });
 });

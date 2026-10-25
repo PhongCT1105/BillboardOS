@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, type TestClient, joinCompanies } from "./test.setup";
+import { modules, signedInOperator, type TestClient, joinCompanies, quoteFor, holdFor } from "./test.setup";
 import { HOLD_TTL_MS, QUOTE_TTL_MS } from "./lib/constants";
 
 // 09:07 PDT; first seeded slot starts 09:15 PDT (hour factor 1.0, base $40).
@@ -65,74 +65,21 @@ describe("seed", () => {
   });
 });
 
-describe("quotes", () => {
-  test("baseline quote without audience; audience raises price", async () => {
-    const { t, seed, slots } = await setup();
-    const baseline = await t.mutation(api.quotes.create, {
-      campaignId: seed.campaignId,
-      slotIds: [slots[4]._id],
-    });
-    // slots[4] airs 10:15 local, more than an hour out: no last-minute discount.
-    expect(baseline.amountMinor).toBe(4000);
-    expect(baseline.confidence).toBe("low");
-    expect(baseline.expiresAt - START).toBeGreaterThanOrEqual(QUOTE_TTL_MS);
-    expect(baseline.expiresAt - START).toBeLessThan(QUOTE_TTL_MS + 1000);
-
-    await t.mutation(api.audience.record, {
-      billboardId: seed.billboardId,
-      countEstimate: 180,
-      source: "camera",
-      confidence: 1,
-    });
-    // Pricing uses a trailing 15-min window; at 16:07 only 7/15 of it is measured
-    // (confidence capped). Two minutes later more than half is covered.
-    vi.setSystemTime(START + 2 * 60 * 1000);
-    const busy = await t.mutation(api.quotes.create, {
-      campaignId: seed.campaignId,
-      slotIds: [slots[4]._id],
-    });
-    expect(busy.amountMinor).toBe(6000);
-    expect(busy.confidence).toBe("high");
-  });
-
-  test("rejects duplicate and unavailable slots", async () => {
-    const { t, seed, slots } = await setup();
-    expect(
-      await errorCode(
-        t.mutation(api.quotes.create, {
-          campaignId: seed.campaignId,
-          slotIds: [slots[0]._id, slots[0]._id],
-        }),
-      ),
-    ).toBe("INVALID_INPUT");
-    const q = await t.mutation(api.quotes.create, {
-      campaignId: seed.campaignId,
-      slotIds: [slots[0]._id],
-    });
-    await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "k1", actor: "buyer:a" });
-    expect(
-      await errorCode(
-        t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] }),
-      ),
-    ).toBe("SLOT_UNAVAILABLE");
-  });
-});
-
 describe("holds", () => {
   test("two holds racing for the same slot -> exactly one succeeds", async () => {
     const { t, seed, slots } = await setup();
-    const qa = await t.mutation(api.quotes.create, {
+    const qa = await quoteFor(t, {
       campaignId: seed.campaignId,
       slotIds: [slots[0]._id],
     });
-    const qb = await t.mutation(api.quotes.create, {
+    const qb = await quoteFor(t, {
       campaignId: seed.campaignId,
       slotIds: [slots[0]._id, slots[1]._id],
     });
 
     const results = await Promise.allSettled([
-      t.mutation(api.holds.create, { quoteId: qa.quoteId, idempotencyKey: "buyer-a", actor: "buyer:a" }),
-      t.mutation(api.holds.create, { quoteId: qb.quoteId, idempotencyKey: "buyer-b", actor: "buyer:b" }),
+      holdFor(t, qa, "buyer-a", "buyer:a"),
+      holdFor(t, qb, "buyer-b", "buyer:b"),
     ]);
     const ok = results.filter((r) => r.status === "fulfilled");
     const failed = results.filter((r) => r.status === "rejected");
@@ -155,39 +102,13 @@ describe("holds", () => {
     }
   });
 
-  test("same idempotencyKey returns the existing hold", async () => {
-    const { t, seed, slots } = await setup();
-    const q = await t.mutation(api.quotes.create, {
-      campaignId: seed.campaignId,
-      slotIds: [slots[0]._id, slots[1]._id],
-    });
-    const first = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "same", actor: "buyer" });
-    const second = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "same", actor: "buyer" });
-    expect(first.replayed).toBe(false);
-    expect(second.replayed).toBe(true);
-    expect(second.holdId).toBe(first.holdId);
-    expect(second.expiresAt).toBe(first.expiresAt);
-    expect(first.expiresAt - START).toBeGreaterThanOrEqual(HOLD_TTL_MS);
-    expect(await allRows(t, "holds")).toHaveLength(1);
-
-    const other = await t.mutation(api.quotes.create, {
-      campaignId: seed.campaignId,
-      slotIds: [slots[5]._id],
-    });
-    expect(
-      await errorCode(
-        t.mutation(api.holds.create, { quoteId: other.quoteId, idempotencyKey: "same", actor: "buyer" }),
-      ),
-    ).toBe("IDEMPOTENCY_KEY_CONFLICT");
-  });
-
   test("hold expiry releases slots", async () => {
     const { t, seed, slots } = await setup();
-    const q = await t.mutation(api.quotes.create, {
+    const q = await quoteFor(t, {
       campaignId: seed.campaignId,
       slotIds: [slots[3]._id, slots[4]._id],
     });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "h", actor: "buyer" });
+    const hold = await holdFor(t, q, "h", "buyer");
 
     await t.finishAllScheduledFunctions(vi.runAllTimers);
 
@@ -205,15 +126,15 @@ describe("holds", () => {
     }
     const trail = await t.query(api.audit.forTrace, { traceId: q.traceId });
     expect(trail.map((e) => e.type)).toEqual(
-      expect.arrayContaining(["quote.created", "slot.held", "hold.expired", "slot.released", "quote.expired"]),
+      expect.arrayContaining(["slot.held", "hold.expired", "slot.released", "quote.expired"]),
     );
 
     // Slots are sellable again; re-running the old expiry is a no-op.
-    const q2 = await t.mutation(api.quotes.create, {
+    const q2 = await quoteFor(t, {
       campaignId: seed.campaignId,
       slotIds: [slots[3]._id],
     });
-    const hold2 = await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "h2", actor: "buyer" });
+    const hold2 = await holdFor(t, q2, "h2", "buyer");
     await t.mutation(internal.holds.expire, { holdId: hold.holdId });
     const s0 = await t.run(async (ctx) => await ctx.db.get(slots[3]._id));
     expect(s0?.state).toBe("held");
@@ -222,8 +143,8 @@ describe("holds", () => {
 
   test("release requires the holder's key and frees slots", async () => {
     const { t, seed, slots } = await setup();
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "mine", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const hold = await holdFor(t, q, "mine", "buyer");
     expect(
       await errorCode(
         t.mutation(api.holds.release, { holdId: hold.holdId, idempotencyKey: "not-mine", actor: "x" }),
@@ -243,15 +164,12 @@ describe("holds", () => {
 describe("payments", () => {
   async function held() {
     const ctx = await setup();
-    const q = await ctx.t.mutation(api.quotes.create, {
+    const q = await quoteFor(ctx.t, {
       campaignId: ctx.seed.campaignId,
       slotIds: [ctx.slots[4]._id, ctx.slots[5]._id],
+      amountMinor: 8000,
     });
-    const hold = await ctx.t.mutation(api.holds.create, {
-      quoteId: q.quoteId,
-      idempotencyKey: "hold-1",
-      actor: "buyer",
-    });
+    const hold = await holdFor(ctx.t, q, "hold-1");
     return { ...ctx, q, hold };
   }
 
@@ -402,8 +320,8 @@ describe("http /internal/payments/verified", () => {
 
   test("requires bearer secret, then books", async () => {
     const { t, seed, slots } = await setup();
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "k", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const hold = await holdFor(t, q, "k", "buyer");
     const body = {
       holdId: hold.holdId,
       provider: "x402",

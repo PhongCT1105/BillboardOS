@@ -19,7 +19,6 @@ import { recordAudit } from "./lib/audit";
 import { HOLD_TTL_MS, MAX_KEY_LENGTH } from "./lib/constants";
 import { assertBoundedString } from "./lib/validators";
 import { requireCampaignAccess } from "./lib/tenancy";
-import { scheduleMatch } from "./watch";
 
 export const holdResult = v.object({
   holdId: v.id("holds"),
@@ -48,88 +47,17 @@ export function toResult(hold: Doc<"holds">, replayed: boolean) {
   };
 }
 
-/**
- * Atomically take an exclusive, expiring hold on every slot in a quote.
- *
- * - Same idempotencyKey (for the same quote) returns the existing hold.
- * - Any slot not available -> ConvexError { code: "SLOT_UNAVAILABLE" }, nothing written.
- * - Expiry is scheduled at `expiresAt` via `internal.holds.expire`.
- */
-export const create = mutation({
-  args: {
-    quoteId: v.id("quotes"),
-    idempotencyKey: v.string(),
-    actor: v.string(),
-  },
-  returns: holdResult,
-  handler: async (ctx, args) => {
-    assertBoundedString("idempotencyKey", args.idempotencyKey, MAX_KEY_LENGTH);
-    assertBoundedString("actor", args.actor, MAX_KEY_LENGTH);
-    const quoteForAccess = await ctx.db.get(args.quoteId);
-    if (!quoteForAccess) throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
-    // Only the quoting company may hold it.
-    const { customer } = await requireCampaignAccess(ctx, quoteForAccess.campaignId);
-    const actor = `${customer.actor} via ${args.actor}`;
-    return await createHoldCore(ctx, { quoteId: args.quoteId, idempotencyKey: args.idempotencyKey, actor });
-  },
-});
-
-/**
- * Hold business rules, shared by the signed-in customer path and the agent
- * API: idempotency, quote validity, then the exclusive hold. Callers must
- * already have authorized the quote's campaign.
- */
-export async function createHoldCore(
-  ctx: MutationCtx,
-  args: { quoteId: Id<"quotes">; idempotencyKey: string; actor: string; agentKeyId?: Id<"agentKeys"> },
-): Promise<ReturnType<typeof toResult>> {
-  {
-    const existing = await ctx.db
-      .query("holds")
-      .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", args.idempotencyKey))
-      .unique();
-    if (existing) {
-      if (existing.quoteId !== args.quoteId) {
-        throw new ConvexError({
-          code: "IDEMPOTENCY_KEY_CONFLICT",
-          message: "idempotencyKey was already used for a different quote",
-        });
-      }
-      return toResult(existing, true);
-    }
-
-    const now = Date.now();
-    const quote = await ctx.db.get(args.quoteId);
-    if (!quote) {
-      throw new ConvexError({ code: "NOT_FOUND", message: "Quote not found" });
-    }
-    if (quote.status !== "open" || now >= quote.expiresAt) {
-      throw new ConvexError({
-        code: "QUOTE_NOT_OPEN",
-        message: quote.status === "open" ? "Quote has expired" : `Quote is ${quote.status}`,
-      });
-    }
-
-    const hold = await takeHold(ctx, quote, args.idempotencyKey, args.actor, { agentKeyId: args.agentKeyId });
-    return toResult(hold, false);
-  }
-}
-
-/**
- * Take an exclusive hold on every slot of `quote` (all must be available and
- * not under an open auction). Shared by holds.create and auction winners.
- */
+/** Take an exclusive hold on every slot of `quote` (all must be available). Rounds call this on a deal. */
 export async function takeHold(
   ctx: MutationCtx,
   quote: Doc<"quotes">,
   idempotencyKey: string,
   actor: string,
   opts: {
-    auctionId?: Id<"auctions">;
     agentKeyId?: Id<"agentKeys">;
-    /** Flash spots (ADR 0006, moments.ts only): an in-progress slot with at least this much left. */
+    /** The spot on air: an in-progress slot with at least this much left. */
     inProgressMinRemainingMs?: number;
-    /** Pay window for this hold (flash spots: shorter than the default 5 minutes). */
+    /** Pay window for this hold (shorter than the default 5 minutes for the spot on air). */
     ttlMs?: number;
   } = {},
 ): Promise<Doc<"holds">> {
@@ -145,16 +73,6 @@ export async function takeHold(
         message: "One or more quoted slots are no longer available",
         slotId,
       });
-    }
-    if (slot.auctionId && slot.auctionId !== opts.auctionId) {
-      const auction = await ctx.db.get(slot.auctionId);
-      if (auction?.status === "open") {
-        throw new ConvexError({
-          code: "AUCTION_OPEN",
-          message: "This slot is being auctioned; bid instead of buying at the posted price",
-          auctionId: auction._id,
-        });
-      }
     }
     slots.push(slot);
   }
@@ -172,7 +90,6 @@ export async function takeHold(
     idempotencyKey,
     actor,
     traceId: quote.traceId,
-    auctionId: opts.auctionId,
     agentKeyId: opts.agentKeyId,
   });
 
@@ -194,7 +111,6 @@ export async function takeHold(
       slotIds: quote.slotIds,
       amountMinor: quote.amountMinor,
       expiresAt,
-      auctionId: opts.auctionId ?? null,
     },
   });
   return (await ctx.db.get(holdId))!;
@@ -223,10 +139,9 @@ export async function endHold(
     }
   }
 
-  // If the underlying quote has also passed its expiry, close it now
-  // (quotes.expire skipped it while this hold was active).
+  // A quote only ever backs one hold (a round's deal): it closes with it.
   const quote = await ctx.db.get(hold.quoteId);
-  if (quote && quote.status === "open" && Date.now() >= quote.expiresAt) {
+  if (quote && quote.status === "open") {
     await ctx.db.patch(quote._id, { status: "expired" });
     await recordAudit(ctx, {
       workspaceId: hold.workspaceId,
@@ -235,15 +150,6 @@ export async function endHold(
       type: "quote.expired",
       subjectId: quote._id,
       reason: "Quote expired after its hold ended without payment",
-    });
-  }
-
-  // An auction winner who lets the hold lapse (or gives it back) defaults:
-  // the auction offers the slot to the runner-up and opens a finance exception.
-  if (hold.auctionId) {
-    await ctx.scheduler.runAfter(0, internal.auctions.handleWinnerDefault, {
-      auctionId: hold.auctionId,
-      holdId: hold._id,
     });
   }
 
@@ -257,8 +163,6 @@ export async function endHold(
     data: { quoteId: hold.quoteId, slotIds: reverted },
   });
   if (reverted.length > 0) {
-    // Back on sale: watch rules may alert again for these slots.
-    await scheduleMatch(ctx, { slotIds: reverted, reopened: true, reason: `hold ${outcome}` });
     await recordAudit(ctx, {
       workspaceId: hold.workspaceId,
       traceId: hold.traceId,

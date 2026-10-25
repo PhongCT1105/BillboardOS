@@ -82,7 +82,7 @@ function AgentLearned({ agent }: { agent: NonNullable<ReturnType<typeof useAgent
   const videoState: StepState = !video ? "waiting" : video.status === "ok" ? "done" : video.status === "failed" ? "failed" : "working";
   const contentState: StepState = video?.description ? "done" : video && video.status !== "failed" ? "working" : "waiting";
   const profileState: StepState = profile ? "done" : video && video.status !== "failed" ? "working" : "waiting";
-  const tagsState: StepState = tags.length > 0 ? "done" : profile?.building || profileState === "working" ? "working" : "waiting";
+  const tagsState: StepState = tags.length > 0 ? "done" : profileState === "working" ? "working" : "waiting";
   const reviewState: StepState =
     reviews && reviews.some((r) => r.verdict === "approved")
       ? "done"
@@ -118,16 +118,16 @@ function AgentLearned({ agent }: { agent: NonNullable<ReturnType<typeof useAgent
             )}
           </Step>
 
-          <Step state={profileState} title="Company profile">
+          <Step state={profileState} title="Company research">
             {profile && (
               <>
                 <p className="text-[13px] text-muted">{profile.summary}</p>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {profile.category && <Tag>{profile.category}</Tag>}
-                  {profile.stage && <Tag>{profile.stage}</Tag>}
-                  <span className="text-[11px] text-faint">{profile.method === "claude" ? "by Claude" : "quick guess"}</span>
+                  <Tag>price ×{profile.priceFactor.toFixed(2)}</Tag>
+                  <span className="text-[11px] text-faint">{profile.method === "claude" ? "researched by Claude" : "quick guess (no Claude)"}</span>
                 </div>
-                {profile.building && <p className="text-[12px] text-faint">Refining with Claude…</p>}
+                <p className="text-[12px] text-faint">{profile.reasoning}</p>
               </>
             )}
           </Step>

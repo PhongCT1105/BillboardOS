@@ -3,7 +3,6 @@ import { internalMutation, query } from "./_generated/server";
 import { recordAudit } from "./lib/audit";
 import { ensureUpcomingSlots } from "./lib/inventory";
 import { slotDoc } from "./lib/validators";
-import { requestPlan } from "./autopilot";
 
 const MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_SLOTS = 200;
@@ -62,8 +61,6 @@ export const ensureUpcoming = internalMutation({
           reason: `Added ${created} upcoming 15-minute slot(s)`,
           data: { created },
         });
-        // New inventory (a new screen, or the horizon moving on): the autopilot prices it now.
-        await requestPlan(ctx, billboard.workspaceId, "new slots");
       }
     }
     return { billboards: billboards.length, slotsCreated };

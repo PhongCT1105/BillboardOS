@@ -2,7 +2,12 @@ import { ConvexError, type Infer } from "convex/values";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { agentScope } from "../schema";
-import { hashKey } from "./auction";
+
+/** SHA-256 hex of an agent key (only the hash is stored). */
+export async function hashKey(key: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 /**
  * Agent keys (ADR 0004): a customer company lets its own buying agent act

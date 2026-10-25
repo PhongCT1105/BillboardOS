@@ -3,12 +3,12 @@
  * Company agents, the wallet half (spec "How company agents bid"). Everything
  * here needs the CDP SDK, so it runs on Node: the company's Base Sepolia
  * wallet (`co-<advertiserId>`), its balance, top-ups and the x402 payment
- * for a won spot. Announce, bid and counter run in V8 (companyAgentsAct.ts,
- * Ruling R25) so a cold start never costs an agent the join window.
- *   flash_won -> POST the x402 purchase URL -> 402 -> pay from wallet co-<advertiserId>
+ * for a deal. Answering offers runs in V8 (companyAgentsAct.ts) so a cold
+ * start never makes an agent miss a round.
+ *   round_won -> POST the x402 purchase URL -> 402 -> pay from wallet co-<advertiserId>
  * If it can't pay (no CDP keys on this deployment, an empty wallet, x402
- * refused) the moment records "payment blocked" and the spot goes to the
- * runner-up. Nothing is faked as paid.
+ * refused) the round ends "payment failed" and the spot is offered again in
+ * the next round. Nothing is faked as paid.
  */
 import { v } from "convex/values";
 import { internalAction, type ActionCtx } from "./_generated/server";
@@ -217,7 +217,7 @@ export const operatorWallet = internalAction({
 });
 
 /**
- * Pay for a won spot (flash_won, scheduled by companyAgentsAct.act): POST the
+ * Pay for a deal (round_won, scheduled by companyAgentsAct.act): POST the
  * x402 purchase URL, answer the 402 from the company's CDP wallet. A 409
  * PURCHASE_IN_PROGRESS means another attempt for this hold is already paying:
  * logged, never reported as blocked.
@@ -231,26 +231,23 @@ export const pay = internalAction({
     const me = await ctx.runQuery(internal.companyAgents.forAct, {
       advertiserId: args.advertiserId,
       now: Date.now(),
-      offerId: typeof payload.offerId === "string" ? payload.offerId : undefined,
       holdId: payload.holdId,
     });
     if (!me) return null;
     const log = logger(ctx, args.advertiserId);
     if (!me.enabled) {
-      await log("flash_won: agent is off");
+      await log("round_won: agent is off");
       return null;
     }
     const holdId = payload.holdId as Id<"holds">;
     // Idempotent: a retried webhook (or a late one) for a hold that is paid, released or expired does nothing.
     if (me.holdActive !== true) {
-      await log(`flash_won: hold ${payload.holdId} is no longer payable; nothing to do`);
+      await log(`round_won: hold ${payload.holdId} is no longer payable; nothing to do`);
       return null;
     }
     const blocked = async (reason: string) => {
-      await ctx.runMutation(internal.moments.paymentBlocked, { holdId, reason });
-      await ctx.runMutation(internal.liveAuction.paymentFailed, { holdId, reason });
       await ctx.runMutation(internal.rounds.paymentFailed, { holdId, reason });
-      await log(`flash_won: payment blocked: ${reason}`);
+      await log(`round_won: payment blocked: ${reason}`);
     };
     const secret = process.env.INTERNAL_API_SECRET;
     if (!secret) {
@@ -279,7 +276,7 @@ export const pay = internalAction({
     try {
       const probe = await fetch(payload.purchaseUrl, init);
       if (await inProgress(probe)) {
-        await log("flash_won: another payment for this hold is already settling; not paying twice");
+        await log("round_won: another payment for this hold is already settling; not paying twice");
         return null;
       }
       if (probe.status !== 402) {
@@ -299,13 +296,13 @@ export const pay = internalAction({
       const paidFetch = wrapFetchWithPayment(globalThis.fetch, client);
       const res = await paidFetch(payload.purchaseUrl, init);
       if (await inProgress(res)) {
-        await log("flash_won: another payment for this hold is already settling; not paying twice");
+        await log("round_won: another payment for this hold is already settling; not paying twice");
         return null;
       }
       const header = res.headers.get("PAYMENT-RESPONSE") ?? res.headers.get("X-PAYMENT-RESPONSE");
       const settled = header ? decodePaymentResponseHeader(header) : null;
       if (res.status === 200 && settled?.success) {
-        await log(`flash_won: paid ${usd(payload.amountMinor)}, tx ${settled.transaction}`);
+        await log(`round_won: paid ${usd(payload.amountMinor)}, tx ${settled.transaction}`);
         await saveBalance(ctx, args.advertiserId).catch(() => null);
         // The transfer may not show in the balance yet: read it again once it lands.
         await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });

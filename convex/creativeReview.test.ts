@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { joinCompanies, modules, signedInCustomer, signedInOperator } from "./test.setup";
+import { joinCompanies, modules, signedInCustomer, signedInOperator, quoteFor, holdFor } from "./test.setup";
 import {
   DEFAULT_POLICY,
   REVIEW_ACTOR,
@@ -237,8 +237,8 @@ describe("creative review agent", () => {
     const seed = await t.mutation(internal.seed.demo, {});
     await joinCompanies(t);
     const slots = await t.query(api.slots.listForBillboard, { billboardId: seed.billboardId, from: START, to: START + 86_400_000 });
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "cr1", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const hold = await holdFor(t, q, "cr1", "buyer");
     const tx = `0x${"cd".repeat(32)}`;
     const result = await t.mutation(internal.payments.recordVerified, {
       holdId: hold.holdId,

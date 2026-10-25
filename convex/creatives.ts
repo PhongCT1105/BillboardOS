@@ -24,7 +24,7 @@ import {
   scheduleCreativeReview,
   youtubeOf,
 } from "./creativeReview";
-import { requestKnowledgeBuild } from "./knowledge";
+import { requestResearch } from "./research";
 
 /** A host may review a campaign's creative once that campaign has quoted one of its screens. */
 async function campaignTouchesWorkspace(ctx: QueryCtx, campaignId: Id<"campaigns">, workspaceId: Id<"workspaces">) {
@@ -114,9 +114,9 @@ export const attach = mutation({
       reason: `Creative (${args.contentType}, ${file.size} bytes) submitted for review`,
       data: { storageId: args.storageId, contentType: args.contentType, sha256: file.sha256 },
     });
-    // AI-native approvals: the creative review agent checks it for every host; the knowledge card learns from it.
+    // AI-native approvals: the creative review agent checks it for every host; the research agent reads it.
     await scheduleCreativeReview(ctx, args.campaignId);
-    await requestKnowledgeBuild(ctx, campaign.advertiserId, "creative attached");
+    await requestResearch(ctx, campaign.advertiserId, { force: true });
     return { campaignId: args.campaignId, creativeStatus: "pending_review" as const };
   },
 });
@@ -284,9 +284,9 @@ export const saveYouTubeDetails = internalMutation({
     } else {
       await ctx.db.patch(row._id, { ...content, oembedStatus: "failed", oembedError: args.error ?? "unknown error", fetchedAt: now });
     }
-    // Both run in parallel: the review agent and the knowledge card (which sets a video-led campaign's audience).
+    // Both run in parallel: the review agent and the research agent (which learns the company's buyers from the video).
     await scheduleCreativeReview(ctx, args.campaignId);
-    await requestKnowledgeBuild(ctx, row.advertiserId, "YouTube creative attached", { force: true });
+    await requestResearch(ctx, row.advertiserId, { force: true });
     return null;
   },
 });

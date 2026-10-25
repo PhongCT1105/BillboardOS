@@ -2,9 +2,9 @@ import { defineTable } from "convex/server";
 import { v } from "convex/values";
 
 /**
- * Simple bidding rounds (spec 2026-10-24-simple-bidding-rounds-design): one
- * round sells the spot on air now on one screen; one sealed answer per
- * invited company. Spread into `schema.ts` as one line.
+ * Rounds: one round sells the spot on air now on one screen. Every invited
+ * company gets the same offer and deals with the host alone; the first deal
+ * takes the spot. Spread into `schema.ts` as one line.
  */
 
 export const roundTrigger = v.union(v.literal("camera"), v.literal("sell_now"), v.literal("timer"));
@@ -18,7 +18,7 @@ export const roundBidStatus = v.union(
   v.literal("defaulted"),
 );
 export const priceSignal = v.object({
-  key: v.union(v.literal("crowd"), v.literal("event")),
+  key: v.union(v.literal("crowd"), v.literal("event"), v.literal("demand")),
   factor: v.union(v.number(), v.null()),
   reason: v.string(),
 });
@@ -55,7 +55,15 @@ export const roundBidFields = {
   advertiserId: v.id("advertisers"),
   campaignId: v.id("campaigns"),
   agentKeyId: v.id("agentKeys"),
+  /** How well the company's buyers match who is in front of the screen (null: the screen's audience isn't read yet). */
   match: v.union(v.number(), v.null()),
+  /** The research agent's price factor for this company (its offer = the round's price x this). */
+  companyFactor: v.optional(v.number()),
+  /** The host's price to this company now: the round's asking price, or its counter. */
+  offerMinor: v.optional(v.number()),
+  /** The host already countered this company once; its next offer at or above the floor is a deal. */
+  countered: v.optional(v.boolean()),
+  /** The company's last offer (null: no answer yet, or passed). */
   amountMinor: v.union(v.number(), v.null()),
   reasoning: v.optional(v.string()),
   answeredAt: v.optional(v.number()),

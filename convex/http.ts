@@ -221,45 +221,9 @@ function missing(fields: string[]): Response {
 const agentGet = httpAction(async (ctx, request) => {
   const token = bearer(request);
   if (!token) return agentError(401, "INVALID_KEY", "Send Authorization: Bearer <agent key>");
-  const url = new URL(request.url);
-  const path = url.pathname.replace(/^\/api\/agent\//, "").replace(/\/$/, "");
-  const q = url.searchParams;
+  const path = new URL(request.url).pathname.replace(/^\/api\/agent\//, "").replace(/\/$/, "");
   try {
     if (path === "me") return json(200, await ctx.runMutation(internal.agentApi.me, { token }));
-    if (path === "inventory") {
-      const hours = q.get("hours");
-      return json(
-        200,
-        await ctx.runMutation(internal.agentApi.inventory, {
-          token,
-          campaignId: q.get("campaignId") ?? undefined,
-          billboardId: q.get("billboardId") ?? undefined,
-          hours: hours === null ? undefined : Number(hours),
-        }),
-      );
-    }
-    if (path === "alerts") {
-      const since = q.get("since");
-      const limit = q.get("limit");
-      return json(
-        200,
-        await ctx.runMutation(internal.agentApi.alerts, {
-          token,
-          since: since === null ? undefined : Number(since),
-          limit: limit === null ? undefined : Number(limit),
-        }),
-      );
-    }
-    const status = /^auctions\/([^/]+)\/status$/.exec(path);
-    if (status) {
-      const campaignId = q.get("campaignId");
-      const bidderKey = request.headers.get("X-Bidder-Key") ?? q.get("bidderKey");
-      if (!campaignId || !bidderKey) return missing(["campaignId (query)", "X-Bidder-Key (header)"]);
-      return json(
-        200,
-        await ctx.runMutation(internal.agentApi.auctionStatus, { token, auctionId: status[1], campaignId, bidderKey }),
-      );
-    }
     return agentError(404, "NOT_FOUND", `No agent endpoint GET /api/agent/${path}`);
   } catch (error) {
     return errorResponse(error);
@@ -270,85 +234,18 @@ const agentPost = httpAction(async (ctx, request) => {
   const token = bearer(request);
   if (!token) return agentError(401, "INVALID_KEY", "Send Authorization: Bearer <agent key>");
   const path = new URL(request.url).pathname.replace(/^\/api\/agent\//, "").replace(/\/$/, "");
-  const ack = /^alerts\/([^/]+)\/ack$/.exec(path);
-  if (ack) {
-    try {
-      return json(200, await ctx.runMutation(internal.agentApi.ackAlert, { token, alertId: ack[1] }));
-    } catch (error) {
-      return errorResponse(error);
-    }
-  }
   const body = await readJson(request);
   if (body instanceof Response) return body;
   try {
-    if (path === "quotes") {
-      const campaignId = str(body.campaignId);
-      const slotIds = Array.isArray(body.slotIds) && body.slotIds.every((x) => typeof x === "string") ? (body.slotIds as string[]) : undefined;
-      if (!campaignId || !slotIds) return missing(["campaignId", "slotIds[]"]);
-      return json(201, await ctx.runMutation(internal.agentApi.quote, { token, campaignId, slotIds }));
-    }
-    if (path === "holds") {
-      const quoteId = str(body.quoteId);
-      const idempotencyKey = str(body.idempotencyKey);
-      if (!quoteId || !idempotencyKey) return missing(["quoteId", "idempotencyKey"]);
-      const result = await ctx.runMutation(internal.agentApi.hold, { token, quoteId, idempotencyKey });
-      return json(result.replayed ? 200 : 201, result);
-    }
-    const offerReply = /^offers\/([^/]+)\/reply$/.exec(path);
-    if (offerReply) {
-      const decision = str(body.decision);
-      if (decision !== "accept" && decision !== "counter" && decision !== "pass") return missing(["decision (accept | counter | pass)"]);
-      if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
-      return json(
-        200,
-        await ctx.runMutation(internal.moments.reply, {
-          token,
-          offerId: offerReply[1],
-          decision,
-          amountMinor: num(body.amountMinor),
-          reasoning: str(body.reasoning),
-        }),
-      );
-    }
-    const offerBid = /^offers\/([^/]+)\/bid$/.exec(path);
-    if (offerBid) {
-      const amountMinor = num(body.amountMinor);
-      if (amountMinor === undefined) return missing(["amountMinor (number)"]);
-      return json(
-        200,
-        await ctx.runMutation(internal.liveAuction.placeBid, { token, offerId: offerBid[1], amountMinor, reasoning: str(body.reasoning) }),
-      );
-    }
     const roundBid = /^rounds\/([^/]+)\/bid$/.exec(path);
     if (roundBid) {
-      // One sealed answer per round: whole cents, or null (or nothing) to pass.
+      // An offer in whole cents (at or above the host's price accepts, below it counters), or null (or nothing) to pass.
       const amountMinor = body.amountMinor === null || body.amountMinor === undefined ? null : num(body.amountMinor);
       if (amountMinor === undefined) return missing(["amountMinor (number, or null to pass)"]);
       return json(
         200,
         await ctx.runMutation(internal.rounds.submitBid, { token, roundId: roundBid[1], amountMinor, reasoning: str(body.reasoning) }),
       );
-    }
-    const action = /^auctions\/([^/]+)\/(join|bid|auto-bid)$/.exec(path);
-    if (action) {
-      const [, auctionId, verb] = action;
-      const campaignId = str(body.campaignId);
-      if (!campaignId) return missing(["campaignId"]);
-      if (verb === "join") {
-        return json(
-          200,
-          await ctx.runMutation(internal.agentApi.auctionJoin, { token, auctionId, campaignId, clientKey: str(body.clientKey) }),
-        );
-      }
-      const bidderKey = str(body.bidderKey);
-      if (verb === "bid") {
-        const amountMinor = num(body.amountMinor);
-        if (!bidderKey || amountMinor === undefined) return missing(["campaignId", "bidderKey", "amountMinor"]);
-        return json(200, await ctx.runMutation(internal.agentApi.auctionBid, { token, auctionId, campaignId, bidderKey, amountMinor }));
-      }
-      const maxMinor = num(body.maxMinor);
-      if (!bidderKey || maxMinor === undefined) return missing(["campaignId", "bidderKey", "maxMinor"]);
-      return json(200, await ctx.runMutation(internal.agentApi.auctionAutoBid, { token, auctionId, campaignId, bidderKey, maxMinor }));
     }
     return agentError(404, "NOT_FOUND", `No agent endpoint POST /api/agent/${path}`);
   } catch (error) {
@@ -365,9 +262,6 @@ const agentPost = httpAction(async (ctx, request) => {
  *   POST /internal/a2a/reports/authorize   { agentKey, workspaceId, billboardId }
  *   GET  /internal/a2a/reports/audience?workspaceId=&billboardId=
  *   POST /internal/a2a/data-sales          { agentKey, workspaceId, billboardId, amountMinor, txHash, network, payer? }
- *   POST /internal/a2a/negotiations        { agentKey, workspaceId, campaignId, slotIds[], amountMinor?, reasoning? }
- *   POST /internal/a2a/negotiations/get    { agentKey, workspaceId, negotiationId }
- *   POST /internal/a2a/negotiations/messages { agentKey, workspaceId, negotiationId, kind, amountMinor?, reasoning? }
  */
 const a2aGet = httpAction(async (ctx, request) => {
   const denied = checkAuth(request);
@@ -418,46 +312,6 @@ const a2aPost = httpAction(async (ctx, request) => {
         await ctx.runMutation(internal.a2a.recordDataSale, { token, workspaceId, billboardId, amountMinor, txHash, network, payer: str(body.payer) }),
       );
     }
-    if (path === "negotiations") {
-      const campaignId = str(body.campaignId);
-      const slotIds = Array.isArray(body.slotIds) && body.slotIds.every((x) => typeof x === "string") ? (body.slotIds as string[]) : undefined;
-      if (!campaignId || !slotIds) return missing(["campaignId", "slotIds[]"]);
-      if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
-      return json(
-        201,
-        await ctx.runMutation(internal.negotiations.open, {
-          token,
-          workspaceId,
-          campaignId,
-          slotIds,
-          amountMinor: num(body.amountMinor),
-          reasoning: str(body.reasoning),
-        }),
-      );
-    }
-    const negotiationId = str(body.negotiationId);
-    if (path === "negotiations/get") {
-      if (!negotiationId) return missing(["negotiationId"]);
-      return json(200, await ctx.runMutation(internal.negotiations.get, { token, workspaceId, negotiationId }));
-    }
-    if (path === "negotiations/messages") {
-      const kind = str(body.kind);
-      if (!negotiationId || (kind !== "offer" && kind !== "accept" && kind !== "reject")) {
-        return missing(["negotiationId", "kind (offer | accept | reject)"]);
-      }
-      if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
-      return json(
-        200,
-        await ctx.runMutation(internal.negotiations.post, {
-          token,
-          workspaceId,
-          negotiationId,
-          kind,
-          amountMinor: num(body.amountMinor),
-          reasoning: str(body.reasoning),
-        }),
-      );
-    }
     return agentError(404, "NOT_FOUND", `No endpoint POST /internal/a2a/${path}`);
   } catch (error) {
     return errorResponse(error);
@@ -474,9 +328,6 @@ http.route({ pathPrefix: "/internal/a2a/", method: "POST", handler: a2aPost });
 //   POST /a2a/hosts/{workspaceId}/purchases/{holdId}         x402, hold amount (hold must be that host's)
 //   GET  /a2a/hosts/{workspaceId}/reports/audience?billboardId=  x402, X402_REPORT_PRICE_USD (default $0.05)
 //   GET  /a2a/hosts/{workspaceId}/agent.json                 free
-//   POST /a2a/hosts/{workspaceId}/negotiations               agent key
-//   GET  /a2a/hosts/{workspaceId}/negotiations/{id}          agent key
-//   POST /a2a/hosts/{workspaceId}/negotiations/{id}/messages agent key
 // This file checks keys and looks things up; x402Node.ts (node) challenges,
 // verifies with the CDP facilitator, re-checks, settles and records.
 // ---------------------------------------------------------------------------
@@ -551,7 +402,6 @@ async function payForHold(ctx: ActionCtx, request: Request, holdId: string, work
   }
   const signed = Boolean(plainRequest(request).headers["payment-signature"] ?? plainRequest(request).headers["x-payment"]);
   console.log(`[x402] trace=${hold.traceId} request holdId=${holdId} agent=${actor} paid=${signed}`);
-  if (signed) await ctx.runMutation(internal.moments.markPaymentStarted, { holdId: hold.holdId });
   const result = await ctx.runAction(internal.x402Node.payHold, {
     request: plainRequest(request),
     holdId: hold.holdId,
@@ -623,12 +473,6 @@ const hostsGet = httpAction(async (ctx, request) => {
       });
       return fromPlain(result);
     }
-    const neg = /^negotiations\/([^/]+)$/.exec(rest);
-    if (neg) {
-      const agentKey = agentKeyOf(request);
-      if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
-      return json(200, await ctx.runMutation(internal.negotiations.get, { token: agentKey, workspaceId, negotiationId: neg[1] }));
-    }
     return agentError(404, "NOT_FOUND", `No endpoint GET ${url.pathname}`);
   } catch (error) {
     return errorResponse(error);
@@ -643,43 +487,6 @@ const hostsPost = httpAction(async (ctx, request) => {
   try {
     const purchase = /^purchases\/([^/]+)$/.exec(rest);
     if (purchase) return await payForHold(ctx, request, purchase[1], workspaceId);
-    const agentKey = agentKeyOf(request);
-    if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
-    const body = await readJson(request);
-    if (body instanceof Response) return body;
-    if (body.amountMinor !== undefined && num(body.amountMinor) === undefined) return missing(["amountMinor (number)"]);
-    if (rest === "negotiations") {
-      const campaignId = str(body.campaignId);
-      const slotIds = Array.isArray(body.slotIds) && body.slotIds.every((x) => typeof x === "string") ? (body.slotIds as string[]) : undefined;
-      if (!campaignId || !slotIds) return missing(["campaignId", "slotIds[]"]);
-      return json(
-        201,
-        await ctx.runMutation(internal.negotiations.open, {
-          token: agentKey,
-          workspaceId,
-          campaignId,
-          slotIds,
-          amountMinor: num(body.amountMinor),
-          reasoning: str(body.reasoning),
-        }),
-      );
-    }
-    const msg = /^negotiations\/([^/]+)\/messages$/.exec(rest);
-    if (msg) {
-      const kind = str(body.kind);
-      if (kind !== "offer" && kind !== "accept" && kind !== "reject") return missing(["kind (offer | accept | reject)"]);
-      return json(
-        200,
-        await ctx.runMutation(internal.negotiations.post, {
-          token: agentKey,
-          workspaceId,
-          negotiationId: msg[1],
-          kind,
-          amountMinor: num(body.amountMinor),
-          reasoning: str(body.reasoning),
-        }),
-      );
-    }
     return agentError(404, "NOT_FOUND", `No endpoint POST ${url.pathname}`);
   } catch (error) {
     return errorResponse(error);
@@ -742,39 +549,6 @@ http.route({
     if (!agentKey || !holdId) return missing(["agentKey", "holdId"]);
     try {
       return json(200, await ctx.runMutation(internal.agentApi.verifyPayment, { token: agentKey, holdId }));
-    } catch (error) {
-      return errorResponse(error);
-    }
-  }),
-});
-
-/**
- * POST /api/autopilot/offers/{offerId}/accept (agent key, hold scope): take a
- * host autopilot's forward offer at its price (ADR 0007). Body (optional):
- * { campaignId }. 200 { status: "held", holdId, amountMinor, purchaseUrl, ... }
- * or { status: "pending", decideAt } during a first look.
- */
-http.route({
-  pathPrefix: "/api/autopilot/offers/",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    const m = /^\/api\/autopilot\/offers\/([^/]+)\/accept\/?$/.exec(new URL(request.url).pathname);
-    if (!m || !ID_RE.test(m[1])) return agentError(404, "NOT_FOUND", "Offer not found");
-    const agentKey = agentKeyOf(request);
-    if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
-    let campaignId: string | undefined;
-    const text = await request.text();
-    if (text.trim()) {
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        return agentError(400, "INVALID_INPUT", "Body must be a JSON object");
-      }
-      campaignId = typeof body === "object" && body !== null ? str((body as Record<string, unknown>).campaignId) : undefined;
-    }
-    try {
-      return json(200, await ctx.runMutation(internal.autopilot.acceptByKey, { token: agentKey, offerId: m[1], campaignId }));
     } catch (error) {
       return errorResponse(error);
     }

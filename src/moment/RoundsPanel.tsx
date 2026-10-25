@@ -12,8 +12,8 @@ type Round = NonNullable<Live["screens"][number]["round"]>;
 type Bid = Round["bids"][number];
 
 const STATUS: Record<Round["status"], { label: string; tone: "accent" | "danger" | "muted" | "ok" }> = {
-  bidding: { label: "Bidding", tone: "accent" },
-  awarded: { label: "Winner paying", tone: "accent" },
+  bidding: { label: "Negotiating", tone: "accent" },
+  awarded: { label: "Buyer paying", tone: "accent" },
   paid: { label: "Paid", tone: "ok" },
   unsold: { label: "Unsold", tone: "muted" },
 };
@@ -21,9 +21,9 @@ const STATUS: Record<Round["status"], { label: string; tone: "accent" | "danger"
 const TRIGGER: Record<Round["trigger"], string> = { camera: "camera", sell_now: "Sell now", timer: "auto-sell" };
 
 /**
- * The bidding round on one screen (spec: simple bidding rounds): Sell now,
- * the asking price with each signal's reason, every agent's sealed answer
- * with its reasoning as it arrives, the outcome sentence and the payment.
+ * The round on one screen: Sell now, the offer price with each signal's
+ * reason, each company's answer to the host (accept, counter, pass) with its
+ * reasoning as it arrives, the outcome sentence and the payment.
  */
 export function RoundsPanel({ billboardId }: { billboardId: Id<"billboards"> }) {
   const live = useQuery(api.rounds.live, {});
@@ -48,11 +48,11 @@ export function RoundsPanel({ billboardId }: { billboardId: Id<"billboards"> }) 
     <Card className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight">Bidding round</h2>
-          <p className="text-sm text-muted">Every company agent with an approved ad gets one sealed bid. It closes as soon as all have answered, or after 5 s.</p>
+          <h2 className="text-lg font-semibold tracking-tight">Live sale</h2>
+          <p className="text-sm text-muted">Every company agent with an approved ad gets the same offer and deals with you alone. The first to agree takes the spot.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-muted" title="Starts a round on idle online screens every couple of minutes. Each sale spends testnet USDC.">
+          <label className="flex items-center gap-2 text-sm text-muted" title="Starts a round when an online screen's spot on air is unsold. Each company's daily budget caps what it spends.">
             <input
               type="checkbox"
               checked={live.autoSell}
@@ -60,7 +60,7 @@ export function RoundsPanel({ billboardId }: { billboardId: Id<"billboards"> }) 
               onChange={(e) => toggle.run(() => setAutoSell({ enabled: e.target.checked }))}
               className="h-4 w-4 accent-accent"
             />
-            Auto-sell when idle
+            Auto-sell
           </label>
           <button type="button" className={`${primaryBtn} min-h-11`} disabled={sell.busy || round?.status === "bidding" || round?.status === "awarded"} onClick={start}>
             {sell.busy ? "Starting…" : "Sell now"}
@@ -71,7 +71,7 @@ export function RoundsPanel({ billboardId }: { billboardId: Id<"billboards"> }) 
       {note && <p className="text-sm text-amber-300">{note}</p>}
 
       {!round ? (
-        <p className="text-sm text-muted">No round yet on this screen. Press Sell now, or let the camera start one when people walk up.</p>
+        <p className="text-sm text-muted">No round yet on this screen. One starts on its own when the spot on air is unsold, when the camera sees people, or when you press Sell now.</p>
       ) : (
         <RoundDetail round={round} now={now} />
       )}
@@ -92,7 +92,7 @@ function RoundDetail({ round, now }: { round: Round; now: number }) {
             <span className="text-xs text-faint">started by {TRIGGER[round.trigger]}</span>
           </div>
           <p className="text-sm text-muted">
-            Floor <span className="tabular font-mono text-fg">{money(round.floorMinor)}</span> · asking{" "}
+            Floor <span className="tabular font-mono text-fg">{money(round.floorMinor)}</span> · price before company factors{" "}
             <span className="tabular font-mono text-fg">{money(round.askingMinor)}</span>
           </p>
         </div>
@@ -111,7 +111,7 @@ function RoundDetail({ round, now }: { round: Round; now: number }) {
         ))}
       </ul>
 
-      <ol className="flex flex-col gap-2" aria-label="Bids" aria-live="polite">
+      <ol className="flex flex-col gap-2" aria-label="Answers" aria-live="polite">
         {bids.length === 0 && <li className="text-sm text-faint">No company agents invited.</li>}
         {bids.map((b, i) => (
           <BidRow key={`${b.company}-${i}`} bid={b} />
@@ -130,7 +130,7 @@ function RoundDetail({ round, now }: { round: Round; now: number }) {
 
 function BidRow({ bid }: { bid: Bid }) {
   const amount =
-    bid.status === "invited" ? "waiting…" : bid.amountMinor === null ? "passed" : money(bid.amountMinor);
+    bid.status === "passed" ? "passed" : bid.amountMinor === null ? "waiting…" : money(bid.amountMinor);
   const tone =
     bid.status === "won" ? "border-emerald-400 bg-emerald-400/10" : bid.status === "defaulted" ? "border-danger bg-danger/10" : "border-line";
   return (
@@ -141,8 +141,15 @@ function BidRow({ bid }: { bid: Bid }) {
       </div>
       <p className="text-xs text-muted">
         {bid.reasoning ?? (bid.status === "invited" ? "Thinking…" : "")}
-        {bid.match !== null && <span className="text-faint"> · {Math.round(bid.match * 100)}% audience match</span>}
-        {bid.status === "won" && <span className="text-emerald-300"> · won</span>}
+        {bid.offerMinor !== null && (
+          <span className="text-faint">
+            {" "}
+            · offered {money(bid.offerMinor)}
+            {bid.companyFactor !== null && bid.companyFactor !== 1 && ` (×${bid.companyFactor.toFixed(2)} for this company)`}
+          </span>
+        )}
+        {bid.match !== null && <span className="text-faint"> · {Math.round(bid.match * 100)}% of the crowd are its buyers</span>}
+        {bid.status === "won" && <span className="text-emerald-300"> · deal</span>}
         {bid.status === "defaulted" && <span className="text-danger"> · didn't pay</span>}
       </p>
     </li>

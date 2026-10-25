@@ -4,10 +4,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { joinCompanies, modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
+import { joinCompanies, modules, signedInCustomer, signedInOperator, type TestClient, quoteFor, holdFor } from "./test.setup";
 import { embedUrl, hasCreative, parseOEmbed, parseWatchPage, parseYouTubeUrl, oembedUrl } from "./lib/youtube";
 import { REVIEW_ACTOR } from "./lib/creativeReview";
-import { creativeReady } from "./lib/momentHooks";
+import { creativeReady } from "./lib/sale";
 
 const START = Date.UTC(2026, 9, 25, 16, 7);
 const MIN = 60_000;
@@ -167,7 +167,7 @@ async function flush(t: TestClient) {
 }
 
 describe("creatives.attachYouTube", () => {
-  test("stores the link, fetches oEmbed, then the review agent approves it and the knowledge card learns the title", async () => {
+  test("stores the link, fetches oEmbed, then the review agent approves it and the research agent reads the company", async () => {
     const { t, host, workspaceId, advertiserId, customer, campaignId } = await world();
     const r = await customer.mutation(api.creatives.attachYouTube, { campaignId, url: `https://youtu.be/${ID}?si=x` });
     expect(r).toEqual({ campaignId, creativeStatus: "pending_review", videoId: ID });
@@ -200,12 +200,12 @@ describe("creatives.attachYouTube", () => {
     ]);
     expect(ready[0].agentNote).toMatch(/^Approved by creative review agent: /);
 
-    const card = await customer.query(api.knowledge.forCompany, { advertiserId });
-    expect(card?.videoTitles).toEqual(["LaunchKit in 30 seconds"]);
-    expect(card?.sources).toContain(`https://www.youtube.com/watch?v=${ID}`);
+    // The research agent read the company (rules here: no Claude key in tests).
+    const research = await t.run(async (ctx) => ctx.db.query("companyResearch").withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId)).unique());
+    expect(research).toMatchObject({ method: "rules", priceFactor: 1 });
   });
 
-  test("an approved YouTube ad is ready to sell (live auction, autopilot, scheduling): it has no storage file", async () => {
+  test("an approved YouTube ad is ready to sell: it has no storage file", async () => {
     const { t, workspaceId, customer, campaignId } = await world();
     await customer.mutation(api.creatives.attachYouTube, { campaignId, url: `https://youtu.be/${ID}` });
     await flush(t);
@@ -277,8 +277,8 @@ describe("player with a YouTube creative", () => {
     await joinCompanies(t);
     const slots = await t.query(api.slots.listForBillboard, { billboardId: seed.billboardId, from: START, to: START + 24 * 60 * MIN });
     const slot = slots[0];
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slot._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "yt1", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slot._id] });
+    const hold = await holdFor(t, q, "yt1", "buyer");
     const tx = `0x${"ab".repeat(32)}`;
     const result = await t.mutation(internal.payments.recordVerified, {
       holdId: hold.holdId,
@@ -331,43 +331,36 @@ describe("player with a YouTube creative", () => {
       scopes: ["hold", "pay", "bid"],
     });
     await t.run(async (ctx) => {
-      const momentId = await ctx.db.insert("moments", {
+      const roundId = await ctx.db.insert("rounds", {
         workspaceId,
         billboardId: seed.billboardId,
-        trigger: "arrivals",
-        status: "playing",
-        startedAt: START,
-        crowd: 5,
-        segment: "startups",
-        segmentShare: 0.5,
-        relevantViewers: 3,
-        crowdSource: "camera",
-        reasoning: "test",
         slotId: slot._id,
         spotStartAt: slot.startAt,
         spotEndAt: slot.endAt,
-        priceMinor: 70,
+        trigger: "sell_now",
+        status: "paid",
         floorMinor: 25,
-        offerClosesAt: START,
-        paidMinor: 90,
+        askingMinor: 70,
+        signals: [],
+        crowd: null,
+        eventName: null,
+        invitedCount: 1,
+        closesAt: START,
+        priceMinor: 90,
         paymentTx: tx,
         paymentNetwork: "eip155:84532",
-        steps: [],
+        createdAt: START,
       });
-      const offerId = await ctx.db.insert("flashOffers", {
-        momentId,
-        workspaceId,
+      const bidId = await ctx.db.insert("roundBids", {
+        roundId,
         advertiserId: seed.advertiserIds[0],
         campaignId: seed.campaignId,
         agentKeyId: issued.agentKeyId,
-        priceMinor: 70,
-        relevantViewers: 3,
-        matchScore: 1,
+        match: null,
+        amountMinor: 90,
         status: "won",
-        delivery: { status: "delivered", attempts: 1 },
-        sentAt: START,
       });
-      await ctx.db.patch(momentId, { winnerOfferId: offerId });
+      await ctx.db.patch(roundId, { winnerBidId: bidId });
     });
     const screen = await t.query(api.player.screenState, { billboardId: seed.billboardId });
     expect(screen.mode).toBe("playing");
@@ -379,13 +372,13 @@ describe("player with a YouTube creative", () => {
   });
 });
 
-describe("knowledge hook", () => {
-  test("attaching a file creative also builds the company's knowledge card", async () => {
+describe("research hook", () => {
+  test("attaching a file creative also has the research agent read the company", async () => {
     const { t, customer, advertiserId, campaignId } = await world();
     const storageId = await t.run(async (ctx) => ctx.storage.store(new Blob(["png"], { type: "image/png" })));
     await customer.mutation(api.creatives.attach, { campaignId, storageId, contentType: "image/png" });
     await flush(t);
-    const card = await customer.query(api.knowledge.forCompany, { advertiserId: advertiserId as Id<"advertisers"> });
-    expect(card).toMatchObject({ displayName: "LaunchKit", method: "heuristic", category: "developer tools" });
+    const research = await t.run(async (ctx) => ctx.db.query("companyResearch").withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId as Id<"advertisers">)).unique());
+    expect(research).toMatchObject({ method: "rules", audienceTags: { software: 0.6, startups: 0.4 } });
   });
 });

@@ -4,6 +4,7 @@ import type { Id } from "./_generated/dataModel";
 import { agentScope, standingInstructions } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { requireCustomer } from "./lib/tenancy";
+import { validateStanding } from "./lib/sale";
 import {
   AGENT_SCOPES,
   committedMinor,
@@ -180,6 +181,33 @@ export const list = query({
       });
     }
     return out;
+  },
+});
+
+/** The company's limits for one key: what its agent may offer per spot and per day (enforced on every answer). */
+export const setStanding = mutation({
+  args: { agentKeyId: v.id("agentKeys"), standing: v.union(standingInstructions, v.null()) },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const key = await ctx.db.get(args.agentKeyId);
+    if (!key) throw new ConvexError({ code: "NOT_FOUND", message: "Agent key not found" });
+    const customer = await requireCustomer(ctx, key.advertiserId);
+    if (args.standing) {
+      const problem = validateStanding(args.standing);
+      if (problem) throw new ConvexError({ code: "INVALID_INPUT", message: problem });
+    }
+    await ctx.db.patch(key._id, { standing: args.standing ?? undefined });
+    const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
+    await recordAudit(ctx, {
+      traceId: `company:${key.advertiserId}`,
+      actor: customer.actor,
+      type: "agent_key.created",
+      subjectId: key._id,
+      reason: args.standing
+        ? `Limits on "${key.name}": max ${usd(args.standing.maxPricePerSpotMinor)}/spot, ${usd(args.standing.dailyBudgetMinor)}/day`
+        : `Limits cleared on "${key.name}"`,
+    });
+    return null;
   },
 });
 

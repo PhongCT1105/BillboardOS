@@ -8,7 +8,6 @@ import { BankFeed } from "./BankFeed";
 import { Receivables } from "./Receivables";
 import { ApprovalQueue } from "./ApprovalQueue";
 import { CollectionTasks } from "./CollectionTasks";
-import { CompanyValuations } from "./CompanyValuations";
 import { DataSales } from "./DataSales";
 import { ArClerkStatus, AutopilotFeed } from "./Autopilot";
 
@@ -66,7 +65,6 @@ export function FinancePage() {
           <ExceptionList exceptions={exceptions} />
           <Receivables invoices={receivables} />
           <DataSales />
-          <CompanyValuations />
         </div>
         <div className="flex flex-col gap-10 lg:sticky lg:top-6 lg:self-start">
           <AutopilotFeed activity={autopilot?.activity} />

@@ -5,7 +5,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { bazaarResourceServerExtension } from "@x402/extensions/bazaar";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { modules, signedInCustomer, signedInOperator } from "./test.setup";
+import { modules, signedInCustomer, signedInOperator, quoteFor, holdFor } from "./test.setup";
 import { paidRoutes } from "./lib/x402/flow";
 
 // Fake CDP facilitator: the real x402 resource server, routes and Bazaar
@@ -79,8 +79,8 @@ async function world() {
   const slots = await t.query(api.slots.listForBillboard, { billboardId: seed.billboardId, from: START, to: START + 12 * 60 * MIN });
   const keyA = await custA.mutation(api.agentKeys.create, { name: "payer", scopes: ["quote", "hold", "pay"], budgetCapMinor: 100_000 });
   const keyB = await custB.mutation(api.agentKeys.create, { name: "other", scopes: ["quote", "hold", "pay"], budgetCapMinor: 100_000 });
-  const quote = await custA.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[10]._id] });
-  const hold = await custA.mutation(api.holds.create, { quoteId: quote.quoteId, idempotencyKey: "x402-hold", actor: "web" });
+  const quote = await quoteFor(custA, { campaignId: seed.campaignId, slotIds: [slots[10]._id] });
+  const hold = await holdFor(custA, quote, "x402-hold", "web");
   return { t, host, seed, custA, custB, workspaceId, billboard, keyA, keyB, hold };
 }
 type World = Awaited<ReturnType<typeof world>>;
@@ -210,22 +210,11 @@ describe("x402 on Convex: verify -> re-check -> settle -> record", () => {
 });
 
 describe("seller agent routes on Convex", () => {
-  test("agent card and negotiations", async () => {
+  test("agent card: the host's screens and how its rounds negotiate", async () => {
     const w = await world();
     const card = await call(w, "GET", `/a2a/hosts/${w.workspaceId}/agent.json`, null);
     expect(card.status).toBe(200);
-    expect(card.body).toMatchObject({ schema: "billboardos.agent-card/v1", host: { name: "Moscone Media" }, negotiation: { maxRounds: 4 } });
-    expect(JSON.stringify(card.body)).not.toContain("floorRatio");
-    const slots = await w.t.query(api.slots.listForBillboard, { billboardId: w.seed.billboardId, from: START, to: START + 12 * 60 * MIN });
-    const res = await w.t.fetch(`/a2a/hosts/${w.workspaceId}/negotiations`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${w.keyA.key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ campaignId: w.seed.campaignId, slotIds: [slots[20]._id] }),
-    });
-    expect(res.status).toBe(201);
-    const n = (await res.json()) as { negotiationId: string };
-    const got = await call(w, "GET", `/a2a/hosts/${w.workspaceId}/negotiations/${n.negotiationId}`, w.keyA.key);
-    expect(got.body.status).toBe("open");
-    expect((await call(w, "GET", `/a2a/hosts/${w.workspaceId}/negotiations/${n.negotiationId}`, w.keyB.key)).status).toBe(404);
+    expect(card.body).toMatchObject({ schema: "billboardos.agent-card/v1", host: { name: "Moscone Media" }, negotiation: { maxRounds: 2 } });
+    expect((await call(w, "POST", `/a2a/hosts/${w.workspaceId}/negotiations`, w.keyA.key)).status).toBe(404);
   });
 });

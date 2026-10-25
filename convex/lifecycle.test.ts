@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, type TestClient, joinCompanies } from "./test.setup";
+import { modules, signedInOperator, type TestClient, joinCompanies, quoteFor, holdFor } from "./test.setup";
 
 // 09:07 PDT; first seeded slot is 16:15-16:30Z.
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -54,8 +54,8 @@ async function bookWithX402Payment(
   slotIds: Id<"slots">[],
   key: string,
 ) {
-  const q = await t.mutation(api.quotes.create, { campaignId, slotIds });
-  const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: key, actor: "buyer" });
+  const q = await quoteFor(t, { campaignId, slotIds });
+  const hold = await holdFor(t, q, key, "buyer");
   const result = await t.mutation(internal.payments.recordVerified, x402Payment(hold.holdId, hold.amountMinor, key));
   if (result.outcome !== "booked") throw new Error(`expected booked, got ${result.outcome}`);
   return { q, hold, result };
@@ -67,7 +67,7 @@ async function uploadCreative(t: T, campaignId: Id<"campaigns">) {
     const all = await ctx.db.query("slots").take(100);
     return all.filter((s) => s.state === "available").sort((a, b) => b.startAt - a.startAt)[0];
   });
-  await t.mutation(api.quotes.create, { campaignId, slotIds: [slot._id] });
+  await quoteFor(t, { campaignId, slotIds: [slot._id] });
   const storageId = await t.run(async (ctx) =>
     ctx.storage.store(new Blob(["fake-png-bytes"], { type: "image/png" })),
   );
@@ -232,8 +232,8 @@ describe("x402 payments", () => {
 
   test("x402 payment on an expired hold opens an exception", async () => {
     const { t, seed, slots } = await setup();
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "m2", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const hold = await holdFor(t, q, "m2", "buyer");
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     const r = await t.mutation(internal.payments.recordVerified, x402Payment(hold.holdId, hold.amountMinor, "m2"));
     expect(r.outcome === "exception" && r.kind).toBe("payment_after_hold_expired");
@@ -257,8 +257,6 @@ describe("player", () => {
     expect(view.current?.creativeUrl).toBeUndefined();
     expect(view.next?.slotId).toBe(slots[1]._id);
     expect(view.next?.state).toBe("available");
-    // Cheapest available slot in the next 12h (09:30-21:00 PDT), no audience data: $40 x 0.85 evening.
-    expect(view.houseAd.fromPriceMinor).toBe(3400);
     expect(view.houseAd.message).toContain("Moscone West Screen");
 
     await uploadCreative(t, seed.campaignId);

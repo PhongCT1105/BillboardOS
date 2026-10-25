@@ -1,7 +1,7 @@
 import type { MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { recordAudit } from "./audit";
-import { isTxHash } from "./momentHooks";
+import { isTxHash } from "./sale";
 
 /**
  * Payment applied and booking confirmed for a bidding round's hold

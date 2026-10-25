@@ -7,7 +7,7 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { errorMessage } from "../lib/format";
 import { CreateCompany, CreateWorkspace, RoleChooser } from "./Onboarding";
 import { PENDING_ROLE_KEY, readPendingRole, type AccountType } from "./SignInPage";
-import { STARTER_AUDIENCE, detectPlace, randomCompanyName, randomHostName, randomScreenName } from "./place";
+import { detectPlace, randomCompanyName, randomHostName } from "./place";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 type Step = { label: string; done: boolean };
@@ -43,8 +43,6 @@ function finish(onDone: () => void) {
 function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone: () => void }) {
   const setAccountType = useMutation(api.accounts.setAccountType);
   const createWorkspace = useMutation(api.workspaces.create);
-  const createScreen = useMutation(api.billboards.create);
-  const setAudience = useMutation(api.billboards.setAudienceTags);
   const createCompany = useMutation(api.accounts.createCompany);
   const createCampaign = useMutation(api.campaigns.create);
   const generateUploadUrl = useMutation(api.creatives.generateUploadUrl);
@@ -56,7 +54,7 @@ function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone:
       ? [
           { label: `Detected ${place.city}`, done: true },
           { label: "Creating your host workspace", done: false },
-          { label: "Adding your first screen", done: false },
+          { label: "Screens are real devices: pair one from your dashboard", done: true },
         ]
       : [
           { label: `Detected ${place.city}`, done: true },
@@ -79,28 +77,8 @@ function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone:
         if (role === "host") {
           if (me.workspaces.length === 0) {
             const name = randomHostName();
-            const workspaceId = await createWorkspace({ name, city: place.city });
+            await createWorkspace({ name, city: place.city });
             tick(1, `Created ${name}`);
-            let screenId;
-            for (let attempt = 0; attempt < 4 && !screenId; attempt++) {
-              try {
-                screenId = await createScreen({
-                  workspaceId,
-                  name: randomScreenName(place.city),
-                  city: place.city,
-                  locationLabel: place.locationLabel,
-                  utcOffsetMinutes: place.utcOffsetMinutes,
-                  // Testnet-friendly prices: a busy spot stays under a faucet claim of test USDC.
-                  baseRateMinor: 300,
-                  reserveFloorMinor: 100,
-                });
-              } catch (err) {
-                if (codeOf(err) !== "NAME_TAKEN") throw err;
-              }
-            }
-            if (!screenId) throw new Error("Could not pick a free screen name; add one from the console.");
-            await setAudience({ billboardId: screenId, audienceTags: STARTER_AUDIENCE });
-            tick(2, `Screen on ${place.locationLabel}`);
           }
         } else if (me.companies.length === 0) {
           let advertiserId;
