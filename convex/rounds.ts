@@ -6,7 +6,10 @@ import { roundTrigger } from "./schemaParts/rounds";
 import { recordAudit } from "./lib/audit";
 import { assertWithinBudget, authenticateAgent, keyStatus } from "./lib/agentKeys";
 import { matchScore } from "./lib/match";
-import { MIN_REMAINING_MS, audienceMix, replyAllowed } from "./lib/moment";
+import { MIN_REMAINING_MS, PAY_WINDOW_MS, audienceMix, replyAllowed } from "./lib/moment";
+import { holdLockKey, lockHeld } from "./lib/paymentLock";
+import { PRICING_POLICY_VERSION } from "./lib/pricing";
+import { endHold, takeHold } from "./holds";
 import { creativeReady } from "./lib/momentHooks";
 import { CAMERA_COOLDOWN_MS, MAX_INVITES, ROUND_CLOSE_MS, askingPrice, closeOutcome, priceSignals } from "./lib/rounds";
 import { activeEvent, spentTodayForAdvertiserMinor } from "./moments";
@@ -24,6 +27,10 @@ const BUCKET_MS = 15 * 60_000;
 const MAX_APPROVALS_SCANNED = 100;
 const MAX_KEYS_SCANNED = 20;
 const NO_INVITES = "No company agents with an approved ad and budget.";
+const SOLD_ELSEWHERE = "Spot was sold elsewhere.";
+const ROUND_HOLD_TTL_MS = 3 * 60_000;
+/** While a payment is settling at the pay deadline, look again this much later (within the hold's TTL). */
+const PAY_RECHECK_MS = 20_000;
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 
@@ -255,10 +262,35 @@ export async function closeRoundCore(ctx: MutationCtx, roundId: Id<"rounds">): P
   const winner = valid.find((b) => b._id === result.winnerId)!;
   const outcome = `${names.get(winner._id)} wins at ${usd(result.priceMinor)} (bid ${usd(winner.amountMinor!)})${others.length ? `; ${others.join(", ")}` : ""}.`;
   await ctx.db.patch(roundId, { closedAt: Date.now() });
-  await awardCore(ctx, round, winner._id, result.priceMinor, result.runnerUpId as Id<"roundBids"> | null, outcome);
+  const first = await awardCore(ctx, round, winner._id, result.priceMinor, result.runnerUpId as Id<"roundBids"> | null, outcome);
+  if (first !== "skip") return;
+  // The winner can't take it (key revoked, over its cap): the next bids, best first, each at its own amount.
+  await awardNext(ctx, (await ctx.db.get(roundId))!, `${names.get(winner._id)}'s agent can no longer buy`);
 }
 
-/** Award the spot to one bid at a price. (Payment wiring follows in the pay task.) */
+/** Bids still in the running, best first (ties: earlier answer). */
+function ranked(bids: Doc<"roundBids">[]): Doc<"roundBids">[] {
+  return bids
+    .filter((b) => b.amountMinor !== null && (b.status === "bid" || b.status === "lost"))
+    .sort((a, b) => b.amountMinor! - a.amountMinor! || (a.answeredAt ?? 0) - (b.answeredAt ?? 0));
+}
+
+/** Award the best remaining bid at its own amount; unsold when nobody is left. */
+async function awardNext(ctx: MutationCtx, round: Doc<"rounds">, why: string): Promise<void> {
+  for (const b of ranked(await bidsOf(ctx, round._id))) {
+    const company = await companyName(ctx, b.advertiserId);
+    const next = await awardCore(ctx, round, b._id, b.amountMinor!, null, `${company} gets the spot at its ${usd(b.amountMinor!)} bid (${why}).`);
+    if (next !== "skip") return;
+  }
+  await endUnsold(ctx, round, `Payment failed: ${why}. No runner-up left.`);
+}
+
+/**
+ * Award the spot to one bid at a price: a quote and a hold for the rest of
+ * the spot, the winner told to pay (round_won) within 60 s, the others told
+ * they lost. "skip" when this bid's key can't buy any more; "ended" when the
+ * spot itself is gone (the round ends unsold).
+ */
 export async function awardCore(
   ctx: MutationCtx,
   round: Doc<"rounds">,
@@ -266,20 +298,126 @@ export async function awardCore(
   priceMinor: number,
   runnerUpBidId: Id<"roundBids"> | null,
   outcome: string,
-): Promise<boolean> {
+): Promise<"awarded" | "skip" | "ended"> {
+  const bid = (await ctx.db.get(bidId))!;
+  const key = await ctx.db.get(bid.agentKeyId);
+  const now = Date.now();
+  if (!key || keyStatus(key, now) !== "active") return "skip";
+  try {
+    await assertWithinBudget(ctx, key, priceMinor);
+  } catch {
+    return "skip";
+  }
+  const company = await companyName(ctx, bid.advertiserId);
+  const billboard = await ctx.db.get(round.billboardId);
+  const quoteId = await ctx.db.insert("quotes", {
+    workspaceId: round.workspaceId,
+    campaignId: bid.campaignId,
+    billboardId: round.billboardId,
+    slotIds: [round.slotId],
+    amountMinor: priceMinor,
+    currency: "USD",
+    expiresAt: now + 10 * 60_000,
+    pricingBasis: [
+      `Bidding round on ${billboard?.name ?? "screen"}: floor ${usd(round.floorMinor)}, asking ${usd(round.askingMinor)}, won at ${usd(priceMinor)}`,
+      ...round.signals.map((sig) => sig.reason),
+    ],
+    confidence: "medium",
+    policyVersion: PRICING_POLICY_VERSION,
+    status: "open",
+    traceId: `round:${round._id}`,
+    agentKeyId: key._id,
+    screenAmountMinor: round.askingMinor,
+  });
+  let holdId: Id<"holds">;
+  try {
+    const hold = await takeHold(ctx, (await ctx.db.get(quoteId))!, `round:${round._id}:${bidId}`, `agent:${company}/${key.name}`, {
+      agentKeyId: key._id,
+      inProgressMinRemainingMs: 60_000,
+      ttlMs: ROUND_HOLD_TTL_MS,
+    });
+    holdId = hold._id;
+  } catch (error) {
+    await ctx.db.patch(quoteId, { status: "expired" });
+    if (error instanceof ConvexError && (error.data as { code?: string }).code === "SLOT_UNAVAILABLE") {
+      await endUnsold(ctx, round, SOLD_ELSEWHERE);
+      return "ended";
+    }
+    throw error;
+  }
   await ctx.db.patch(round._id, {
     status: "awarded",
     winnerBidId: bidId,
     runnerUpBidId: runnerUpBidId ?? undefined,
     priceMinor,
+    holdId,
     outcome,
   });
   for (const b of await bidsOf(ctx, round._id)) {
-    if (b._id === bidId) await ctx.db.patch(b._id, { status: "won" });
-    else if (b.status === "bid") await ctx.db.patch(b._id, { status: "lost" });
+    if (b._id === bidId) {
+      await ctx.db.patch(b._id, { status: "won" });
+      await ctx.scheduler.runAfter(0, internal.roundDelivery.deliver, { bidId: b._id, event: "round_won" });
+    } else if (b.status === "bid") {
+      await ctx.db.patch(b._id, { status: "lost" });
+      await ctx.scheduler.runAfter(0, internal.roundDelivery.deliver, { bidId: b._id, event: "round_lost" });
+    }
   }
-  return true;
+  await recordAudit(ctx, {
+    workspaceId: round.workspaceId,
+    traceId: `round:${round._id}`,
+    actor: `seller-agent:${billboard?.name ?? "screen"}`,
+    type: "round.awarded",
+    subjectId: round._id,
+    reason: `${outcome} Hold ${holdId}; pay within ${PAY_WINDOW_MS / 1000} s.`,
+  });
+  await ctx.scheduler.runAfter(PAY_WINDOW_MS, internal.rounds.payDeadline, { roundId: round._id, holdId });
+  return "awarded";
 }
+
+/** The winner didn't pay: release its hold, mark it defaulted, and give the spot to the next bid. */
+async function defaultWinner(ctx: MutationCtx, round: Doc<"rounds">, holdId: Id<"holds">, reason: string): Promise<void> {
+  const hold = await ctx.db.get(holdId);
+  if (hold?.status === "active") await endHold(ctx, hold, "released", "system", `Round winner didn't pay: ${reason}`);
+  const winner = round.winnerBidId ? await ctx.db.get(round.winnerBidId) : null;
+  if (winner) await ctx.db.patch(winner._id, { status: "defaulted" });
+  const who = winner ? await companyName(ctx, winner.advertiserId) : "The winner";
+  await ctx.db.patch(round._id, { holdId: undefined, winnerBidId: undefined });
+  await awardNext(ctx, (await ctx.db.get(round._id))!, `${who}'s payment failed: ${reason}`);
+}
+
+/** The winner's payment was blocked (e.g. empty wallet, no CDP keys). Idempotent per hold. */
+export const paymentFailed = internalMutation({
+  args: { holdId: v.id("holds"), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const round = await ctx.db
+      .query("rounds")
+      .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
+      .first();
+    if (!round || round.status !== "awarded") return null;
+    await defaultWinner(ctx, round, args.holdId, args.reason.slice(0, 200));
+    return null;
+  },
+});
+
+/** 60 s after the award: paid -> nothing; a payment settling -> look again; otherwise the next bid gets it. */
+export const payDeadline = internalMutation({
+  args: { roundId: v.id("rounds"), holdId: v.id("holds") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const round = await ctx.db.get(args.roundId);
+    if (!round || round.status !== "awarded" || round.holdId !== args.holdId) return null;
+    const hold = await ctx.db.get(args.holdId);
+    if (!hold || hold.status === "converted") return null;
+    const now = Date.now();
+    if (hold.status === "active" && hold.expiresAt > now && (await lockHeld(ctx, holdLockKey(hold._id), now))) {
+      await ctx.scheduler.runAfter(PAY_RECHECK_MS, internal.rounds.payDeadline, args);
+      return null;
+    }
+    await defaultWinner(ctx, round, args.holdId, `not paid within ${PAY_WINDOW_MS / 1000} s`);
+    return null;
+  },
+});
 
 export const closeRound = internalMutation({
   args: { roundId: v.id("rounds") },

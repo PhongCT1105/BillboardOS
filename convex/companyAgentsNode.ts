@@ -249,6 +249,7 @@ export const pay = internalAction({
     const blocked = async (reason: string) => {
       await ctx.runMutation(internal.moments.paymentBlocked, { holdId, reason });
       await ctx.runMutation(internal.liveAuction.paymentFailed, { holdId, reason });
+      await ctx.runMutation(internal.rounds.paymentFailed, { holdId, reason });
       await log(`flash_won: payment blocked: ${reason}`);
     };
     const secret = process.env.INTERNAL_API_SECRET;

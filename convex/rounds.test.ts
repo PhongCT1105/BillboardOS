@@ -286,7 +286,99 @@ describe("rounds: agents talk over webhooks and the agent API", () => {
     await flush(w.t, 20);
     const [row] = await w.bids(id);
     const expected = ruleBasedStrategy({ floorMinor: 100, askingMinor: 100, match: row.match, crowd: null, maxPerSpotMinor: 500, budgetLeftMinor: 1000, balanceMinor: 1000 });
-    expect(row).toMatchObject({ status: "won", amountMinor: expected.amountMinor, reasoning: expected.reasoning });
-    expect((await w.round(id)).status).toBe("awarded");
+    expect(row).toMatchObject({ amountMinor: expected.amountMinor, reasoning: expected.reasoning });
+    // It won and tried to pay; with no CDP keys here the payment is blocked, so the round ends unsold, saying why.
+    const r = await w.round(id);
+    expect(row.status).toBe("defaulted");
+    expect(r.status).toBe("unsold");
+    expect(r.outcome).toMatch(/^Payment failed: LaunchKit's payment failed: no CDP keys/);
+  });
+});
+
+describe("rounds: award, pay, runner-up", () => {
+  const TX = `0x${"ab".repeat(32)}`;
+
+  async function awarded() {
+    const w = await world();
+    const [lk, rivet] = w.companies;
+    const id = (await w.start())!;
+    await w.bid(lk, id, 300);
+    await w.bid(rivet, id, 180);
+    return { ...w, lk, rivet, id };
+  }
+  const holdOf = (w: { t: TestClient }, holdId: Id<"holds">) => w.t.run(async (ctx) => (await ctx.db.get(holdId))!);
+  const pay = (w: { t: TestClient }, holdId: Id<"holds">, amountMinor: number, externalRef = TX) =>
+    w.t.mutation(internal.payments.recordVerified, {
+      holdId,
+      provider: "x402",
+      externalRef,
+      amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: `pay-${holdId}`,
+    });
+
+  test("the winner gets a hold at the price; paying it with a tx hash marks the round paid and books the spot", async () => {
+    const w = await awarded();
+    const r = await w.round(w.id);
+    expect(r.holdId).toBeDefined();
+    expect(await holdOf(w, r.holdId!)).toMatchObject({ status: "active", amountMinor: 181 });
+    await flush(w.t);
+    expect(webhooks.filter((h) => h.event === "round_won").map((h) => h.url)).toEqual(["https://agent.test/launchkit"]);
+    expect(webhooks.filter((h) => h.event === "round_lost").map((h) => h.url)).toEqual(["https://agent.test/rivet"]);
+    expect(webhooks.find((h) => h.event === "round_won")?.body).toMatchObject({ holdId: r.holdId, amountMinor: 181 });
+
+    expect(await pay(w, r.holdId!, 181)).toMatchObject({ outcome: "booked" });
+    const paid = await w.round(w.id);
+    expect(paid).toMatchObject({ status: "paid", paymentTx: TX });
+    expect(paid.outcome).toMatch(/Paid \$1\.81 over x402/);
+    const booking = await w.t.run(async (ctx) => ctx.db.query("bookings").withIndex("by_hold", (q) => q.eq("holdId", r.holdId!)).first());
+    expect(booking).not.toBeNull();
+  });
+
+  test("S8: the winner's payment fails: the runner-up gets the spot at its own bid; with nobody left, unsold", async () => {
+    const w = await awarded();
+    const first = await w.round(w.id);
+    await w.t.mutation(internal.rounds.paymentFailed, { holdId: first.holdId!, reason: "wallet empty" });
+    const second = await w.round(w.id);
+    expect(await holdOf(w, first.holdId!)).toMatchObject({ status: "released" });
+    expect(second).toMatchObject({ status: "awarded", priceMinor: 180 });
+    expect((await w.bids(w.id)).find((b) => b._id === second.winnerBidId)?.advertiserId).toBe(w.rivet.advertiserId);
+    expect(await holdOf(w, second.holdId!)).toMatchObject({ status: "active", amountMinor: 180 });
+
+    await w.t.mutation(internal.rounds.paymentFailed, { holdId: second.holdId!, reason: "wallet empty" });
+    const third = await w.round(w.id);
+    expect(third.status).toBe("unsold");
+    expect(third.outcome).toMatch(/^Payment failed/);
+  });
+
+  test("the pay deadline passes with no payment in flight: same as a failed payment", async () => {
+    const w = await awarded();
+    vi.advanceTimersByTime(61_000);
+    await w.t.finishInProgressScheduledFunctions();
+    const r = await w.round(w.id);
+    expect(r).toMatchObject({ status: "awarded", priceMinor: 180 });
+    expect((await w.bids(w.id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(w.rivet.advertiserId);
+  });
+
+  test("the spot sold elsewhere before the close: unsold, said so", async () => {
+    const w = await world();
+    const id = (await w.start())!;
+    await w.t.run(async (ctx) => ctx.db.patch((await ctx.db.get(id))!.slotId, { state: "booked" }));
+    await w.bid(w.companies[0], id, 300);
+    await w.bid(w.companies[1], id, 180);
+    expect(await w.round(id)).toMatchObject({ status: "unsold", outcome: "Spot was sold elsewhere." });
+  });
+
+  test("the winner's key was revoked before the award: the next bid wins at its own amount", async () => {
+    const w = await world();
+    const [lk, rivet] = w.companies;
+    const id = (await w.start())!;
+    await w.bid(lk, id, 300);
+    await w.t.run(async (ctx) => ctx.db.patch(lk.agentKeyId, { revokedAt: Date.now() }));
+    await w.bid(rivet, id, 180);
+    const r = await w.round(id);
+    expect(r).toMatchObject({ status: "awarded", priceMinor: 180 });
+    expect((await w.bids(id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(rivet.advertiserId);
   });
 });

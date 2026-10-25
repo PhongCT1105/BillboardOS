@@ -69,6 +69,7 @@ import type * as lib_negotiation from "../lib/negotiation.js";
 import type * as lib_paymentLock from "../lib/paymentLock.js";
 import type * as lib_pricing from "../lib/pricing.js";
 import type * as lib_reconcile from "../lib/reconcile.js";
+import type * as lib_roundHooks from "../lib/roundHooks.js";
 import type * as lib_rounds from "../lib/rounds.js";
 import type * as lib_scheduling from "../lib/scheduling.js";
 import type * as lib_screenPrice from "../lib/screenPrice.js";
@@ -176,6 +177,7 @@ declare const fullApi: ApiFromModules<{
   "lib/paymentLock": typeof lib_paymentLock;
   "lib/pricing": typeof lib_pricing;
   "lib/reconcile": typeof lib_reconcile;
+  "lib/roundHooks": typeof lib_roundHooks;
   "lib/rounds": typeof lib_rounds;
   "lib/scheduling": typeof lib_scheduling;
   "lib/screenPrice": typeof lib_screenPrice;
