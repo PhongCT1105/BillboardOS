@@ -1,0 +1,177 @@
+/* Apple-inspired light dashboard. Scope tokens to the app so display playback
+   and the public marketing page retain their own visual context. */
+.app-shell {
+  --color-ink: #f5f5f7;
+  --color-panel: #ffffff;
+  --color-raised: #ededf0;
+  --color-line: #e0e0e5;
+  --color-fg: #1d1d1f;
+  --color-muted: #626269;
+  --color-faint: #6e6e73;
+  --color-accent: #0066cc;
+  --color-accent-ink: #ffffff;
+  --color-danger: #b42318;
+  --color-ok: #24734b;
+  --color-info: #0066cc;
+  --dashboard-selected: #edf5ff;
+  --dashboard-radius: 18px;
+  color-scheme: light;
+  background: var(--color-ink);
+  color: var(--color-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Geist Variable", "Segoe UI", sans-serif;
+  font-size: 17px;
+  line-height: 1.47;
+}
+.app-header { background: var(--color-panel); border-bottom: 1px solid var(--color-line); }
+.app-header-inner {
+  width: min(1200px, calc(100% - 80px));
+  min-height: 80px;
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+.app-shell .demo-brand { font-weight: 600; letter-spacing: -.6px; font-size: 20px; }
+.app-shell .demo-brand-mark { background: var(--color-fg); color: var(--color-panel); border-radius: 8px; width: 34px; height: 34px; }
+.app-shell .demo-brand .text-muted { color: var(--color-fg); }
+.app-shell .app-navigation { gap: 6px; }
+.app-shell nav a { min-height: 44px; display: inline-flex; align-items: center; }
+.app-shell nav a[aria-current="page"] { background: var(--dashboard-selected); color: var(--color-accent); border-radius: 8px; }
+.app-shell .app-account button { min-height: 44px; border: 0; font-size: 14px; }
+.app-shell .app-account span { font-size: 14px; }
+.app-shell .demo-header-tools { font-size: 14px; }
+.app-shell .demo-header-tools summary { min-height: 44px; align-content: center; }
+.app-shell .demo-advanced-menu { top: 100%; background: var(--color-panel); border-radius: 12px; box-shadow: none; min-width: 210px; }
+.app-shell .demo-container { width: min(1200px, calc(100% - 80px)); }
+.app-shell .demo-dashboard { padding-block: 40px 48px; }
+.app-shell .demo-dashboard-heading { margin: 0 0 32px; gap: 20px; }
+.app-shell .demo-dashboard-heading h1 { font-size: 36px; line-height: 1.15; font-weight: 600; letter-spacing: -1.1px; }
+.app-shell .demo-button {
+  min-height: 44px;
+  padding: 10px 20px;
+  border: 1px solid var(--color-line);
+  border-radius: 9999px;
+  background: var(--color-panel);
+  color: var(--color-accent);
+  font-size: 14px;
+  font-weight: 400;
+  gap: 8px;
+  cursor: pointer;
+}
+.app-shell .demo-button-primary { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
+.app-shell .demo-button:hover { background: var(--dashboard-selected); }
+.app-shell .demo-button-primary:hover { background: #0071e3; }
+.app-shell button:active { transform: scale(.95); }
+.app-shell button:disabled { opacity: .5; cursor: not-allowed; }
+.app-shell :is(a, button, input, select, summary):focus-visible { outline: 2px solid var(--color-accent); outline-offset: 4px; }
+.app-shell .demo-text-link { font-size: 14px; color: var(--color-accent); min-height: 44px; }
+.app-shell .demo-overview { gap: 32px; }
+.app-shell .demo-metrics { background: var(--color-panel); border: 1px solid var(--color-line); border-radius: var(--dashboard-radius); }
+.app-shell .demo-metrics > div { padding: 24px 28px; gap: 16px; }
+.app-shell .demo-metric-label { color: var(--color-muted); font-size: 14px; }
+.app-shell .demo-metrics strong { font-size: 36px; font-weight: 600; letter-spacing: -1.2px; }
+.app-shell .dashboard-period { margin-top: -20px; font-size: 13px; color: var(--color-muted); text-align: right; }
+.app-shell .demo-section-heading { margin-bottom: 20px; gap: 16px; }
+.app-shell .demo-section-heading h2 { font-size: 21px; letter-spacing: -.4px; font-weight: 600; }
+.app-shell .demo-count { font-size: 14px; }
+.app-shell .dashboard-sale-row { border-radius: var(--dashboard-radius); padding: 22px 24px; gap: 20px; }
+.app-shell .dashboard-sale-row + .dashboard-sale-row { margin-top: 12px; }
+.app-shell .dashboard-sale-row > div:first-child { flex: 1; }
+.app-shell .dashboard-sale-row p { line-height: 1.5; overflow-wrap: anywhere; }
+.app-shell .dashboard-sale-row .rounded-full { border: 0; background: var(--color-ink); font-weight: 600; padding: 4px 10px; }
+.app-shell .dashboard-switch { display: flex; align-items: center; gap: 12px; font-size: 14px; color: var(--color-muted); min-height: 44px; cursor: pointer; }
+.app-shell .dashboard-switch input {
+  appearance: none; width: 40px; height: 24px; flex-shrink: 0;
+  border-radius: 9999px; background: #85858c; position: relative; cursor: pointer;
+  transition: background 150ms;
+}
+.app-shell .dashboard-switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--color-panel); transition: transform 150ms; }
+.app-shell .dashboard-switch input:checked { background: var(--color-accent); }
+.app-shell .dashboard-switch input:checked::after { transform: translateX(16px); }
+.app-shell .dashboard-switch input:disabled { cursor: wait; opacity: .5; }
+.app-shell .demo-displays { background: var(--color-panel); border: 1px solid var(--color-line); border-radius: var(--dashboard-radius); padding: 24px; }
+.app-shell .demo-display-toolbar { gap: 12px; margin-bottom: 24px; }
+.app-shell .demo-display-toolbar label { width: min(380px, 70%); border-radius: 9999px; padding: 10px 16px; min-height: 44px; background: var(--color-ink); border-color: transparent; }
+.app-shell .demo-display-toolbar input { font-size: 14px; }
+.app-shell .demo-filter { border-radius: 9999px; padding: 10px 16px; font-size: 14px; min-height: 44px; }
+.app-shell .demo-filter.is-active { background: var(--dashboard-selected); }
+.app-shell .demo-display-layout { grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 24px; }
+.app-shell .demo-display-list { gap: 8px; max-height: 430px; overflow-y: auto; padding: 4px; margin: -4px; }
+.app-shell .demo-display-row { border: 1px solid transparent; border-radius: 12px; padding: 16px; gap: 14px; }
+.app-shell .demo-display-row.is-selected { background: var(--dashboard-selected); border-color: #b6d5f5; }
+.app-shell .demo-display-icon { width: 44px; height: 44px; border: 0; border-radius: 8px; background: var(--color-ink); color: var(--color-faint); }
+.app-shell .is-selected .demo-display-icon { background: var(--color-panel); color: var(--color-accent); }
+.app-shell .demo-display-name strong { font-size: 15px; font-weight: 600; }
+.app-shell .demo-display-name > span { font-size: 13px; margin-top: 4px; gap: 5px; }
+.app-shell .demo-status { font-size: 12px; gap: 6px; }
+.app-shell .demo-status i { width: 6px; height: 6px; }
+.app-shell .demo-preview { border-radius: 12px; background: var(--color-panel); }
+.app-shell .demo-preview-label { font-size: 13px; padding: 14px 18px; }
+.app-shell .demo-preview-placeholder { background: var(--color-ink); gap: 14px; aspect-ratio: 16 / 7; max-height: 280px; }
+.app-shell .demo-preview-placeholder strong { font-size: 21px; font-weight: 600; color: var(--color-faint); letter-spacing: -.4px; }
+.app-shell .demo-preview-placeholder > span { font-size: 14px; }
+.app-shell .demo-preview-media { background: var(--color-ink); }
+.app-shell .demo-preview-footer { padding: 16px 18px; }
+.app-shell .demo-preview-footer strong { font-size: 14px; font-weight: 600; }
+.app-shell .demo-preview-footer span { font-size: 12px; margin-top: 4px; }
+.app-shell .demo-preview-footer .demo-button { padding: 8px 16px; }
+.app-shell .demo-tools { margin-top: 28px; padding-top: 0; border: 0; }
+.app-shell .demo-tools > summary { font-size: 14px; min-height: 44px; align-content: center; width: fit-content; }
+.app-shell .demo-tools > div { display: flex; flex-direction: column; gap: 28px; margin-top: 16px; }
+.app-shell .demo-empty { border-radius: 12px; min-height: 180px; background: var(--color-panel); }
+.app-shell .demo-empty h3 { font-size: 17px; font-weight: 600; }
+.app-shell .demo-empty p { font-size: 14px; }
+.app-shell .demo-tabs { gap: 28px; }
+.app-shell .demo-tabs > a { font-size: 14px; }
+.app-shell .demo-tabs > a[aria-current="page"] { border-radius: 0; background: transparent; }
+.app-shell .demo-tabs details { font-size: 14px; }
+.app-shell .demo-campaign-row { background: var(--color-panel); border-radius: 12px; padding: 20px; }
+.app-shell .demo-campaign-icon { background: var(--color-ink); color: var(--color-muted); }
+.app-shell .demo-campaign-row strong { font-size: 15px; font-weight: 600; }
+.app-shell .demo-campaign-row > div > span, .app-shell .demo-data-note { font-size: 13px; }
+/* Semantic feedback needs darker colors on a light surface. */
+.app-shell .text-red-300, .app-shell .text-red-400 { color: var(--color-danger); }
+.app-shell .text-emerald-300, .app-shell .text-emerald-400 { color: var(--color-ok); }
+.app-shell .text-amber-300, .app-shell .text-amber-400 { color: #875500; }
+.app-shell .text-blue-300, .app-shell .text-blue-400 { color: var(--color-info); }
+@media (max-width: 1100px) {
+  .app-header-inner { gap: 20px; flex-wrap: wrap; padding-block: 16px; }
+  .app-shell .app-navigation { order: 3; width: 100%; }
+  .app-shell .demo-metrics > div { padding: 22px; }
+}
+@media (max-width: 767px) {
+  .app-header-inner, .app-shell .demo-container { width: calc(100% - 40px); }
+  .app-header-inner { gap: 12px; }
+  .app-shell .app-navigation { gap: 0; font-size: 13px; flex-wrap: wrap; }
+  .app-shell .app-navigation > a { padding-inline: 10px; }
+  .app-shell .demo-dashboard { padding-block: 28px 32px; }
+  .app-shell .demo-dashboard-heading { flex-direction: row; align-items: center; margin-bottom: 24px; }
+  .app-shell .demo-dashboard-heading h1 { font-size: 28px; letter-spacing: -.8px; }
+  .app-shell .demo-dashboard-heading .demo-button { padding-inline: 15px; }
+  .app-shell .demo-overview { gap: 24px; }
+  .app-shell .demo-metrics > div { padding: 20px; gap: 12px; }
+  .app-shell .demo-metric-label { font-size: 13px; }
+  .app-shell .demo-metrics strong { font-size: 30px; }
+  .app-shell .dashboard-period { margin-top: -12px; font-size: 12px; text-align: left; }
+  .app-shell .demo-section-heading { margin-bottom: 16px; }
+  .app-shell .demo-section-heading h2 { font-size: 20px; }
+  .app-shell .dashboard-sale-row { padding: 20px; }
+  .app-shell .dashboard-sale-row > div:first-child { flex-basis: 100%; }
+  .app-shell .dashboard-sale-row > div:last-child { width: 100%; justify-content: flex-end; }
+  .app-shell .demo-displays { padding: 20px; }
+  .app-shell .demo-display-toolbar { margin-bottom: 20px; }
+  .app-shell .demo-display-toolbar label { flex: 1; width: 0; padding-inline: 12px; }
+  .app-shell .demo-filter { padding-inline: 12px; font-size: 13px; }
+  .app-shell .demo-display-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .app-shell .demo-display-row { padding: 12px; gap: 10px; }
+  .app-shell .demo-display-name strong { font-size: 14px; }
+  .app-shell .demo-preview-footer { flex-wrap: wrap; gap: 12px; padding: 16px; }
+  .app-shell .demo-preview-label { padding-inline: 14px; font-size: 12px; }
+  .app-shell .demo-preview-placeholder strong { font-size: 19px; }
+  .app-shell .demo-preview-placeholder { aspect-ratio: 16 / 9; }
+  .app-shell .demo-tabs { gap: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell *, .app-shell *::after { animation: none !important; transition: none !important; }
+  .app-shell button:active { transform: none; }
+}

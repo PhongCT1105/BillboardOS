@@ -30,8 +30,10 @@ export function PrimaryLink({
 
 export function Metrics({
   items,
+  compact = false,
 }: {
   items: { label: string; value: string; detail: string }[];
+  compact?: boolean;
 }) {
   return (
     <section className="demo-metrics" aria-label="Key statistics">
@@ -39,7 +41,7 @@ export function Metrics({
         <div key={item.label}>
           <span className="demo-metric-label">{item.label}</span>
           <strong>{item.value}</strong>
-          <span className="demo-metric-detail">{item.detail}</span>
+          {!compact && <span className="demo-metric-detail">{item.detail}</span>}
         </div>
       ))}
     </section>

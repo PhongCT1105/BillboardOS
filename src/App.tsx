@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import type { FunctionReturnType } from "convex/server";
@@ -23,8 +23,12 @@ import { MomentPage } from "./moment/MomentPage";
 import { LandingPage } from "./demo/LandingPage";
 import { DemoPage } from "./demo/DemoPage";
 import { Brand } from "./demo/ui";
+import "./dashboard.css";
+import "./stitch-dashboard.css";
+import { Bell, Plus, UserCircle } from "@phosphor-icons/react";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
+const DesignPreview = import.meta.env.DEV ? lazy(() => import("./dev/DesignPreview")) : null;
 
 export function App() {
   const route = useHashRoute();
@@ -32,6 +36,7 @@ export function App() {
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [route]);
+  if (route === "/design-preview" && DesignPreview) return <Suspense fallback={null}><DesignPreview /></Suspense>;
   if (route === "/" || route === "/landing") return <LandingPage />;
   if (route === "/demo") return <DemoPage />;
   // A device that becomes (or already is) a screen: pairing code, then the player with a heartbeat.
@@ -61,9 +66,9 @@ function Shell({ route }: { route: string }) {
   }, [userId]);
 
   return (
-    <div className="min-h-[100dvh]">
-      <header className="border-b border-line">
-        <div className="mx-auto flex min-h-18 max-w-[1320px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3 md:px-10">
+    <div className={`app-shell min-h-[100dvh] ${signedIn?.accountType === "host" ? "host-shell" : ""}`}>
+      <header className="app-header">
+        <div className="app-header-inner">
           <Brand />
           {signedIn?.accountType === "host" &&
             signedIn.workspaces.length > 0 && <HostNav route={route} />}
@@ -88,7 +93,11 @@ function Shell({ route }: { route: string }) {
                 </NavLink>
               </nav>
             )}
-          <div className="ml-auto flex items-center gap-3">
+          <div className="app-account ml-auto flex items-center gap-3">
+            {signedIn?.accountType === "host" && <>
+              <a className="demo-button demo-button-primary header-add" href="#/console?add=1"><Plus size={17} />Add Display</a>
+              <a className="header-icon" href="#/finance" aria-label="Finance alerts"><Bell size={20} /></a>
+            </>}
             {signedIn?.accountType === "host" &&
               signedIn.workspaces.length > 1 && (
                 <WorkspaceSwitcher me={signedIn} />
@@ -167,31 +176,36 @@ function CustomerArea({ me, route }: { me: Me; route: string }) {
 function HostNav({ route }: { route: string }) {
   const screens = useQuery(api.billboards.mine, {});
   const first = screens?.[0];
+  return <HostNavigation route={route} firstId={first?._id} />;
+}
+
+export function HostNavigation({ route, firstId }: { route: string; firstId?: string }) {
   return (
     <nav
       aria-label="Host navigation"
-      className="flex min-w-0 items-center gap-1 overflow-x-auto text-sm"
+      className="app-navigation flex min-w-0 items-center gap-1 text-sm"
     >
       <NavLink
         href="#/console"
         active={route === "/console" || route === "/" || route === "/signin"}
       >
-        Dashboard
+        Overview
       </NavLink>
+      <NavLink href="#/displays" active={route === "/displays"}>Displays</NavLink>
+      <NavLink href="#/finance" active={route === "/finance"}>Finance</NavLink>
       <NavLink href="#/moment" active={route === "/moment"}>
-        Live sales
+        Live Sales
       </NavLink>
-      <details className="demo-header-tools">
-        <summary>More</summary>
+      <NavLink href="#/workspace" active={route === "/workspace"}>Settings</NavLink>
+      {firstId && <details className="demo-header-tools">
+        <summary>Tools</summary>
         <div className="demo-advanced-menu">
           <a href="#/finance">Finance</a>
           <a href="#/workspace">Workspace settings</a>
-          {first && <a href={`#/sensor/${first._id}`}>Audience sensor</a>}
-        </div>
-      </details>
-      {first && (
+          {firstId && <a href={`#/sensor/${firstId}`}>Audience sensor</a>}
+
         <a
-          href={`#/player/${first._id}`}
+          href={`#/player/${firstId}`}
           target="_blank"
           rel="noreferrer"
           title="A preview on this computer. The real screen runs on the ad machine: open #/screen there."
@@ -199,7 +213,8 @@ function HostNav({ route }: { route: string }) {
         >
           Preview screen
         </a>
-      )}
+        </div>
+      </details>}
     </nav>
   );
 }
@@ -234,9 +249,12 @@ function AccountMenu({ me }: { me: Me }) {
       ? me.workspaces.find((w) => w.workspaceId === me.activeWorkspaceId)?.name
       : me.companies[0]?.displayName;
   return (
-    <div className="flex items-center gap-3 text-sm">
+    <details className="account-menu">
+      <summary aria-label="Account menu"><UserCircle size={30} weight="duotone" /></summary>
+      <div className="account-popover">
+      {me.accountType === "host" && <a href="#/workspace">Workspace settings</a>}
       <span
-        className="hidden max-w-44 truncate text-xs text-muted lg:inline"
+        className="account-name"
         title={me.email ?? undefined}
       >
         {where ?? me.email ?? "Signed in"}
@@ -248,7 +266,8 @@ function AccountMenu({ me }: { me: Me }) {
       >
         Sign out
       </button>
-    </div>
+      </div>
+    </details>
   );
 }
 
@@ -260,6 +279,7 @@ function NavLink(props: {
   return (
     <a
       href={props.href}
+      aria-current={props.active ? "page" : undefined}
       className={`rounded-md px-3 py-1.5 whitespace-nowrap transition-colors ${props.active ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
     >
       {props.children}

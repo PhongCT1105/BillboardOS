@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Dark-only by design: the console and player run on booth screens. */
+/* Base palette for public marketing and playback; dashboard.css scopes the light app palette. */
 @theme {
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, monospace;

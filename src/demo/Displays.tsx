@@ -23,10 +23,12 @@ export function Displays({
   displays,
   host = false,
   sample = false,
+  samplePlaceholder = false,
 }: {
   displays: Display[];
   host?: boolean;
   sample?: boolean;
+  samplePlaceholder?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [onlyOnline, setOnlyOnline] = useState(false);
@@ -42,13 +44,8 @@ export function Displays({
       <div className="demo-section-heading">
         <div>
           <h2 id="displays-heading">
-            {host ? "Your displays" : "Find your next display"}
+            {host ? "Displays" : "Find displays"}
           </h2>
-          <p>
-            {host
-              ? "Your screens and what’s showing."
-              : "A real place for your next campaign."}
-          </p>
         </div>
         <span className="demo-count">
           {displays.length} {displays.length === 1 ? "display" : "displays"}
@@ -123,11 +120,13 @@ export function Displays({
               <div className="demo-preview-label">
                 <span>
                   <Play size={13} weight="fill" />
-                  {sample ? "Sample creative" : "Display preview"}
+                  {sample && !samplePlaceholder ? "Sample creative" : "Display preview"}
                 </span>
                 <span>{display.city}</span>
               </div>
-              {sample ? (
+              {sample && samplePlaceholder ? (
+                <IdlePreview />
+              ) : sample ? (
                 <img
                   src="/demo-creatives/golden-gate-coffee.svg"
                   alt="Sample Golden Gate Coffee advertisement"
@@ -145,7 +144,7 @@ export function Displays({
                   <span>
                     {sample
                       ? "Illustrative display · sample data"
-                      : "Preview only · no playback recorded"}
+                      : "Preview only"}
                   </span>
                 </div>
                 <a
@@ -210,15 +209,7 @@ function LivePreview({ billboardId }: { billboardId: Id<"billboards"> }) {
     live.windows.find((w) => w.status === "paid" && w.spotStartAt <= now && now < w.spotEndAt) ?? null;
   if (!livePlaying && !playable)
     return (
-      <div className="demo-preview-placeholder">
-        <Monitor size={26} />
-        <strong>{live.bidding ? "Finding the next ad." : "Your ad here."}</strong>
-        <span>
-          {live.bidding
-            ? `${live.bidding.offered} ${live.bidding.offered === 1 ? "company is" : "companies are"} bidding for the next 30 seconds.`
-            : "A new campaign is on its way to this display."}
-        </span>
-      </div>
+      <IdlePreview bidders={live.bidding?.offered} />
     );
   const youtubeVideoId = playable
     ? current.youtubeVideoId
@@ -278,6 +269,16 @@ function LivePreview({ billboardId }: { billboardId: Id<"billboards"> }) {
           ? "Open the display to see playback."
           : "Ready for the next great local brand."}
       </span>
+    </div>
+  );
+}
+
+function IdlePreview({ bidders }: { bidders?: number }) {
+  return (
+    <div className="demo-preview-placeholder">
+      <Monitor size={40} weight="light" />
+      <strong>{bidders === undefined ? "No ad playing" : "Bidding in progress"}</strong>
+      {bidders !== undefined && <span>{bidders} {bidders === 1 ? "company" : "companies"} · 30-second slot</span>}
     </div>
   );
 }

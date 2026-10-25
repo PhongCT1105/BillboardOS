@@ -158,8 +158,7 @@ export function CreaoRehearsalPanel() {
             <span className="rounded-full border border-line px-2 py-0.5 text-[10px] font-medium tracking-wide text-muted">SIMULATED</span>
           </div>
           <p className="mt-1 max-w-[75ch] text-sm text-muted">
-            Runs Sales qualification → Revenue pricing → Sales offer preparation using the included fictional snapshot.
-            No buyer is contacted and no inventory or payment is changed.
+            Sample data only. No buyers contacted or payments made.
           </p>
         </div>
         <button

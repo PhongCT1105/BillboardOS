@@ -61,7 +61,7 @@ export function Pill(props: { tone?: "accent" | "danger" | "muted" | "ok"; child
     accent: "border-accent/60 text-accent",
     danger: "border-danger/60 text-danger",
     muted: "border-line text-muted",
-    ok: "border-emerald-400/50 text-emerald-300",
+    ok: "border-ok/40 text-ok",
   }[props.tone ?? "muted"];
   return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${tone}`}>{props.children}</span>;
 }

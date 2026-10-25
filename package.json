@@ -31,6 +31,7 @@
     "@convex-dev/static-hosting": "^0.2.1",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
     "@mediapipe/tasks-vision": "^1.1.1",
     "@phosphor-icons/react": "^2.1.10",
     "@x402/core": "^2.28.0",

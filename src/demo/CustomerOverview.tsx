@@ -13,6 +13,7 @@ export function CustomerOverview() {
   return (
     <div className="demo-overview">
       <Metrics
+        compact
         items={[
           {
             label: "Active campaigns",
@@ -42,8 +43,7 @@ export function CustomerOverview() {
       <section aria-labelledby="campaigns-heading">
         <div className="demo-section-heading">
           <div>
-            <h2 id="campaigns-heading">Your campaigns</h2>
-            <p>What you’re putting out into the world.</p>
+            <h2 id="campaigns-heading">Campaigns</h2>
           </div>
           <a href="#/customer/campaigns" className="demo-text-link">
             Manage campaigns <ArrowUpRight size={16} />
@@ -78,8 +78,7 @@ export function CustomerOverview() {
         ) : (
           <div className="demo-empty">
             <Megaphone size={28} />
-            <h3>Every campaign starts with an idea.</h3>
-            <p>Add your first campaign, then find its place.</p>
+            <h3>No campaigns yet</h3>
             <a
               href="#/customer/campaigns"
               className="demo-button demo-button-small"

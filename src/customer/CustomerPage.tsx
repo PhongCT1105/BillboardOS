@@ -28,11 +28,9 @@ export function CustomerPage({
     <main className="demo-dashboard demo-container">
       <div className="demo-dashboard-heading">
         <div>
-          <p className="demo-eyebrow">{companyName}</p>
-          <h1>Your brand, out in the world.</h1>
-          <p>Your displays, campaigns, and results. All in one place.</p>
+          <h1 title={companyName}>Dashboard</h1>
         </div>
-        <PrimaryLink href="#/customer/agent">Set up your campaign</PrimaryLink>
+        <PrimaryLink href="#/customer/agent">Create campaign</PrimaryLink>
       </div>
       <nav aria-label="Dashboard sections" className="demo-tabs">
         {CUSTOMER_TABS.filter((t) =>

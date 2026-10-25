@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Plus, X } from "@phosphor-icons/react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -9,6 +10,7 @@ import { ActivityFeed } from "./ActivityFeed";
 import { PairScreenForm } from "../screens/PairScreenForm";
 import { HostOverview } from "../demo/HostOverview";
 import { CreaoRehearsalPanel } from "./CreaoRehearsalPanel";
+import { useHashParams, useHashRoute } from "../lib/hooks";
 
 export function ConsolePage() {
   const billboards = useQuery(api.billboards.mine, {});
@@ -16,6 +18,21 @@ export function ConsolePage() {
   const [showTools, setShowTools] = useState(false);
   const [adding, setAdding] = useState(false);
   const billboardId = picked ?? billboards?.[0]?._id ?? null;
+  const params = useHashParams();
+  const route = useHashRoute();
+  const addRequested = params.get("add") === "1";
+  const toolsRequested = params.get("tools") === "1";
+  useEffect(() => {
+    if (addRequested) setAdding(true);
+    if (toolsRequested) setShowTools(true);
+  }, [addRequested, toolsRequested]);
+  function setAddPanel(open: boolean) {
+    setAdding(open);
+    if (!open && addRequested) {
+      params.delete("add");
+      window.location.hash = `${route}${params.size ? `?${params.toString()}` : ""}`;
+    }
+  }
 
   if (billboards === undefined) return <PageSkeleton />;
   if (billboards.length === 0) {
@@ -24,51 +41,38 @@ export function ConsolePage() {
         <div>
           <h1 className="text-xl font-semibold">No screens yet</h1>
           <p className="mt-2 max-w-[60ch] text-muted">
-            Pair your first device. Once it's online, company agents get
-            offers for the spot on air automatically.
+            Pair a device to add your first display.
           </p>
         </div>
         <PairScreenForm />
-        <CreaoRehearsalPanel />
+        <details className="demo-tools">
+          <summary>Operational tools</summary>
+          <div><CreaoRehearsalPanel /></div>
+        </details>
       </main>
     );
   }
 
   return (
-    <main className="demo-dashboard demo-container">
-      <div className="demo-dashboard-heading">
-        <div>
-          <p className="demo-eyebrow">Your screens, at a glance.</p>
-          <h1>A little space. A lot of possibility.</h1>
-          <p>Your displays, what’s playing, and the numbers that matter.</p>
-        </div>
-        <button
-          type="button"
-          className="demo-button"
-          aria-expanded={adding}
-          onClick={() => setAdding(!adding)}
-        >
-          {adding ? "Close" : "+ Add a display"}
-        </button>
-      </div>
+    <DashboardLayout adding={adding} onToggleAdd={() => setAddPanel(!adding)}>
       {adding && (
         <div className="mb-8">
-          <PairScreenForm onDone={() => setAdding(false)} />
+          <PairScreenForm onDone={() => setAddPanel(false)} />
         </div>
       )}
-      <HostOverview />
-      <div className="mt-10">
-        <CreaoRehearsalPanel />
-      </div>
+      <HostOverview focusDisplays={route === "/displays"} />
       <details
         className="demo-tools"
+        open={showTools}
         onToggle={(e) => setShowTools(e.currentTarget.open)}
       >
         <summary>
-          Operational tools · creatives, finance exceptions, activity
+          Operational tools
         </summary>
-        {showTools && (
-          <div>
+        <div>
+          <CreaoRehearsalPanel />
+          {showTools && (
+            <>
             {billboards.length > 1 && (
               <label className="flex flex-col gap-1 text-sm">
                 <span className="text-muted">Billboard</span>
@@ -88,9 +92,33 @@ export function ConsolePage() {
               </label>
             )}
             {billboardId && <ConsoleBody billboardId={billboardId} />}
-          </div>
-        )}
+            {billboardId && <a className="demo-text-link" href={`#/sensor/${billboardId}`}>Audience sensor</a>}
+            </>
+          )}
+        </div>
       </details>
+    </DashboardLayout>
+  );
+}
+
+export function DashboardLayout({ adding, onToggleAdd, children }: {
+  adding: boolean;
+  onToggleAdd: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <main className="demo-dashboard demo-container host-dashboard">
+      <div className="demo-dashboard-heading">
+        <div><h1>Overview</h1><p>Network status &amp; sales</p></div>
+        <div className="overview-actions">
+        <details className="reporting-period"><summary>Reporting window</summary><p>Ad slots: previous 24 hours and next 7 days. Revenue: confirmed bookings.</p></details>
+        <button type="button" className="demo-button demo-button-primary" aria-expanded={adding} onClick={onToggleAdd}>
+          {adding ? <X size={18} /> : <Plus size={18} />}
+          {adding ? "Close" : "Add Display"}
+        </button>
+        </div>
+      </div>
+      {children}
     </main>
   );
 }
@@ -121,8 +149,8 @@ function PageSkeleton() {
   return (
     <main className="mx-auto max-w-[1400px] px-4 pt-8 md:px-6">
       <div className="h-7 w-56 animate-pulse rounded bg-panel" />
-      <div className="mt-8 grid grid-cols-2 gap-6 md:grid-cols-5">
-        {Array.from({ length: 5 }, (_, i) => (
+      <div className="mt-8 grid grid-cols-2 gap-6 md:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
           <div key={i} className="h-16 animate-pulse rounded bg-panel" />
         ))}
       </div>
