@@ -119,8 +119,11 @@ export const demo = internalMutation({
     }
 
     // Full sponsor network + knowledge for top-10 vibe invites on this screen.
-    const network = await ctx.runMutation(internal.sponsors.seed, {});
-    const knowledge = await ctx.runMutation(internal.companyKnowledge.seedSponsors, {});
+    const network: { created: string[]; existing: string[] } = await ctx.runMutation(internal.sponsors.seed, {});
+    const knowledge: { profiles: number; passages: number; changed: number } = await ctx.runMutation(
+      internal.companyKnowledge.seedSponsors,
+      {},
+    );
     if (network.created.length > 0 || knowledge.changed > 0) created = true;
 
     if (created) {

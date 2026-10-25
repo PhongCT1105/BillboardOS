@@ -11,6 +11,7 @@
 import type * as a2a from "../a2a.js";
 import type * as accounts from "../accounts.js";
 import type * as advertisers from "../advertisers.js";
+import type * as agencyLeads from "../agencyLeads.js";
 import type * as agentApi from "../agentApi.js";
 import type * as agentKeys from "../agentKeys.js";
 import type * as approvals from "../approvals.js";
@@ -64,6 +65,7 @@ import type * as lib_demoCrypto from "../lib/demoCrypto.js";
 import type * as lib_finance from "../lib/finance.js";
 import type * as lib_inventory from "../lib/inventory.js";
 import type * as lib_inviteRoster from "../lib/inviteRoster.js";
+import type * as lib_leadOutreach from "../lib/leadOutreach.js";
 import type * as lib_match from "../lib/match.js";
 import type * as lib_paymentLock from "../lib/paymentLock.js";
 import type * as lib_priceModel from "../lib/priceModel.js";
@@ -114,6 +116,7 @@ declare const fullApi: ApiFromModules<{
   a2a: typeof a2a;
   accounts: typeof accounts;
   advertisers: typeof advertisers;
+  agencyLeads: typeof agencyLeads;
   agentApi: typeof agentApi;
   agentKeys: typeof agentKeys;
   approvals: typeof approvals;
@@ -167,6 +170,7 @@ declare const fullApi: ApiFromModules<{
   "lib/finance": typeof lib_finance;
   "lib/inventory": typeof lib_inventory;
   "lib/inviteRoster": typeof lib_inviteRoster;
+  "lib/leadOutreach": typeof lib_leadOutreach;
   "lib/match": typeof lib_match;
   "lib/paymentLock": typeof lib_paymentLock;
   "lib/priceModel": typeof lib_priceModel;

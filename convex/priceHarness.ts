@@ -7,14 +7,16 @@ import { v } from "convex/values";
 import { internalAction, internalMutation, internalQuery, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { creaoPool, creaoRateLimiter } from "./creaoLimits";
+import { creaoPool, creaoRateLimiter, creaoRetryAfterMs } from "./creaoLimits";
 import { recordAudit } from "./lib/audit";
 import { PRICE_FACTOR_MAX, PRICE_FACTOR_MIN } from "./lib/research";
 
 const STALE_MS = 6 * 60 * 60_000;
 /** Recently invited companies get a fresher priceFactor than idle ones. */
 const ACTIVE_REFRESH_MS = 2 * 60 * 60_000;
-const MAX_REFRESH_PER_TICK = 8;
+const MAX_REFRESH_PER_TICK = 4;
+/** Busy CREAO: try again later this many times, then keep the current research. */
+const MAX_BUSY_RETRIES = 2;
 const MAX_SCAN = 80;
 const MAX_RECENT_BIDS = 40;
 const MAX_OUTCOME_SCAN = 60;
@@ -99,7 +101,7 @@ export const refineInputs = internalQuery({
     }
     return {
       companyName: advertiser.displayName,
-      hasResearch: Boolean(research),
+      hasResearch: Boolean(research) && research?.method !== "rules",
       current: research
         ? {
             summary: research.summary,
@@ -119,7 +121,7 @@ export const refineInputs = internalQuery({
  * otherwise bootstrap / refresh via company research.
  */
 export const refineOne = internalAction({
-  args: { advertiserId: v.id("advertisers") },
+  args: { advertiserId: v.id("advertisers"), attempt: v.optional(v.number()) },
   returns: v.null(),
   handler: async (ctx, args) => {
     const input = await ctx.runQuery(internal.priceHarness.refineInputs, args);
@@ -176,7 +178,17 @@ export const refineOne = internalAction({
       });
     } catch (error) {
       console.warn(`Price refine via CREAO failed for ${args.advertiserId}:`, error instanceof Error ? error.message : error);
-      await ctx.runAction(internal.researchNode.researchCompany, { advertiserId: args.advertiserId });
+      // Busy: wait our turn. Anything else: keep the current research; the next tick tries again.
+      const retryAfter = creaoRetryAfterMs(error);
+      const attempt = args.attempt ?? 0;
+      if (retryAfter !== null && attempt < MAX_BUSY_RETRIES) {
+        await creaoPool.enqueueAction(
+          ctx,
+          internal.priceHarness.refineOne,
+          { advertiserId: args.advertiserId, attempt: attempt + 1 },
+          { runAfter: retryAfter * (attempt + 1) },
+        );
+      }
     }
     return null;
   },

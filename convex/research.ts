@@ -18,6 +18,8 @@ import { cleanTags, clampFactor } from "./lib/research";
 
 const AUDIENCE_TTL_MS = 60 * 60_000;
 const DEBOUNCE_MS = 30_000;
+/** Gap between company research runs started by rerunAll. */
+const RERUN_SPACING_MS = 45_000;
 const MAX_CAMPAIGNS = 10;
 const MAX_SCREENS = 200;
 
@@ -97,6 +99,8 @@ export const saveResearch = internalMutation({
     };
     const row = await researchOf(ctx, args.advertiserId);
     if (row && startedAt !== undefined && row.researchedAt > startedAt) return null;
+    // A failed or busy agent run must not erase real research with the rules placeholder.
+    if (row && row.method !== "rules" && args.method === "rules") return null;
     if (row) await ctx.db.patch(row._id, fields);
     else await ctx.db.insert("companyResearch", fields);
     return null;
@@ -190,7 +194,9 @@ export const rerunAll = internalMutation({
   handler: async (ctx) => {
     const companies = new Set<Id<"advertisers">>();
     for (const c of await ctx.db.query("campaigns").take(500)) if (c.status === "active") companies.add(c.advertiserId);
-    for (const advertiserId of companies) await ctx.scheduler.runAfter(0, internal.researchNode.researchCompany, { advertiserId });
+    // Spread the runs out so CREAO doesn't answer HTTP 429 to a burst.
+    let i = 0;
+    for (const advertiserId of companies) await ctx.scheduler.runAfter(i++ * RERUN_SPACING_MS, internal.researchNode.researchCompany, { advertiserId });
     let screens = 0;
     for (const b of await ctx.db.query("billboards").take(MAX_SCREENS)) {
       if (b.retiredAt !== undefined || !b.deviceId) continue;

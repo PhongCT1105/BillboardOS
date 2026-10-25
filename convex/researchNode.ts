@@ -13,6 +13,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
 import { env, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { creaoRetryAfterMs } from "./creaoLimits";
 import { PRICE_FACTOR_MAX, PRICE_FACTOR_MIN, SEGMENT_KEYS, cleanTags, lastJsonObject, rulesAudience, rulesCompany } from "./lib/research";
 
 const MODEL = "claude-opus-5-5";
@@ -47,11 +48,19 @@ audienceTags: who buys from the company, 2-4 of these segments only, weights sum
 priceFactor: how much reaching its buyers on a screen is worth to this company compared with an average advertiser, from ${PRICE_FACTOR_MIN} (small, price-sensitive) to ${PRICE_FACTOR_MAX} (large brand with a big ad budget); 1.0 is average.`;
 
 /** Research one company (once, and again when its ad changes). */
+/** Busy CREAO: research again later this many times before settling for the rules placeholder. */
+const MAX_BUSY_RETRIES = 2;
+
 export const researchCompany = internalAction({
-  args: { advertiserId: v.id("advertisers") },
+  args: { advertiserId: v.id("advertisers"), attempt: v.optional(v.number()) },
   returns: v.null(),
   handler: async (ctx, args): Promise<null> => {
-    const input = await ctx.runQuery(internal.research.companyInputs, args);
+    const input: {
+      name: string;
+      briefs: string[];
+      videos: { title: string | null; author: string | null; description: string | null }[];
+      targetAudience: Record<string, number> | null;
+    } | null = await ctx.runQuery(internal.research.companyInputs, args);
     if (!input) return null;
     const fallback = rulesCompany(input);
     if (env.CREAO_COMPANY_RESEARCH_AGENT_ID || env.CREAO_COMPANY_RESEARCH_API_KEY) try {
@@ -84,8 +93,17 @@ export const researchCompany = internalAction({
       }
     } catch (error) {
       console.warn(`Company research via CREAO failed for ${args.advertiserId}:`, errText(error));
+      // Only a company with no research gets the placeholder (saveResearch keeps real research).
       await ctx.runMutation(internal.research.saveResearch, { advertiserId: args.advertiserId, ...fallback,
         reasoning: `${fallback.reasoning} (CREAO unavailable)`, sources: [], method: "rules" });
+      const retryAfter = creaoRetryAfterMs(error);
+      const attempt = args.attempt ?? 0;
+      if (retryAfter !== null && attempt < MAX_BUSY_RETRIES) {
+        await ctx.scheduler.runAfter(retryAfter * (attempt + 1), internal.researchNode.researchCompany, {
+          advertiserId: args.advertiserId,
+          attempt: attempt + 1,
+        });
+      }
       return null;
     }
     const anthropic = client();
