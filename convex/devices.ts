@@ -14,7 +14,8 @@ import { requestAudienceRead } from "./research";
  *   2. The host types that code into "Add screen" with a name, place and
  *      floor: the device becomes that screen (claim). A device that is
  *      already a screen can't be claimed again.
- *   3. The device then plays the screen and sends a heartbeat every 20 s.
+ *   3. The device then plays the screen and sends a heartbeat every 10 s
+ *      (with its camera on, the people in view now: the price's "b x people").
  *      Online means a heartbeat in the last 90 s (markOffline, every minute).
  */
 
@@ -92,13 +93,15 @@ export const status = query({
   },
 });
 
-/** The device is running: keep its screen online. */
+/** The device is running: keep its screen online. With its camera on, it also reports how many people are in view now. */
 export const heartbeat = mutation({
-  args: { deviceId: v.id("screenDevices"), deviceKey: v.string() },
+  args: { deviceId: v.id("screenDevices"), deviceKey: v.string(), peopleInView: v.optional(v.number()) },
   returns: v.null(),
   handler: async (ctx, args) => {
     const device = await deviceFor(ctx, args.deviceId, args.deviceKey);
-    await ctx.db.patch(device._id, { lastSeenAt: Date.now() });
+    const now = Date.now();
+    const people = args.peopleInView !== undefined && Number.isInteger(args.peopleInView) && args.peopleInView >= 0 && args.peopleInView <= 1000 ? args.peopleInView : undefined;
+    await ctx.db.patch(device._id, { lastSeenAt: now, ...(people !== undefined ? { peopleNow: people, peopleAt: now } : {}) });
     const screen = device.billboardId ? await ctx.db.get(device.billboardId) : null;
     if (screen && screen.deviceStatus !== "online" && screen.retiredAt === undefined) {
       await ctx.db.patch(screen._id, { deviceStatus: "online" });

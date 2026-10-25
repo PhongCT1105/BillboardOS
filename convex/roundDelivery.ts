@@ -5,9 +5,9 @@ import { keyStatus } from "./lib/agentKeys";
 import { SIGNATURE_HEADER, TIMESTAMP_HEADER, signWebhook } from "./lib/webhook";
 
 /**
- * Signed webhooks for rounds: `round_offer` (the host's offer),
- * `round_counter` (the host's one counter to this company), `round_won`
- * (deal: pay this hold over x402), `round_lost` (another company took it). Same signing as every
+ * Signed webhooks for rounds: `round_offer` (the host's offer for the next
+ * 30-second window), `round_counter` (the host's one counter to this company),
+ * `round_won` (highest agreed price: pay this hold over x402), `round_lost`. Same signing as every
  * other BillboardOS webhook: HMAC-SHA256 over "<timestamp>.<raw body>" with
  * the agent key's webhook secret. Rounds close in seconds: 5 s timeout, one
  * quick retry.
@@ -33,6 +33,11 @@ export const loadForDelivery = internalQuery({
     const key = await ctx.db.get(bid.agentKeyId);
     if (!key?.webhookUrl || keyStatus(key, Date.now()) !== "active") return { ok: false as const, reason: "agent key inactive or without webhook" };
     const billboard = await ctx.db.get(round.billboardId);
+    const recent = await ctx.db
+      .query("priceWindows")
+      .withIndex("by_billboard_and_at", (q) => q.eq("billboardId", round.billboardId).lt("at", round.spotStartAt))
+      .order("desc")
+      .take(5);
     const base = siteUrl();
     const common = { roundId: round._id, advertiserId: bid.advertiserId, campaignId: bid.campaignId };
     let payload: Record<string, unknown>;
@@ -47,15 +52,19 @@ export const loadForDelivery = internalQuery({
         /** The host's price to you now: accept it, or offer less (at or above floorMinor). */
         priceMinor: bid.offerMinor ?? round.askingMinor,
         yourLastOfferMinor: bid.amountMinor,
-        /** The host already countered once: your next offer at or above the floor is a deal. */
+        /** The host already countered once: this is your final answer (any amount at or above the floor is agreed). */
         finalCounter: bid.countered === true,
-        signals: round.signals,
-        crowd: round.crowd,
+        /** How your price was built: a x predicted + b x people + c x your brand value, clamped to [floor, cap]. */
+        priceTerms: bid.priceTerms ?? null,
+        audience: { summary: billboard?.audienceSummary ?? null, tags: billboard?.audienceTags ?? null, peopleInView: round.crowd, yourBuyersShare: bid.match },
+        recentWinningPricesMinor: recent.filter((w) => w.winnerMinor !== null).map((w) => w.winnerMinor),
+        /** The 30-second window you're buying, and when bidding for it ends (highest agreed price wins). */
+        window: { startsAt: round.spotStartAt, endsAt: round.spotEndAt },
         closesAt: round.closesAt,
         standingInstructions: key.standing ?? null,
         links: { base, bid: `/api/agent/rounds/${round._id}/bid` },
         bidFormat: {
-          amountMinor: "priceMinor or more accepts; less (at or above floorMinor) counters; null passes",
+          amountMinor: "priceMinor or more agrees at priceMinor; less (at or above floorMinor) counters; null passes. The highest agreed price wins when bidding closes.",
           reasoning: "one sentence (optional)",
         },
       };

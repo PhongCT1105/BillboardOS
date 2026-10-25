@@ -4,7 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { authenticateAgent, hashKey } from "./lib/agentKeys";
-import { ROUND_CLOSE_MS } from "./lib/rounds";
+import { WINDOW_MS } from "./lib/rounds";
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 import { requireCustomer, resolveWorkspace } from "./lib/tenancy";
@@ -73,8 +73,8 @@ export const agentCard = internalQuery({
       name: ws.name,
       city: ws.city,
       payoutAddress: ws.payoutAddress ?? null,
-      // Rounds: the host counters once; an offer is open until the round closes.
-      negotiation: { maxRounds: 2, offerValiditySeconds: ROUND_CLOSE_MS / 1000 },
+      // Rounds: two turns per company (the host counters once); bidding for a 30 s window lasts 30 s.
+      negotiation: { maxRounds: 2, offerValiditySeconds: WINDOW_MS / 1000 },
       screens: screens.map((b) => ({
         billboardId: b._id,
         name: b.name,

@@ -481,6 +481,9 @@ export const forAct = internalQuery({
       balanceMinor: v.union(v.number(), v.null()),
       /** Given a hold this company's agent took: can it still be paid? */
       holdActive: v.union(v.boolean(), v.null()),
+      /** What the research agent knows about this company (the LLM agent reasons with it). */
+      research: v.union(v.null(), v.object({ summary: v.string(), category: v.string(), priceFactor: v.number() })),
+      autoTopUp: v.boolean(),
     }),
   ),
   handler: async (ctx, args) => {
@@ -503,6 +506,8 @@ export const forAct = internalQuery({
       spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, agent.advertiserId, args.now),
       balanceMinor: agent.balanceMinor ?? null,
       holdActive,
+      research: await researchOf(ctx, agent.advertiserId).then((r) => (r ? { summary: r.summary, category: r.category, priceFactor: r.priceFactor } : null)),
+      autoTopUp: agent.autoTopUp === true,
     };
   },
 });

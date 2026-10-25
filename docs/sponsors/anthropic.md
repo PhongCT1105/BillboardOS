@@ -18,5 +18,5 @@
 ## How BillboardOS fits (proposed)
 
 - **Community (draft):** independent owners of 1–20 digital screens in San Francisco who can't afford a sales and billing team. Confirm with the team, and ideally talk to one real screen owner.
-- **Claude's job:** brief parsing, negotiation turns, and explaining AR exceptions. Pricing numbers and money movements stay deterministic.
+- **Claude's job:** company research and creative review. The frequent buyer negotiation turns use Bitdeer Model Studio when configured. Pricing numbers and money movements stay deterministic.
 - **Where it could go wrong:** an agent conceding below the floor, misreading a brief, or mis-explaining a payment. Each is blocked by a policy gate or routed to the operator.

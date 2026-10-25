@@ -1,4 +1,4 @@
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
@@ -307,128 +307,94 @@ export const readyCreatives = query({
 });
 
 /**
- * What the display shows, from the latest round on this screen: the sale in
- * progress, the paid ad playing, or "your ad here". The query never
- * reads the clock: it returns `spotEndAt` and the client decides when a paid
- * spot has expired, so the subscription never changes.
+ * What the display shows. Each 30-second window plays the round that won it
+ * (only once it is paid with a settlement transaction); otherwise our house
+ * ad. Meanwhile the next window's round is bidding. The query never reads
+ * the clock: it returns the recent windows with their times and the client
+ * picks the one on air now, so the subscription never churns.
  */
-type NowPlaying = {
-  company: string;
-  wonAtMinor: number;
-  txShort: string | null;
-  txUrl: string | null;
-  creative?: { provider: "file" | "youtube"; youtubeVideoId: string | null; title: string | null };
-};
+const creativeView = v.object({
+  provider: v.union(v.literal("file"), v.literal("youtube")),
+  youtubeVideoId: v.union(v.string(), v.null()),
+  title: v.union(v.string(), v.null()),
+});
+const windowView = v.object({
+  roundId: v.id("rounds"),
+  campaignId: v.union(v.id("campaigns"), v.null()),
+  spotStartAt: v.number(),
+  spotEndAt: v.number(),
+  status: v.union(v.literal("bidding"), v.literal("awarded"), v.literal("paid"), v.literal("unsold")),
+  company: v.union(v.string(), v.null()),
+  priceMinor: v.union(v.number(), v.null()),
+  txShort: v.union(v.string(), v.null()),
+  txUrl: v.union(v.string(), v.null()),
+  creative: v.union(creativeView, v.null()),
+});
 
-/** The screen during a bidding round: bidding -> the bids; awarded -> settling; paid -> playing; unsold -> your ad here. */
-async function roundScreen(ctx: QueryCtx, billboard: Doc<"billboards">, round: Doc<"rounds">) {
-  const base = {
-    screenName: billboard.name,
-    minutesLeft: Math.max(1, Math.round((round.spotEndAt - round.spotStartAt) / 60_000)),
-    peopleInView: round.crowd,
-    eventName: round.eventName,
-    openingMinor: round.askingMinor as number | null,
-    minimumMinor: round.floorMinor as number | null,
-    why: round.signals.map((s) => s.reason).join(" · ") as string | null,
-    closesAt: null as number | null,
-    spotEndAt: round.spotEndAt as number | null,
-    nowPlaying: null as NowPlaying | null,
+async function windowOf(ctx: QueryCtx, round: Doc<"rounds">): Promise<Infer<typeof windowView>> {
+  const winner = round.winnerBidId ? await ctx.db.get(round.winnerBidId) : null;
+  const campaign = winner ? await ctx.db.get(winner.campaignId) : null;
+  let creative: Infer<typeof creativeView> | null = null;
+  if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+    const yt = await youtubeOf(ctx, campaign._id);
+    if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
+  } else if (campaign?.creativeStorageId) {
+    creative = { provider: "file", youtubeVideoId: null, title: null };
+  }
+  // Only a settlement transaction hash counts as proof of payment.
+  const tx = round.status === "paid" ? (round.paymentTx ?? null) : null;
+  return {
+    roundId: round._id,
+    campaignId: campaign?._id ?? null,
+    spotStartAt: round.spotStartAt,
+    spotEndAt: round.spotEndAt,
+    status: round.status,
+    company: winner ? ((await ctx.db.get(winner.advertiserId))?.displayName ?? "A company") : null,
+    priceMinor: round.priceMinor ?? null,
+    txShort: tx ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : null,
+    txUrl: tx && round.paymentNetwork ? (explorerTxUrl(round.paymentNetwork, tx) ?? null) : null,
+    creative,
   };
-  const bids = await ctx.db
-    .query("roundBids")
-    .withIndex("by_round", (q) => q.eq("roundId", round._id))
-    .take(20);
-  const name = async (id: Id<"advertisers">) => (await ctx.db.get(id))?.displayName ?? "A company";
-  if (round.status === "bidding") {
-    // Private: the public screen shows how many companies are negotiating, never who offered what.
-    const sealedBids = bids.filter((b) => b.status === "invited" && b.amountMinor !== null).length;
-    return { mode: "auction" as const, ...base, closesAt: round.closesAt, sealedBids };
-  }
-  if (round.status === "awarded") return { mode: "settling" as const, ...base };
-  if (round.status === "paid") {
-    const winner = bids.find((b) => b._id === round.winnerBidId);
-    const campaign = winner ? await ctx.db.get(winner.campaignId) : null;
-    let creative: NowPlaying["creative"];
-    if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
-      const yt = await youtubeOf(ctx, campaign._id);
-      if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
-    } else if (campaign?.creativeStorageId) {
-      creative = { provider: "file", youtubeVideoId: null, title: null };
-    }
-    // Only a settlement transaction hash counts as proof of payment.
-    const tx = round.paymentTx ?? null;
-    const nowPlaying: NowPlaying = {
-      company: winner ? await name(winner.advertiserId) : "A company",
-      wonAtMinor: round.priceMinor ?? round.askingMinor,
-      txShort: tx ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : null,
-      txUrl: tx && round.paymentNetwork ? (explorerTxUrl(round.paymentNetwork, tx) ?? null) : null,
-      ...(creative ? { creative } : {}),
-    };
-    return { mode: "playing" as const, ...base, nowPlaying };
-  }
-  return { mode: "your_ad_here" as const, ...base };
 }
 
 export const screenState = query({
   args: { billboardId: v.id("billboards") },
   returns: v.object({
-    mode: v.union(
-      v.literal("auction"),
-      v.literal("settling"),
-      v.literal("playing"),
-      v.literal("your_ad_here"),
-    ),
     screenName: v.string(),
-    minutesLeft: v.number(),
-    peopleInView: v.union(v.number(), v.null()),
-    eventName: v.union(v.string(), v.null()),
-    openingMinor: v.union(v.number(), v.null()),
-    minimumMinor: v.union(v.number(), v.null()),
-    why: v.union(v.string(), v.null()),
-    closesAt: v.union(v.number(), v.null()),
-    /** Companies negotiating with an offer in (who offered what stays private). */
-    sealedBids: v.optional(v.number()),
-    /** End of the latest moment's spot; the client expires "playing" with its own clock. */
-    spotEndAt: v.union(v.number(), v.null()),
-    nowPlaying: v.union(
+    /** The round selling the next window (who offered what stays private: counts only). */
+    bidding: v.union(
       v.null(),
-      v.object({
-        company: v.string(),
-        wonAtMinor: v.number(),
-        txShort: v.union(v.string(), v.null()),
-        txUrl: v.union(v.string(), v.null()),
-        /** The winner's creative: a YouTube video plays through the official embed. */
-        creative: v.optional(
-          v.object({
-            provider: v.union(v.literal("file"), v.literal("youtube")),
-            youtubeVideoId: v.union(v.string(), v.null()),
-            title: v.union(v.string(), v.null()),
-          }),
-        ),
-      }),
+      v.object({ closesAt: v.number(), windowStartAt: v.number(), offered: v.number(), answered: v.number(), agreed: v.number(), peopleInView: v.union(v.number(), v.null()) }),
     ),
+    /** The latest windows, newest first; the client plays the paid one whose time covers now. */
+    windows: v.array(windowView),
   }),
   handler: async (ctx, args) => {
     const billboard = await ctx.db.get(args.billboardId);
     if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
-    const empty = {
-      screenName: billboard.name,
-      minutesLeft: 0,
-      peopleInView: null,
-      eventName: null,
-      openingMinor: null,
-      minimumMinor: null,
-      why: null,
-      closesAt: null,
-      spotEndAt: null,
-      nowPlaying: null,
-    };
-    const round = await ctx.db
+    const rounds = await ctx.db
       .query("rounds")
       .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", billboard._id))
       .order("desc")
-      .first();
-    if (!round) return { mode: "your_ad_here" as const, ...empty };
-    return await roundScreen(ctx, billboard, round);
+      .take(3);
+    const open = rounds.find((r) => r.status === "bidding") ?? null;
+    let bidding = null;
+    if (open) {
+      const bids = await ctx.db
+        .query("roundBids")
+        .withIndex("by_round", (q) => q.eq("roundId", open._id))
+        .take(20);
+      bidding = {
+        closesAt: open.closesAt,
+        windowStartAt: open.spotStartAt,
+        offered: bids.length,
+        answered: bids.filter((b) => b.amountMinor !== null || b.status === "passed").length,
+        agreed: bids.filter((b) => b.status === "bid").length,
+        peopleInView: open.crowd,
+      };
+    }
+    const windows = [];
+    for (const r of rounds) if (r.status !== "bidding") windows.push(await windowOf(ctx, r));
+    return { screenName: billboard.name, bidding, windows };
   },
 });

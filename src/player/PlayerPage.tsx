@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { preconnect } from "react-dom";
-import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -9,9 +9,7 @@ import { useNow } from "../lib/hooks";
 import { useArrivalCounter } from "../sensor/useArrivalCounter";
 import { YouTubeCreative, loadYouTubeApi } from "./YouTubeCreative";
 
-const MINUTE = 60_000;
-const SEND_EVERY_MS = 10_000;
-const TICK_MS = 5_000;
+const TICK_MS = 500;
 
 /** The latest defined value: a re-subscribing query never blanks the screen. */
 function useLast<T>(value: T | undefined): T | undefined {
@@ -20,24 +18,29 @@ function useLast<T>(value: T | undefined): T | undefined {
   return last.current;
 }
 
-/** Fullscreen billboard. Plays the scheduled creative for the current slot, otherwise a house ad. */
-export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"billboards">; camera?: boolean }) {
+type Screen = FunctionReturnType<typeof api.player.screenState>;
+type Window = Screen["windows"][number];
+
+/**
+ * Fullscreen billboard. Back-to-back 30-second windows: each plays the ad
+ * that won it once it is paid; otherwise our house ad. A strip shows the
+ * next window's live sale. With the camera on, a small window runs the person
+ * detector and reports how many people are in view (it feeds the price).
+ */
+export function PlayerPage({
+  billboardId,
+  camera = false,
+  onPeople,
+}: {
+  billboardId: Id<"billboards">;
+  camera?: boolean;
+  onPeople?: (inView: number) => void;
+}) {
   const now = useNow(TICK_MS);
-  const atMinute = Math.floor(now / MINUTE) * MINUTE;
-  const screenNow = useQuery(api.player.screenState, { billboardId });
-  const stateNow = useQuery(api.player.nowPlaying, { billboardId, atMinute });
-  const screenLive = useLast(screenNow);
-  const state = useLast(stateNow);
-  // Creatives approved for this host: preloaded so a paid flash spot starts instantly (ADR 0006).
+  const screen = useLast(useQuery(api.player.screenState, { billboardId }));
+  // Creatives approved for this host: preloaded so a paid window starts instantly.
   const ready = useQuery(api.player.readyCreatives, { billboardId });
-  const recordPlayback = useMutation(api.player.recordPlayback);
-  const recorded = useRef(new Set<string>());
 
-  const current = state?.current ?? null;
-  // Keep showing the creative for the whole slot (the playback receipt flips it to "played").
-  const showCreative = (current?.state === "scheduled" || current?.state === "played") && current.creativeUrl;
-
-  // YouTube creatives ready here: warm the connection and the IFrame API so a paid spot starts fast.
   const hasYouTube = (ready ?? []).some((c) => c.youtubeVideoId);
   useEffect(() => {
     if (!hasYouTube) return;
@@ -57,79 +60,29 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
     };
   }, []);
 
-  function onCreativeShown() {
-    if (!current?.bookingId || recorded.current.has(current.slotId)) return;
-    recorded.current.add(current.slotId);
-    recordPlayback({ slotId: current.slotId, bookingId: current.bookingId, status: "played" }).catch(() => {
-      recorded.current.delete(current.slotId);
-    });
-  }
+  if (screen === undefined) return <div className="min-h-[100dvh] bg-ink" />;
 
-  // First load only: nothing to show yet.
-  if (state === undefined || screenLive === undefined) {
-    return <div className="min-h-[100dvh] bg-ink" />;
-  }
-
-  // A paid spot expires on this device's clock; the query never reads time.
-  const screen: Screen =
-    screenLive.mode === "playing" && screenLive.spotEndAt !== null && now >= screenLive.spotEndAt
-      ? ({ ...screenLive, mode: "your_ad_here", nowPlaying: null } as Screen)
-      : screenLive;
-  const liveMode = screen.mode === "auction" || screen.mode === "settling";
+  const onAir = (w: Window) => w.spotStartAt <= now && now < w.spotEndAt;
+  const playing = screen.windows.find((w) => w.status === "paid" && onAir(w)) ?? null;
+  const paying = playing ? null : (screen.windows.find((w) => w.status === "awarded" && now < w.spotEndAt) ?? null);
+  const fileUrl = playing?.creative?.provider === "file" ? ((ready ?? []).find((c) => c.campaignId === playing.campaignId)?.url ?? null) : null;
 
   return (
     <div className="relative grid min-h-[100dvh] place-items-center overflow-hidden bg-ink">
-      {liveMode ? (
-        <LiveScreen screen={screen} />
-      ) : showCreative ? (
-        current.youtubeVideoId ? (
-          <YouTubeCreative
-            key={current.slotId}
-            videoId={current.youtubeVideoId}
-            title={current.creativeTitle ?? current.advertiserName}
-            onFirstFrame={onCreativeShown}
-          />
-        ) : current.contentType?.startsWith("video/") ? (
-          <video
-            key={current.slotId}
-            src={current.creativeUrl}
-            className="fade-in absolute inset-0 h-full w-full object-cover"
-            autoPlay
-            muted
-            loop
-            playsInline
-            onPlaying={onCreativeShown}
-          />
-        ) : (
-          <img
-            key={current.slotId}
-            src={current.creativeUrl}
-            alt={current.advertiserName ? `Advertisement from ${current.advertiserName}` : "Advertisement"}
-            className="fade-in absolute inset-0 h-full w-full object-cover"
-            onLoad={onCreativeShown}
-          />
-        )
-      ) : screen.mode === "playing" && screen.nowPlaying?.creative?.youtubeVideoId ? (
-        // Paid YouTube spot before its slot shows up as scheduled: play it; the receipt comes with the slot.
-        <YouTubeCreative videoId={screen.nowPlaying.creative.youtubeVideoId} title={screen.nowPlaying.creative.title} />
-      ) : screen.mode === "playing" && screen.nowPlaying ? (
+      {playing?.creative?.youtubeVideoId ? (
+        <YouTubeCreative key={playing.roundId} videoId={playing.creative.youtubeVideoId} title={playing.creative.title} />
+      ) : playing && fileUrl ? (
+        <img key={playing.roundId} src={fileUrl} alt={`Advertisement from ${playing.company ?? "a company"}`} className="fade-in absolute inset-0 h-full w-full object-cover" />
+      ) : playing ? (
         <div className="fade-in absolute inset-0 grid place-items-center bg-gradient-to-br from-[#1e3a8a] to-[#7c3aed] px-10 text-center">
-          <p className="text-[clamp(2rem,6vw,6rem)] leading-[1.05] font-black tracking-tight text-white">{screen.nowPlaying.company}</p>
+          <p className="text-[clamp(2rem,6vw,6rem)] leading-[1.05] font-black tracking-tight text-white">{playing.company}</p>
         </div>
       ) : (
-        <div className="fade-in max-w-[80vw]">
-          <p className="text-[clamp(2.5rem,7vw,7rem)] leading-[1.05] font-semibold tracking-tight">
-            Your ad here, <span className="text-accent">in minutes.</span>
-          </p>
-          <p className="mt-6 text-[clamp(1.1rem,2vw,2rem)] text-muted">
-            {state.houseAd.message}
-          </p>
-        </div>
+        <HouseAd screenName={screen.screenName} paying={paying} />
       )}
       <div aria-hidden className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0">
         {(ready ?? []).map((c) =>
           c.youtubeVideoId ? (
-            // The video streams from YouTube; warm its thumbnail only.
             <img key={c.campaignId} src={c.url} alt="" loading="eager" />
           ) : c.contentType?.startsWith("video/") ? (
             <video key={c.campaignId} src={c.url} preload="auto" muted playsInline />
@@ -138,124 +91,104 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
           ),
         )}
       </div>
-      {screen.mode === "playing" && screen.nowPlaying && <ProofStrip playing={screen.nowPlaying} />}
-      {!(screen.mode === "playing" && screen.nowPlaying) && (
-        <div className="absolute bottom-4 left-5 text-xs text-faint">
-          {state.billboard.name}, {state.billboard.city}
-        </div>
-      )}
-      {camera && <CameraCounter billboardId={billboardId} />}
+      <NextSale screen={screen} now={now} playing={playing} />
+      {camera && <CameraWindow onPeople={onPeople} />}
     </div>
   );
 }
 
-type Screen = FunctionReturnType<typeof api.player.screenState>;
-
-function ProofStrip({ playing }: { playing: NonNullable<Screen["nowPlaying"]> }) {
-  // "Paid" is claimed only with a settlement transaction hash.
-  const paid = playing.txShort ? `paid on Base · ${playing.txShort}` : null;
+/** Our own ad: the fallback when nobody bought this window (or the winner is still paying). */
+function HouseAd({ screenName, paying }: { screenName: string; paying: Window | null }) {
   return (
-    <div className="absolute inset-x-0 bottom-0 flex justify-between gap-4 bg-black/60 px-5 py-2 text-[clamp(0.75rem,1.2vw,1.1rem)] text-fg">
-      <span>
-        Sponsored · {playing.company} · won at <span className="tabular font-mono">{money(playing.wonAtMinor)}</span>
-      </span>
-      {paid &&
-        (playing.txUrl ? (
-          <a href={playing.txUrl} target="_blank" rel="noreferrer" className="tabular font-mono">
-            {paid}
-          </a>
-        ) : (
-          <span className="tabular font-mono">{paid}</span>
-        ))}
-    </div>
-  );
-}
-
-/** A live sale on the spot on air: the screen never sits blank between ads. */
-function LiveScreen({ screen }: { screen: Screen }) {
-  const now = useNow(250);
-  // Each company's offer stays private: only how many are negotiating is public.
-  const negotiating = "sealedBids" in screen ? (screen.sealedBids ?? 0) : 0;
-  const left = screen.closesAt ? Math.max(0, Math.ceil((screen.closesAt - now) / 1000)) : 0;
-
-  if (screen.mode === "settling") {
-    return (
-      <div className="fade-in flex h-full min-h-[100dvh] w-full flex-col justify-between p-[clamp(1.25rem,3vw,3rem)]">
-        <span className="w-fit rounded-full bg-red-500 px-3 py-1 text-[clamp(0.75rem,1.2vw,1.2rem)] font-bold text-white">SOLD</span>
-        <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">
-          Deal made.
-          <br />
-          <span className="text-muted">Paying over x402 on Base…</span>
-        </p>
-        <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">{screen.screenName}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="fade-in flex h-full min-h-[100dvh] w-full flex-col justify-between p-[clamp(1.25rem,3vw,3rem)]">
-      <div className="flex items-center justify-between">
-        <span className="rounded-full bg-red-500 px-3 py-1 text-[clamp(0.75rem,1.2vw,1.2rem)] font-bold text-white">LIVE SALE</span>
-        <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">
-          next {screen.minutesLeft} min · {screen.screenName}
-        </span>
-      </div>
-      <div className="flex items-center gap-[4vw]">
-        <div className="flex-1">
-          <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">This spot is for sale</p>
-          <p className="mt-5 text-[clamp(1rem,1.8vw,1.8rem)] text-muted">
-            {negotiating > 0
-              ? `Negotiating with ${negotiating} ${negotiating === 1 ? "company" : "companies"}`
-              : "Company agents are deciding"}
-            {screen.peopleInView !== null && ` · ${screen.peopleInView} ${screen.peopleInView === 1 ? "person" : "people"} here now`}
-            {screen.eventName && ` · ${screen.eventName} next door`}
-          </p>
-        </div>
-        <div className="text-center">
-          <div className="tabular font-mono text-[clamp(3rem,9vw,9rem)] leading-none font-black">{left}s</div>
-          <div className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">left</div>
-        </div>
-      </div>
-      <p className="text-[clamp(0.9rem,1.5vw,1.5rem)] text-muted">
-        {screen.why ? `Price: ${screen.why}` : ""}
-        {screen.openingMinor !== null && (
-          <>
-            {screen.why ? " · " : ""}from <span className="tabular font-mono text-fg">{money(screen.openingMinor)}</span>
-          </>
-        )}
+    <div className="fade-in max-w-[80vw]">
+      <p className="text-[clamp(0.8rem,1.2vw,1.2rem)] tracking-[0.3em] text-muted uppercase">BillboardOS</p>
+      <p className="mt-4 text-[clamp(2.5rem,7vw,7rem)] leading-[1.05] font-semibold tracking-tight">
+        Your ad here, <span className="text-accent">in 30 seconds.</span>
+      </p>
+      <p className="mt-6 text-[clamp(1.1rem,2vw,2rem)] text-muted">
+        {paying ? `${paying.company} won this window at ${money(paying.priceMinor ?? 0)}; paying over x402…` : `Company agents are bidding for ${screenName} right now.`}
       </p>
     </div>
   );
 }
 
-/** `?camera=1`: this device also counts people, sending only totals, like the sensor page. */
-function CameraCounter({ billboardId }: { billboardId: Id<"billboards"> }) {
-  const video = useRef<HTMLVideoElement>(null);
-  const { isAuthenticated } = useConvexAuth();
-  const me = useQuery(api.accounts.me, isAuthenticated ? {} : "skip");
-  const isHost = isAuthenticated && me?.accountType === "host";
-  // The camera is requested only when counts can be sent (a signed-in host).
-  const { takeWindow } = useArrivalCounter(video, isHost);
-  const addArrivals = useMutation(api.audience.addArrivals);
-
-  useEffect(() => {
-    if (!isHost) return;
-    const id = setInterval(async () => {
-      const w = takeWindow();
-      if (w.arrivals === 0 && w.peakInView === 0) return;
-      try {
-        await addArrivals({ billboardId, ...w, source: "camera" });
-      } catch {
-        // Not a workspace member, or offline: the display keeps running.
-      }
-    }, SEND_EVERY_MS);
-    return () => clearInterval(id);
-  }, [isHost, billboardId, addArrivals, takeWindow]);
-
+/** The strip along the bottom: who is on now (with proof of payment) and the sale for the next 30 seconds. */
+function NextSale({ screen, now, playing }: { screen: Screen; now: number; playing: Window | null }) {
+  const b = screen.bidding;
+  const left = b ? Math.max(0, Math.ceil((b.closesAt - now) / 1000)) : null;
   return (
-    <>
-      <video ref={video} muted playsInline aria-hidden className="pointer-events-none absolute h-px w-px opacity-0" />
-      {!isHost && <div className="absolute top-3 right-4 text-xs text-faint">sign in to count</div>}
-    </>
+    <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-between gap-x-6 gap-y-1 bg-black/60 px-5 py-2 text-[clamp(0.75rem,1.2vw,1.1rem)] text-fg">
+      <span>
+        {playing ? (
+          <>
+            Sponsored · {playing.company} · <span className="tabular font-mono">{money(playing.priceMinor ?? 0)}</span>
+            {playing.txShort &&
+              (playing.txUrl ? (
+                <a href={playing.txUrl} target="_blank" rel="noreferrer" className="tabular ml-2 font-mono text-muted">
+                  paid on Base · {playing.txShort}
+                </a>
+              ) : (
+                <span className="tabular ml-2 font-mono text-muted">paid on Base · {playing.txShort}</span>
+              ))}
+          </>
+        ) : (
+          <span className="text-muted">{screen.screenName}</span>
+        )}
+      </span>
+      {b && (
+        <span className="flex items-center gap-3">
+          <span className="rounded-full bg-red-500 px-2 py-0.5 text-[0.8em] font-bold text-white">LIVE SALE</span>
+          <span>
+            next 30 s · {b.offered} {b.offered === 1 ? "company" : "companies"} · {b.agreed} agreed
+          </span>
+          <span className="tabular font-mono">{left}s</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The people counter: a small camera window in the corner running the person
+ * detector (EfficientDet-Lite0, a TensorFlow Lite CNN, in the browser). Frames
+ * never leave the device; only the count is reported.
+ */
+function CameraWindow({ onPeople }: { onPeople?: (inView: number) => void }) {
+  const video = useRef<HTMLVideoElement>(null);
+  const { state } = useArrivalCounter(video, true);
+  const inView = state.status === "running" ? state.inView : null;
+  useEffect(() => {
+    if (inView !== null) onPeople?.(inView);
+  }, [inView, onPeople]);
+  const w = video.current?.videoWidth || 1;
+  const h = video.current?.videoHeight || 1;
+  return (
+    <div className="absolute top-4 right-4 w-[clamp(140px,16vw,240px)] overflow-hidden rounded-lg border border-white/20 bg-black/70">
+      <div className="relative aspect-video">
+        <video ref={video} muted playsInline className="absolute inset-0 h-full w-full -scale-x-100 object-cover" />
+        {state.status === "running" &&
+          state.detections.map((d, i) =>
+            d.boundingBox ? (
+              <div
+                key={i}
+                className="absolute border-2 border-emerald-400"
+                style={{
+                  right: `${(d.boundingBox.originX / w) * 100}%`,
+                  top: `${(d.boundingBox.originY / h) * 100}%`,
+                  width: `${(d.boundingBox.width / w) * 100}%`,
+                  height: `${(d.boundingBox.height / h) * 100}%`,
+                }}
+              />
+            ) : null,
+          )}
+      </div>
+      <p className="px-2 py-1 text-[0.75rem] text-fg">
+        {state.status === "running"
+          ? `${state.inView} ${state.inView === 1 ? "person" : "people"} in view`
+          : state.status === "error"
+            ? state.message
+            : "Starting camera…"}
+      </p>
+    </div>
   );
 }

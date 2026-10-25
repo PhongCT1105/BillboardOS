@@ -85,6 +85,8 @@ The x402 payment endpoints, seller agents (`/a2a/hosts/<workspaceId>/...`) and t
 
 Convex reads its own environment, not `.env`: push server-side keys with `npx convex env set NAME value`.
 
+For buyer negotiation turns, set `BITDEER_API_KEY` on the Convex deployment to use Bitdeer Model Studio (`zai-org/GLM-5.3-Flash` by default). `BITDEER_MODEL` can select another Model Studio text model. A missing key, slow response, or invalid answer uses the built-in bidding rules. Claude remains available for company research and creative review through `ANTHROPIC_API_KEY`.
+
 Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 
 ## What's real and what's simulated
@@ -98,6 +100,7 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Live auction: announce on real camera counts, 2 s join window, 12 s bidding (two 3 s extensions), negotiation, award, queue and re-offers | **Real** (Convex); the participants are real companies' agents |
 | Live price: audience x plays x CPM x match, host minimum and host-set CPM | **Real**; the host sets CPM and minimum, and enters the event. Only the dev-only `seed:liveVenue` adds a **seeded** event |
 | Company agents: one per advertiser, run on the server with their own CDP wallet, rule-based tactics, webhooks signed and verified | **Real**; wallets hold **testnet** USDC |
+| Buyer negotiation model | **Bitdeer Model Studio code wired** for offer and counter decisions when `BITDEER_API_KEY` is configured; otherwise deterministic rules. A live Bitdeer run still needs to be verified. |
 | Wallet funding | **Real**: the host's top-ups transfer USDC from the operator wallet; an advertiser's own top-up claims from the CDP faucet (1 USDC per claim, 10 USDC per rolling 24 h per project); testnet money only |
 | Operator console, billboard player, playback receipts | **Real** |
 | x402 checkout (402 challenge, verify, settle, record) | **Real code on Base Sepolia testnet**; paid run needs a funded CDP wallet |
@@ -115,6 +118,7 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 
 - **Hyphenate** — auditable, bounded autonomous finance operations and recovery from booking/payment exceptions.
 - **Coinbase x402** — compatible machine payment for a protected ad-booking endpoint.
+- **Bitdeer Model Studio** — frequent, low-cost buyer decisions inside the live negotiation loop.
 - **CRS** — meaningful sandbox verification/risk review, only if available APIs fit.
 - **CREAO** — an autonomous, one-operator billboard company.
 - **Microsoft / Convex / Visa** — production-minded agents, reactive shared state and commerce experience, as applicable.

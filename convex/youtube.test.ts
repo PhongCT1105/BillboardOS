@@ -363,9 +363,9 @@ describe("player with a YouTube creative", () => {
       await ctx.db.patch(roundId, { winnerBidId: bidId });
     });
     const screen = await t.query(api.player.screenState, { billboardId: seed.billboardId });
-    expect(screen.mode).toBe("playing");
-    expect(screen.nowPlaying).toMatchObject({
-      wonAtMinor: 90,
+    expect(screen.windows[0]).toMatchObject({
+      status: "paid",
+      priceMinor: 90,
       txShort: "0xabab…abab",
       creative: { provider: "youtube", youtubeVideoId: ID, title: null },
     });

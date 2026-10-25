@@ -1,62 +1,65 @@
 /**
- * Rounds (the spot on air now): pure rules, integer cents, no Convex calls.
- * The host offers every company the same price (floor x signals); each
- * company deals with the host alone (accept, counter, pass); the first deal
- * takes the spot (rounds.ts), then pay -> play.
+ * Rounds: pure rules, integer cents, no Convex calls (rounds.ts runs them).
+ * Every round sells the next 30-second window on one screen while the
+ * current window plays. Each invited company gets its own price, has two
+ * turns (answer, then answer the host's one counter), and when the 30
+ * seconds are up the highest agreed price wins.
  *
- * Signals only move the price; the floor is the least the host takes. A
- * missing signal is listed with its reason and never blocks a sale.
+ *   price = a x predicted price + b x people in view + c x brand value
+ *
+ * clamped to [floor, cap], where cap = capMultiplier x the predicted price
+ * (never below the floor), so a busy crowd or a big brand can't run away.
  */
 
-export const ROUND_CLOSE_MS = 10_000;
-export const CAMERA_COOLDOWN_MS = 60_000;
-export const AUTO_SELL_GAP_MS = 120_000;
+/** One sale = one 30-second window on screen; its bidding runs during the window before. */
+export const WINDOW_MS = 30_000;
 export const MAX_INVITES = 20;
-export const DEFAULT_USUAL_IN_VIEW = 3;
-export const CROWD_MAX = 3;
-export const EVENT_FACTOR = 1.2;
+/** A company is offered the window when its buyers make up at least this share of the crowd. */
+export const MIN_MATCH = 0.2;
+/** A people count older than this isn't "in view now". */
+export const PEOPLE_FRESH_MS = 60_000;
+
+/** The host's knobs for one screen (cents per person, cents per brand point). */
+export type PriceWeights = { a: number; b: number; c: number; capMultiplier: number };
+export const DEFAULT_WEIGHTS: PriceWeights = { a: 1, b: 0.5, c: 3, capMultiplier: 2 };
+
+export function validateWeights(w: PriceWeights): string | null {
+  for (const [k, v, lo, hi] of [["a", w.a, 0, 5], ["b", w.b, 0, 100], ["c", w.c, 0, 1000], ["capMultiplier", w.capMultiplier, 1, 10]] as const) {
+    if (!Number.isFinite(v) || v < lo || v > hi) return `${k} must be between ${lo} and ${hi}`;
+  }
+  return null;
+}
+
+/** Brand value 0..1 from the research agent's price factor (x0.8 small and price-sensitive .. x1.5 big brand). */
+export function brandScore(priceFactor: number): number {
+  return Math.round(Math.min(1, Math.max(0, (priceFactor - 0.8) / 0.7)) * 100) / 100;
+}
+
+export type PriceTerms = { modelMinor: number; peopleMinor: number; brandMinor: number; capMinor: number; capped: "floor" | "cap" | null };
+
+/** One company's price for the window. */
+export function windowPrice(i: { predictedMinor: number; people: number | null; brand: number; floorMinor: number; w: PriceWeights }): { priceMinor: number; terms: PriceTerms } {
+  const modelMinor = i.w.a * i.predictedMinor;
+  const peopleMinor = i.w.b * (i.people ?? 0);
+  const brandMinor = i.w.c * i.brand;
+  const capMinor = Math.max(i.floorMinor, Math.round(i.w.capMultiplier * Math.max(i.predictedMinor, i.floorMinor)));
+  const raw = Math.round(modelMinor + peopleMinor + brandMinor);
+  const priceMinor = Math.min(capMinor, Math.max(i.floorMinor, raw));
+  const r = (x: number) => Math.round(x * 100) / 100;
+  return {
+    priceMinor,
+    terms: { modelMinor: r(modelMinor), peopleMinor: r(peopleMinor), brandMinor: r(brandMinor), capMinor, capped: raw < i.floorMinor ? "floor" : raw > capMinor ? "cap" : null },
+  };
+}
+
+export type Agreed = { id: string; amountMinor: number; agreedAt: number };
+
+/** When the window's bidding ends: the highest agreed price wins (ties: who agreed first). Null: nobody agreed. */
+export function bestAgreed(agreed: Agreed[]): Agreed | null {
+  return [...agreed].sort((x, y) => y.amountMinor - x.amountMinor || x.agreedAt - y.agreedAt)[0] ?? null;
+}
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
-const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
-
-export type PriceSignal = { key: "crowd" | "event" | "demand"; factor: number | null; reason: string };
-
-/** Each paid sale on this screen in the last 2 hours adds this much, up to DEMAND_MAX. */
-export const DEMAND_STEP = 0.1;
-export const DEMAND_MAX = 1.5;
-/** A company is offered the spot when its buyers make up at least this share of the crowd. */
-export const MIN_MATCH = 0.2;
-
-/** Every signal, in a fixed order; `factor: null` when its data is missing (said in `reason`). */
-export function priceSignals(i: { peakInView: number | null; usualInView: number | undefined; eventName: string | null; recentSales: number }): PriceSignal[] {
-  const usual = i.usualInView && i.usualInView > 0 ? i.usualInView : DEFAULT_USUAL_IN_VIEW;
-  const crowd: PriceSignal =
-    i.peakInView === null
-      ? { key: "crowd", factor: null, reason: "No camera reading: crowd not counted" }
-      : (() => {
-          const factor = Math.round(clamp(i.peakInView / usual, 1, CROWD_MAX) * 100) / 100;
-          return { key: "crowd", factor, reason: `${i.peakInView} in view, usually ${usual}: ×${factor.toFixed(2)}` };
-        })();
-  const event: PriceSignal = i.eventName
-    ? { key: "event", factor: EVENT_FACTOR, reason: `${i.eventName} on now: ×${EVENT_FACTOR.toFixed(2)}` }
-    : { key: "event", factor: null, reason: "No event" };
-  const demandFactor = Math.round(Math.min(DEMAND_MAX, 1 + DEMAND_STEP * i.recentSales) * 100) / 100;
-  const demand: PriceSignal =
-    i.recentSales > 0
-      ? { key: "demand", factor: demandFactor, reason: `${i.recentSales} sold here in the last 2 h: ×${demandFactor.toFixed(2)}` }
-      : { key: "demand", factor: null, reason: "No sales here in the last 2 h" };
-  return [crowd, event, demand];
-}
-
-/** One company's offer: the round's price × the company's research factor, never under the floor. */
-export function companyOffer(askingMinor: number, floorMinor: number, companyFactor: number): number {
-  return Math.max(floorMinor, Math.round(askingMinor * companyFactor));
-}
-
-/** Floor × every known factor. */
-export function askingPrice(floorMinor: number, signals: PriceSignal[]): number {
-  return Math.round(signals.reduce((p, s) => (s.factor === null ? p : p * s.factor), floorMinor));
-}
 
 /** What an agent sees when it answers: the host's price to it now, the floor, and its own limits. */
 export type OfferContext = {
@@ -98,4 +101,16 @@ export function hostReply(i: { amountMinor: number; priceMinor: number; countere
   const half = Math.round((i.amountMinor + i.priceMinor) / 2);
   if (i.countered || half >= i.priceMinor) return { kind: "deal", priceMinor: i.amountMinor };
   return { kind: "counter", priceMinor: half };
+}
+
+/**
+ * Keep an LLM agent's answer inside the rules and its own limits: never more
+ * than the host's price (that's agreeing) or the most it can pay; under the
+ * floor, or nothing it can pay, is a pass. Whole cents.
+ */
+export function clampAnswer(i: { amountMinor: number | null; priceMinor: number; floorMinor: number; capMinor: number; reasoning: string }): OfferAnswer {
+  if (i.amountMinor === null || !Number.isFinite(i.amountMinor)) return { amountMinor: null, reasoning: i.reasoning };
+  const amount = Math.min(Math.round(i.amountMinor), i.priceMinor, i.capMinor);
+  if (amount < i.floorMinor) return { amountMinor: null, reasoning: `${i.reasoning} (passing: ${usd(amount)} is under the ${usd(i.floorMinor)} floor)` };
+  return { amountMinor: amount, reasoning: i.reasoning };
 }

@@ -80,7 +80,7 @@ The exact API Trigger endpoint, request body and webhook payload are presumably 
 
 **Track: Best One-Person Company.** It matches the original idea ("let one operator manage prospecting, sales, bookings, and billing across a billboard network") and the rubric asks for exactly what we have: an org chart of role agents handing work to each other.
 
-Because runs take minutes, CREAO agents take the **asynchronous seats**, and the second-scale work stays in Convex (Claude for negotiation turns, deterministic code for pricing and holds):
+Because runs take minutes, CREAO agents take the **asynchronous seats**, and the second-scale work stays in Convex (Bitdeer Model Studio for buyer negotiation turns when configured, deterministic code for pricing and holds):
 
 ```mermaid
 flowchart TB

@@ -366,6 +366,8 @@ export const billboardFields = {
   /** The audience agent's one-line read of who is here (it also sets audienceTags). */
   audienceSummary: v.optional(v.string()),
   audienceReadAt: v.optional(v.number()),
+  /** The host's price knobs: price = a x predicted + b x people + c x brand, capped at capMultiplier x predicted. */
+  priceWeights: v.optional(v.object({ a: v.number(), b: v.number(), c: v.number(), capMultiplier: v.number() })),
   /** Taken out of service (old simulated screens): never sold, never listed. */
   retiredAt: v.optional(v.number()),
 };
@@ -1277,6 +1279,8 @@ export default defineSchema({
     lastActionAt: v.optional(v.number()),
     /** Last USDC faucet claim made by `ensureWallet` (at most one per 24 h per company). */
     faucetClaimedAt: v.optional(v.number()),
+    /** Simulated sponsors: refill the wallet from the operator wallet when it runs low (the money recycles). */
+    autoTopUp: v.optional(v.boolean()),
   }).index("by_advertiser", ["advertiserId"]),
 
   flashOffers: defineTable(flashOfferFields)
