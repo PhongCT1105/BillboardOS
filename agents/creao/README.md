@@ -1,5 +1,7 @@
 # BillboardOS on CREAO
 
+For the four new agents intended for the live pipeline, use [live/README.md](live/README.md). The Sales and Revenue agents below are the older simulated rehearsal.
+
 Target: **Best One-Person Company**. Two separately saved agents hand off structured work:
 
 `Sales qualification → Revenue strategy → Sales offer preparation → BillboardOS execution`

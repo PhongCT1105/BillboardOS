@@ -16,6 +16,15 @@ const app = defineApp({
     CREAO_SALES_API_KEY: v.optional(v.string()),
     CREAO_REVENUE_AGENT_ID: v.optional(v.string()),
     CREAO_REVENUE_API_KEY: v.optional(v.string()),
+    /** New live-pipeline agents. Each capi_ key is scoped to its saved agent. */
+    CREAO_COMPANY_RESEARCH_AGENT_ID: v.optional(v.string()),
+    CREAO_COMPANY_RESEARCH_API_KEY: v.optional(v.string()),
+    CREAO_SCREEN_AUDIENCE_AGENT_ID: v.optional(v.string()),
+    CREAO_SCREEN_AUDIENCE_API_KEY: v.optional(v.string()),
+    CREAO_CREATIVE_SAFETY_AGENT_ID: v.optional(v.string()),
+    CREAO_CREATIVE_SAFETY_API_KEY: v.optional(v.string()),
+    CREAO_OPPORTUNITY_STRATEGY_AGENT_ID: v.optional(v.string()),
+    CREAO_OPPORTUNITY_STRATEGY_API_KEY: v.optional(v.string()),
     /** Server-only Model Studio credentials for the fast buyer negotiation turns. */
     BITDEER_API_KEY: v.optional(v.string()),
     BITDEER_MODEL: v.optional(v.string()),

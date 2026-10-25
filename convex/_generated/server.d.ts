@@ -37,6 +37,14 @@ type Env = {
   readonly CREAO_REVENUE_API_KEY: string | undefined;
   readonly CREAO_SALES_AGENT_ID: string | undefined;
   readonly CREAO_SALES_API_KEY: string | undefined;
+  readonly CREAO_COMPANY_RESEARCH_AGENT_ID: string | undefined;
+  readonly CREAO_COMPANY_RESEARCH_API_KEY: string | undefined;
+  readonly CREAO_SCREEN_AUDIENCE_AGENT_ID: string | undefined;
+  readonly CREAO_SCREEN_AUDIENCE_API_KEY: string | undefined;
+  readonly CREAO_CREATIVE_SAFETY_AGENT_ID: string | undefined;
+  readonly CREAO_CREATIVE_SAFETY_API_KEY: string | undefined;
+  readonly CREAO_OPPORTUNITY_STRATEGY_AGENT_ID: string | undefined;
+  readonly CREAO_OPPORTUNITY_STRATEGY_API_KEY: string | undefined;
   readonly INTERNAL_API_SECRET: string | undefined;
 };
 

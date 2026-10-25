@@ -6,7 +6,8 @@ import { v } from "convex/values";
  * review agent (ADR 0007 section 4). Spread into `schema.ts` as one line.
  */
 
-export const knowledgeMethod = v.union(v.literal("claude"), v.literal("heuristic"));
+export const knowledgeMethod = v.union(v.literal("claude"), v.literal("heuristic"), v.literal("curated"));
+export const reviewMethod = v.union(v.literal("claude"), v.literal("creao"), v.literal("heuristic"));
 
 export const companyStage = v.union(
   v.literal("startup"),
@@ -25,6 +26,8 @@ export const knowledgeCardFields = {
   stage: companyStage,
   /** Who the company's ads are for (same vocabulary as campaign.targetAudience). */
   audienceTags: v.record(v.string(), v.number()),
+  /** Stage and audience weights can be project inferences rather than source facts. */
+  derivedFieldsNote: v.optional(v.string()),
   /** Public URLs (company research, YouTube videos). */
   sources: v.array(v.string()),
   /** Public YouTube titles of the company's linked videos. */
@@ -80,7 +83,7 @@ export const creativeReviewFields = {
   reason: v.string(),
   /** The agent's content finding, before this workspace's policy (re-applied when the policy changes). */
   contentReason: v.optional(v.string()),
-  method: knowledgeMethod,
+  method: reviewMethod,
   model: v.optional(v.string()),
   /** Which creative was reviewed (storage id or "youtube:<id>"); a newer upload makes it stale. */
   creativeRef: v.string(),
@@ -88,6 +91,26 @@ export const creativeReviewFields = {
 };
 
 export const knowledgeTables = {
+  companyKnowledgePassages: defineTable({
+    advertiserId: v.id("advertisers"),
+    passageKey: v.string(),
+    title: v.string(),
+    url: v.string(),
+    text: v.string(),
+    sourceKind: v.union(v.literal("official_site"), v.literal("official_video")),
+    verifiedAt: v.number(),
+    contentHash: v.string(),
+    active: v.boolean(),
+    embeddingStatus: v.union(v.literal("pending"), v.literal("ready")),
+    embedding: v.optional(v.array(v.float64())),
+    embeddingModel: v.optional(v.string()),
+    embeddingHash: v.optional(v.string()),
+    embeddedAt: v.optional(v.number()),
+  })
+    .index("by_advertiser_and_passageKey", ["advertiserId", "passageKey"])
+    .index("by_advertiser_and_active", ["advertiserId", "active"])
+    .index("by_active_and_embeddingStatus", ["active", "embeddingStatus"])
+    .vectorIndex("by_embedding", { vectorField: "embedding", dimensions: 1024, filterFields: ["advertiserId"] }),
   knowledgeCards: defineTable(knowledgeCardFields)
     .index("by_advertiser", ["advertiserId"])
     .searchIndex("search_summary", { searchField: "summary", filterFields: ["category"] }),

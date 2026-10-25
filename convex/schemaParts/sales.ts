@@ -7,7 +7,7 @@ import { v } from "convex/values";
  * company. Spread into `schema.ts` as one line.
  */
 
-export const researchMethod = v.union(v.literal("claude"), v.literal("rules"));
+export const researchMethod = v.union(v.literal("claude"), v.literal("creao"), v.literal("rules"));
 
 export const screenDeviceFields = {
   /** SHA-256 of the device's own random key (kept in the device's browser). */
