@@ -32,8 +32,6 @@
   gap: 32px;
 }
 .app-shell .demo-brand { font-weight: 600; letter-spacing: -.6px; font-size: 20px; }
-.app-shell .demo-brand-mark { background: var(--color-fg); color: var(--color-panel); border-radius: 8px; width: 34px; height: 34px; }
-.app-shell .demo-brand .text-muted { color: var(--color-fg); }
 .app-shell .app-navigation { gap: 6px; }
 .app-shell nav a { min-height: 44px; display: inline-flex; align-items: center; }
 .app-shell nav a[aria-current="page"] { background: var(--dashboard-selected); color: var(--color-accent); border-radius: 8px; }

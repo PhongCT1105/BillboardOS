@@ -1,14 +1,15 @@
-import { ArrowUpRight, Monitor } from "@phosphor-icons/react";
+import { ArrowUpRight } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
+import logo from "../images/billboardos-logo.png";
+import logoOnDark from "../images/billboardos-logo-on-dark.png";
 import "./demo.css";
 
 export function Brand() {
   return (
     <a href="#/" className="demo-brand" aria-label="BillboardOS home">
-      <span className="demo-brand-mark">
-        <Monitor size={19} weight="bold" />
-      </span>
-      Billboard<span className="text-muted">OS</span>
+      {/* Dark text for light headers, white text on the dark landing and demo pages (demo.css picks one). */}
+      <img src={logo} alt="" className="demo-brand-logo demo-brand-logo-light" />
+      <img src={logoOnDark} alt="" className="demo-brand-logo demo-brand-logo-dark" />
     </a>
   );
 }

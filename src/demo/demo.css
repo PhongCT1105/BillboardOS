@@ -23,15 +23,17 @@
   letter-spacing: -0.7px;
   white-space: nowrap;
 }
-.demo-brand-mark {
-  display: grid;
-  place-items: center;
-  width: 32px;
+.demo-brand-logo {
+  display: block;
   height: 32px;
-  margin-right: 9px;
-  background: var(--color-accent);
-  color: var(--color-accent-ink);
-  border-radius: 7px;
+  width: auto;
+}
+.demo-brand-logo-dark,
+.demo-site .demo-brand-logo-light {
+  display: none;
+}
+.demo-site .demo-brand-logo-dark {
+  display: block;
 }
 .demo-site-header nav,
 .demo-site-header nav > a,
@@ -895,8 +897,8 @@
   .demo-site-header nav > a:first-child:not(.demo-button) {
     display: none;
   }
-  .demo-brand {
-    font-size: 17px;
+  .demo-brand-logo {
+    height: 28px;
   }
   .demo-hero {
     padding-block: 36px 40px;

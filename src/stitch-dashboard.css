@@ -8,7 +8,6 @@
 .host-shell .app-header { position: sticky; top: 0; z-index: 40; background: rgb(245 245 247 / .88); backdrop-filter: saturate(180%) blur(20px); }
 .host-shell .app-header-inner { width: min(1376px, calc(100% - 64px)); min-height: 64px; gap: 24px; }
 .host-shell .demo-brand { font-size: 14px; text-transform: uppercase; letter-spacing: -.35px; }
-.host-shell .demo-brand-mark { width: 32px; height: 32px; margin-right: 8px; }
 .host-shell .app-navigation { gap: 22px; }
 .host-shell .app-navigation > a { padding: 4px 0; min-height: 36px; border-bottom: 2px solid transparent; border-radius: 0; font-size: 14px; }
 .host-shell .app-navigation > a[aria-current="page"] { background: transparent; color: #004e9f; border-bottom-color: #004e9f; font-weight: 600; border-radius: 0; }
