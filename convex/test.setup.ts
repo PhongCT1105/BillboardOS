@@ -107,3 +107,33 @@ export async function signedInUser(t: TestClient, email = "someone@billboardos.t
   const userId = await t.run(async (ctx) => ctx.db.insert("users", { email }));
   return signIn(t, userId, email);
 }
+
+/** A quote for a campaign's slots at the screen's base rate (as a round deal writes one). */
+export async function quoteFor(client: TestClient, args: { campaignId: Id<"campaigns">; slotIds: Id<"slots">[]; amountMinor?: number }) {
+  return await client.run(async (ctx) => {
+    const slot = (await ctx.db.get(args.slotIds[0]))!;
+    const billboard = (await ctx.db.get(slot.billboardId))!;
+    const amountMinor = args.amountMinor ?? billboard.baseRateMinor * args.slotIds.length;
+    const quoteId = await ctx.db.insert("quotes", {
+      workspaceId: billboard.workspaceId,
+      campaignId: args.campaignId,
+      billboardId: billboard._id,
+      slotIds: args.slotIds,
+      amountMinor,
+      currency: "USD",
+      expiresAt: Date.now() + 10 * 60_000,
+      pricingBasis: ["test"],
+      confidence: "medium",
+      policyVersion: "test",
+      status: "open",
+      traceId: `test:${args.campaignId}:${args.slotIds.join(",")}`,
+    });
+    return { quoteId, amountMinor, traceId: `test:${args.campaignId}:${args.slotIds.join(",")}` };
+  });
+}
+
+/** An exclusive hold on a quote's slots (the same takeHold a round deal uses). */
+export async function holdFor(client: TestClient, quote: { quoteId: Id<"quotes"> }, idempotencyKey: string, actor = "buyer") {
+  const { takeHold, toResult } = await import("./holds");
+  return await client.run(async (ctx) => toResult(await takeHold(ctx, (await ctx.db.get(quote.quoteId))!, idempotencyKey, actor), false));
+}

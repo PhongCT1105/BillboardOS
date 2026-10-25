@@ -3,16 +3,11 @@ import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { deviceStatus, playbackStatus, slotState } from "./schema";
 import { recordAudit } from "./lib/audit";
-import { computeScreenPrice } from "./lib/screenPrice";
-import { onMomentFirstFrame } from "./lib/momentHooks";
 import { YOUTUBE_CONTENT_TYPE, hasCreative } from "./lib/youtube";
 import { explorerTxUrl } from "./lib/x402/money";
-import { screenModeOf } from "./lib/moment";
 
 const CURRENT_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const NEXT_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
-const HOUSE_AD_WINDOW_MS = 12 * 60 * 60 * 1000;
-const HOUSE_AD_MAX_SLOTS = 48;
 /** Playback reports must fall within [startAt - 5 min, endAt + 30 min]. */
 const PLAYBACK_EARLY_MS = 5 * 60 * 1000;
 const PLAYBACK_LATE_MS = 30 * 60 * 1000;
@@ -111,12 +106,7 @@ export const nowPlaying = query({
     billboard: v.object({ name: v.string(), city: v.string(), deviceStatus }),
     current: v.union(v.null(), slotView),
     next: v.union(v.null(), slotView),
-    houseAd: v.object({
-      /** Price-free tagline; render fromPriceMinor separately. */
-      message: v.string(),
-      /** Cheapest available slot in the next 12h; null if sold out. */
-      fromPriceMinor: v.union(v.number(), v.null()),
-    }),
+    houseAd: v.object({ message: v.string() }),
   }),
   handler: async (ctx, args) => {
     const at = args.atMinute;
@@ -152,27 +142,8 @@ export const nowPlaying = query({
       .first();
     const next = nextSlot ? await toSlotView(ctx, nextSlot) : null;
 
-    // House ad: cheapest available upcoming slot, priced by the same policy as quotes.
-    const upcoming = await ctx.db
-      .query("slots")
-      .withIndex("by_billboard_and_startAt", (q) =>
-        q
-          .eq("billboardId", billboard._id)
-          .gt("startAt", at)
-          .lte("startAt", at + HOUSE_AD_WINDOW_MS),
-      )
-      .take(HOUSE_AD_MAX_SLOTS);
-    const available = upcoming.filter((s) => s.state === "available");
-    let fromPriceMinor: number | null = null;
-    if (available.length > 0) {
-      // Same screen-price harness as quotes (all stages), priced in one pass.
-      const { price } = await computeScreenPrice(ctx.db, billboard, available, at);
-      fromPriceMinor = Math.min(...price.slotPrices.map((p) => p.amountMinor));
-    }
-    const message =
-      fromPriceMinor === null
-        ? `${billboard.name} is fully booked for the next 12 hours.`
-        : `Book 15 minutes on ${billboard.name} with BillboardOS.`;
+    // House ad: agents buy the spot on air; there is no posted price.
+    const message = `Advertise on ${billboard.name} with BillboardOS.`;
 
     return {
       billboard: {
@@ -182,7 +153,7 @@ export const nowPlaying = query({
       },
       current,
       next,
-      houseAd: { message, fromPriceMinor },
+      houseAd: { message },
     };
   },
 });
@@ -290,8 +261,6 @@ export const recordPlayback = mutation({
       },
     });
 
-    // Live moment (ADR 0006): first frame stops the stopwatch.
-    if (args.status === "played") await onMomentFirstFrame(ctx, booking._id, now);
 
     return { playbackEventId, slotState: newState, replayed: false };
   },
@@ -338,13 +307,11 @@ export const readyCreatives = query({
 });
 
 /**
- * What the display shows, from the latest live moment on this screen: announce,
- * live auction (with its bid ladder), negotiation, the paid ad playing, or
- * "your ad here". Public: the room sees the company names. The query never
+ * What the display shows, from the latest round on this screen: the sale in
+ * progress, the paid ad playing, or "your ad here". The query never
  * reads the clock: it returns `spotEndAt` and the client decides when a paid
  * spot has expired, so the subscription never changes.
  */
-type Ladder = { company: string; amountMinor: number; at: number; leading: boolean }[];
 type NowPlaying = {
   company: string;
   wonAtMinor: number;
@@ -365,7 +332,6 @@ async function roundScreen(ctx: QueryCtx, billboard: Doc<"billboards">, round: D
     why: round.signals.map((s) => s.reason).join(" · ") as string | null,
     closesAt: null as number | null,
     spotEndAt: round.spotEndAt as number | null,
-    ladder: [] as Ladder,
     nowPlaying: null as NowPlaying | null,
   };
   const bids = await ctx.db
@@ -374,8 +340,8 @@ async function roundScreen(ctx: QueryCtx, billboard: Doc<"billboards">, round: D
     .take(20);
   const name = async (id: Id<"advertisers">) => (await ctx.db.get(id))?.displayName ?? "A company";
   if (round.status === "bidding") {
-    // Sealed: the public screen shows how many bids are in, never who bid what, until the close.
-    const sealedBids = bids.filter((b) => b.status === "bid").length;
+    // Private: the public screen shows how many companies are negotiating, never who offered what.
+    const sealedBids = bids.filter((b) => b.status === "invited" && b.amountMinor !== null).length;
     return { mode: "auction" as const, ...base, closesAt: round.closesAt, sealedBids };
   }
   if (round.status === "awarded") return { mode: "settling" as const, ...base };
@@ -407,9 +373,7 @@ export const screenState = query({
   args: { billboardId: v.id("billboards") },
   returns: v.object({
     mode: v.union(
-      v.literal("announce"),
       v.literal("auction"),
-      v.literal("negotiation"),
       v.literal("settling"),
       v.literal("playing"),
       v.literal("your_ad_here"),
@@ -422,13 +386,10 @@ export const screenState = query({
     minimumMinor: v.union(v.number(), v.null()),
     why: v.union(v.string(), v.null()),
     closesAt: v.union(v.number(), v.null()),
-    /** Bidding rounds: sealed bids in so far (the ladder stays empty until the close). */
+    /** Companies negotiating with an offer in (who offered what stays private). */
     sealedBids: v.optional(v.number()),
     /** End of the latest moment's spot; the client expires "playing" with its own clock. */
     spotEndAt: v.union(v.number(), v.null()),
-    ladder: v.array(
-      v.object({ company: v.string(), amountMinor: v.number(), at: v.number(), leading: v.boolean() }),
-    ),
     nowPlaying: v.union(
       v.null(),
       v.object({
@@ -450,12 +411,6 @@ export const screenState = query({
   handler: async (ctx, args) => {
     const billboard = await ctx.db.get(args.billboardId);
     if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
-    const moment = await ctx.db
-      .query("moments")
-      .withIndex("by_billboard", (q) => q.eq("billboardId", billboard._id))
-      .order("desc")
-      .first();
-
     const empty = {
       screenName: billboard.name,
       minutesLeft: 0,
@@ -466,105 +421,14 @@ export const screenState = query({
       why: null,
       closesAt: null,
       spotEndAt: null,
-      ladder: [],
       nowPlaying: null,
     };
-    // Bidding rounds replaced the live moment: the newer of the two drives the screen.
     const round = await ctx.db
       .query("rounds")
       .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", billboard._id))
       .order("desc")
       .first();
-    if (round && (!moment || round.createdAt >= moment.startedAt)) return await roundScreen(ctx, billboard, round);
-    if (!moment) return { mode: "your_ad_here" as const, ...empty };
-
-    const spotMinutes = Math.max(1, Math.round((moment.spotEndAt - moment.spotStartAt) / 60_000));
-    const base = {
-      screenName: billboard.name,
-      minutesLeft: spotMinutes,
-      peopleInView: moment.peopleInView ?? null,
-      eventName: moment.eventName ?? null,
-      openingMinor: moment.priceMinor,
-      minimumMinor: moment.floorMinor,
-      why: moment.priceWhy ?? null,
-      closesAt: null as number | null,
-      spotEndAt: moment.spotEndAt as number | null,
-      ladder: [] as { company: string; amountMinor: number; at: number; leading: boolean }[],
-      nowPlaying: null as null | {
-        company: string;
-        wonAtMinor: number;
-        txShort: string | null;
-        txUrl: string | null;
-        creative?: { provider: "file" | "youtube"; youtubeVideoId: string | null; title: string | null };
-      },
-    };
-
-    if (moment.status === "offering") return { mode: screenModeOf("offering"), ...base };
-
-    if (moment.status === "bidding" || moment.status === "negotiating") {
-      const bids = await ctx.db
-        .query("momentBids")
-        .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
-        .order("desc")
-        .take(40);
-      const shown = moment.status === "bidding" ? bids.filter((b) => b.kind === "bid") : bids;
-      const names = new Map<Id<"advertisers">, string>();
-      for (const b of shown) {
-        if (!names.has(b.advertiserId)) names.set(b.advertiserId, (await ctx.db.get(b.advertiserId))?.displayName ?? "A company");
-      }
-      const top = shown.reduce((max, b) => Math.max(max, b.amountMinor), 0);
-      const ladder = shown
-        .slice(0, 6)
-        .sort((a, b) => b.amountMinor - a.amountMinor || b.at - a.at)
-        .map((b) => ({
-          company: names.get(b.advertiserId) ?? "A company",
-          amountMinor: b.amountMinor,
-          at: b.at,
-          leading: moment.status === "bidding" && b.offerId === moment.leaderOfferId && b.amountMinor === top,
-        }));
-      // Only the first row at the top amount is the leader.
-      let seenLead = false;
-      for (const row of ladder) {
-        if (row.leading && seenLead) row.leading = false;
-        if (row.leading) seenLead = true;
-      }
-      return {
-        mode: screenModeOf(moment.status),
-        ...base,
-        closesAt: moment.status === "bidding" ? (moment.biddingClosesAt ?? null) : moment.offerClosesAt,
-        ladder,
-      };
-    }
-
-    if (moment.status === "awarded" || moment.status === "paid" || moment.status === "playing") {
-      const winner = moment.winnerOfferId ? await ctx.db.get(moment.winnerOfferId) : null;
-      const advertiser = winner ? await ctx.db.get(winner.advertiserId) : null;
-      const hold = moment.holdId ? await ctx.db.get(moment.holdId) : null;
-      const settled = moment.status !== "awarded";
-      // Only a settlement transaction hash counts as proof of payment.
-      const tx = settled ? (moment.paymentTx ?? null) : null;
-      const campaign = winner ? await ctx.db.get(winner.campaignId) : null;
-      let creative: { provider: "file" | "youtube"; youtubeVideoId: string | null; title: string | null } | undefined;
-      if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
-        const yt = await youtubeOf(ctx, campaign._id);
-        if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
-      } else if (campaign?.creativeStorageId) {
-        creative = { provider: "file", youtubeVideoId: null, title: null };
-      }
-      return {
-        mode: screenModeOf(moment.status),
-        ...base,
-        nowPlaying: {
-          company: advertiser?.displayName ?? "A company",
-          // What the winner actually owes: a negotiated price or a runner-up's own last bid, not the auction's top bid.
-          wonAtMinor: moment.paidMinor ?? hold?.amountMinor ?? winner?.replyAmountMinor ?? moment.currentMinor ?? moment.priceMinor,
-          txShort: tx ? (tx.length > 14 ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : tx) : null,
-          txUrl: tx && moment.paymentNetwork ? (explorerTxUrl(moment.paymentNetwork, tx) ?? null) : null,
-          ...(creative ? { creative } : {}),
-        },
-      };
-    }
-
-    return { mode: "your_ad_here" as const, ...empty, minutesLeft: spotMinutes, openingMinor: moment.priceMinor, minimumMinor: moment.floorMinor };
+    if (!round) return { mode: "your_ad_here" as const, ...empty };
+    return await roundScreen(ctx, billboard, round);
   },
 });

@@ -5,28 +5,25 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { priceSignal, roundBidStatus, roundStatus, roundTrigger } from "./schemaParts/rounds";
 import { recordAudit } from "./lib/audit";
 import { assertWithinBudget, authenticateAgent, keyStatus } from "./lib/agentKeys";
-import { matchScore } from "./lib/match";
-import { MIN_REMAINING_MS, PAY_WINDOW_MS, audienceMix, replyAllowed } from "./lib/moment";
 import { holdLockKey, lockHeld } from "./lib/paymentLock";
-import { PRICING_POLICY_VERSION } from "./lib/pricing";
 import { endHold, takeHold } from "./holds";
-import { creativeReady } from "./lib/momentHooks";
-import { AUTO_SELL_GAP_MS, CAMERA_COOLDOWN_MS, MAX_INVITES, ROUND_CLOSE_MS, askingPrice, closeOutcome, priceSignals } from "./lib/rounds";
-import { activeEvent, spentTodayForAdvertiserMinor } from "./moments";
+import { AUTO_SELL_GAP_MS, CAMERA_COOLDOWN_MS, MAX_INVITES, MIN_MATCH, ROUND_CLOSE_MS, askingPrice, companyOffer, hostReply, priceSignals } from "./lib/rounds";
+import { matchScore } from "./lib/match";
+import { researchOf } from "./research";
+import { MIN_REMAINING_MS, PAY_WINDOW_MS, PRICING_POLICY_VERSION, activeEvent, campaignsReadyFor, replyAllowed, spentTodayForAdvertiserMinor } from "./lib/sale";
 import { requireCustomer, requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
 import { explorerTxUrl } from "./lib/x402/money";
 
 /**
- * Simple bidding rounds (spec 2026-10-24-simple-bidding-rounds-design):
- * start -> price -> invite -> bid -> close, then pay -> play. One round sells
- * the spot on air now on one screen. Every invited company answers once
- * (sealed); the round closes when all have answered or after 5 s. Signals
- * only move the asking price; nothing but "no bid at or above the floor"
- * stops a sale, and every round ends with an outcome sentence.
+ * Rounds: start -> price -> offer -> deal, then pay -> play. One round sells
+ * the spot on air now on one screen. Every invited company gets the same
+ * offer (floor x signals) and deals with the host alone: accept, counter
+ * (the host counters once, halfway; a second offer at or above the floor is
+ * a deal) or pass. Companies never see or compete with each other's offers:
+ * the first deal takes the spot. Every round ends with an outcome sentence.
  */
 
 const BUCKET_MS = 15 * 60_000;
-const MAX_APPROVALS_SCANNED = 100;
 const MAX_KEYS_SCANNED = 20;
 const NO_INVITES = "No company agents with an approved ad and budget.";
 const SOLD_ELSEWHERE = "Spot was sold elsewhere.";
@@ -81,7 +78,7 @@ async function currentSlot(ctx: QueryCtx, billboardId: Id<"billboards">, now: nu
  * min out, so rounds and forward offers never overlap.
  */
 async function onAirSpot(ctx: QueryCtx, billboardId: Id<"billboards">, now: number): Promise<Doc<"slots"> | null> {
-  const free = async (s: Doc<"slots">) => s.state === "available" && !(s.auctionId && (await ctx.db.get(s.auctionId))?.status === "open");
+  const free = async (s: Doc<"slots">) => s.state === "available";
   const current = await currentSlot(ctx, billboardId, now);
   if (current && current.endAt - now >= MIN_REMAINING_MS) return (await free(current)) ? current : null;
   const next = await ctx.db
@@ -102,7 +99,7 @@ async function crowdNow(ctx: QueryCtx, billboardId: Id<"billboards">, now: numbe
   return row ? (row.peakInView ?? null) : null;
 }
 
-type Invite = { advertiserId: Id<"advertisers">; campaign: Doc<"campaigns">; key: Doc<"agentKeys"> };
+type Invite = { advertiserId: Id<"advertisers">; campaign: Doc<"campaigns">; key: Doc<"agentKeys">; match: number | null; companyFactor: number };
 
 /** A key that can take part: active, webhook, bid + pay scopes, allowed for the campaign. */
 function canBid(k: Doc<"agentKeys">, campaignId: Id<"campaigns">, now: number): boolean {
@@ -112,22 +109,17 @@ function canBid(k: Doc<"agentKeys">, campaignId: Id<"campaigns">, now: number): 
 }
 
 /**
- * Everyone invited (spec §3): a company with an ad ready on this host, an
- * agent key that can bid and pay, and budget left. One key and one campaign
- * per company: the built-in agent's first, else the newest that qualify.
+ * Who gets an offer: a company with an ad ready on this host, an agent key
+ * that can bid and pay, budget left, and buyers in this crowd (its research
+ * audience matches the screen's audience read by at least MIN_MATCH; when
+ * either isn't known yet, it's offered). One key and one campaign per
+ * company: the built-in agent's first, else the newest that qualify.
  */
-async function invitees(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: number): Promise<Invite[]> {
-  const approvals = await ctx.db
-    .query("creativeApprovals")
-    .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId))
-    .take(MAX_APPROVALS_SCANNED);
+async function invitees(ctx: QueryCtx, billboard: Doc<"billboards">, workspaceId: Id<"workspaces">, now: number): Promise<{ invites: Invite[]; notMatching: string[] }> {
   const ready = new Map<Id<"advertisers">, Doc<"campaigns">[]>();
-  for (const a of approvals) {
-    const c = await ctx.db.get(a.campaignId);
-    if (!c || c.status !== "active" || !(await creativeReady(ctx, c, workspaceId))) continue;
-    ready.set(c.advertiserId, [...(ready.get(c.advertiserId) ?? []), c]);
-  }
+  for (const c of await campaignsReadyFor(ctx, workspaceId)) ready.set(c.advertiserId, [...(ready.get(c.advertiserId) ?? []), c]);
   const out: Invite[] = [];
+  const notMatching: string[] = [];
   for (const [advertiserId, campaigns] of ready) {
     if (out.length >= MAX_INVITES) break;
     campaigns.sort((a, b) => b._creationTime - a._creationTime);
@@ -139,7 +131,7 @@ async function invitees(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: numbe
     if (agent?.enabled) {
       const key = await ctx.db.get(agent.agentKeyId);
       const campaign = campaigns.find((c) => c._id === agent.campaignId) ?? campaigns.find((c) => key && canBid(key, c._id, now));
-      if (key && campaign && canBid(key, campaign._id, now)) pick = { advertiserId, campaign, key };
+      if (key && campaign && canBid(key, campaign._id, now)) pick = { advertiserId, campaign, key, match: null, companyFactor: 1 };
     }
     if (!pick) {
       const keys = await ctx.db
@@ -150,7 +142,7 @@ async function invitees(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: numbe
       for (const key of keys) {
         const campaign = campaigns.find((c) => canBid(key, c._id, now));
         if (campaign) {
-          pick = { advertiserId, campaign, key };
+          pick = { advertiserId, campaign, key, match: null, companyFactor: 1 };
           break;
         }
       }
@@ -158,9 +150,24 @@ async function invitees(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: numbe
     if (!pick) continue;
     const standing = pick.key.standing;
     if (standing && standing.dailyBudgetMinor - (await spentTodayForAdvertiserMinor(ctx, advertiserId, now)) <= 0) continue;
-    out.push(pick);
+    const research = await researchOf(ctx, advertiserId);
+    const match = matchScore(billboard.audienceTags, research?.audienceTags ?? pick.campaign.targetAudience);
+    if (match !== null && match < MIN_MATCH) {
+      notMatching.push(`${await companyName(ctx, advertiserId)} (${Math.round(match * 100)}% match)`);
+      continue;
+    }
+    out.push({ ...pick, match, companyFactor: research?.priceFactor ?? 1 });
   }
-  return out;
+  return { invites: out, notMatching };
+}
+
+/** Paid sales on this screen in the last 2 hours (the demand signal). */
+async function recentSales(ctx: QueryCtx, billboardId: Id<"billboards">, now: number): Promise<number> {
+  const rounds = await ctx.db
+    .query("rounds")
+    .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", billboardId).gte("createdAt", now - 2 * 60 * 60_000))
+    .take(50);
+  return rounds.filter((r) => r.status === "paid").length;
 }
 
 /**
@@ -203,10 +210,15 @@ export async function startRoundCore(
 
   const crowd = await crowdNow(ctx, billboardId, now);
   const event = await activeEvent(ctx, billboardId, now);
-  const signals = priceSignals({ peakInView: crowd, usualInView: billboard.usualInView, eventName: event?.name ?? null });
+  const signals = priceSignals({
+    peakInView: crowd,
+    usualInView: billboard.usualInView,
+    eventName: event?.name ?? null,
+    recentSales: await recentSales(ctx, billboardId, now),
+  });
   const floorMinor = billboard.reserveFloorMinor;
-  const mix = audienceMix(billboard.audienceTags, event?.audienceTags);
-  const invites = await invitees(ctx, billboard.workspaceId, now);
+  const askingMinor = askingPrice(floorMinor, signals);
+  const { invites, notMatching } = await invitees(ctx, billboard, billboard.workspaceId, now);
 
   const roundId = await ctx.db.insert("rounds", {
     workspaceId: billboard.workspaceId,
@@ -217,7 +229,7 @@ export async function startRoundCore(
     trigger,
     status: "bidding",
     floorMinor,
-    askingMinor: askingPrice(floorMinor, signals),
+    askingMinor,
     signals,
     crowd,
     eventName: event?.name ?? null,
@@ -231,7 +243,9 @@ export async function startRoundCore(
       advertiserId: i.advertiserId,
       campaignId: i.campaign._id,
       agentKeyId: i.key._id,
-      match: matchScore(mix, i.campaign.targetAudience),
+      match: i.match,
+      companyFactor: i.companyFactor,
+      offerMinor: companyOffer(askingMinor, floorMinor, i.companyFactor),
       amountMinor: null,
       status: "invited",
     });
@@ -243,10 +257,13 @@ export async function startRoundCore(
     actor: `seller-agent:${billboard.name}`,
     type: "round.started",
     subjectId: roundId,
-    reason: `Round on ${billboard.name} (${trigger}): floor ${usd(floorMinor)}, asking ${usd(askingPrice(floorMinor, signals))}; ${invites.length} invited`,
+    reason: `Round on ${billboard.name} (${trigger}): floor ${usd(floorMinor)}, price ${usd(askingMinor)} x each company's factor, to ${invites.length}${notMatching.length ? `; not offered: ${notMatching.join(", ")}` : ""}`,
   });
   if (invites.length === 0) {
-    await endUnsold(ctx, (await ctx.db.get(roundId))!, NO_INVITES);
+    const outcome = notMatching.length
+      ? `No company's buyers are in this crowd${billboard.audienceSummary ? ` (${billboard.audienceSummary})` : ""}. Not offered: ${notMatching.join(", ")}.`
+      : NO_INVITES;
+    await endUnsold(ctx, (await ctx.db.get(roundId))!, outcome);
     return roundId;
   }
   await ctx.scheduler.runAt(now + ROUND_CLOSE_MS, internal.rounds.closeRound, { roundId });
@@ -265,70 +282,37 @@ async function endUnsold(ctx: MutationCtx, round: Doc<"rounds">, outcome: string
   });
 }
 
+/** One company's answer, for the outcome sentence. */
+function answerOf(b: Doc<"roundBids">): string {
+  if (b.status === "passed") return b.reasoning ?? "passed";
+  if (b.amountMinor !== null) return `offered ${usd(b.amountMinor)}, host asked ${usd(b.offerMinor ?? 0)}`;
+  return "no answer";
+}
+
 /**
- * Close a round (idempotent: only a round still bidding changes). No bid at
- * or above the floor: unsold with every reason. Otherwise the winner is
- * awarded at the second price (closeOutcome).
+ * Close a round with no deal (idempotent: only a round still bidding
+ * changes): everyone passed, or the deadline came first. Unsold, with each
+ * company's last answer.
  */
 export async function closeRoundCore(ctx: MutationCtx, roundId: Id<"rounds">): Promise<void> {
   const round = await ctx.db.get(roundId);
   if (!round || round.status !== "bidding") return;
-  const bids = await bidsOf(ctx, roundId);
-  const names = new Map<string, string>();
-  for (const b of bids) names.set(b._id, await companyName(ctx, b.advertiserId));
-  const valid = bids.filter((b) => b.status === "bid" && b.amountMinor !== null);
-  const result = closeOutcome(
-    valid.map((b) => ({ id: b._id, amountMinor: b.amountMinor!, answeredAt: b.answeredAt ?? round.closesAt })),
-    round.askingMinor,
-    round.floorMinor,
-  );
-  if (result.kind === "unsold") {
-    const reasons = bids.map((b) => `${names.get(b._id)}: ${b.status === "passed" ? (b.reasoning ?? "passed") : "no answer"}`);
-    await endUnsold(ctx, round, `Unsold: no bid at or above the ${usd(round.floorMinor)} floor. ${reasons.join("; ")}.`);
-    return;
-  }
-  const others = valid
-    .filter((b) => b._id !== result.winnerId)
-    .sort((a, b) => b.amountMinor! - a.amountMinor!)
-    .map((b) => `${names.get(b._id)} bid ${usd(b.amountMinor!)}`);
-  const winner = valid.find((b) => b._id === result.winnerId)!;
-  const outcome = `${names.get(winner._id)} wins at ${usd(result.priceMinor)} (bid ${usd(winner.amountMinor!)})${others.length ? `; ${others.join(", ")}` : ""}.`;
-  await ctx.db.patch(roundId, { closedAt: Date.now() });
-  const first = await awardCore(ctx, round, winner._id, result.priceMinor, result.runnerUpId as Id<"roundBids"> | null, outcome);
-  if (first !== "skip") return;
-  // The winner can't take it (key revoked, over its cap): the next bids, best first, each at its own amount.
-  await awardNext(ctx, (await ctx.db.get(roundId))!, `${names.get(winner._id)}'s agent can no longer buy`);
-}
-
-/** Bids still in the running, best first (ties: earlier answer). */
-function ranked(bids: Doc<"roundBids">[]): Doc<"roundBids">[] {
-  return bids
-    .filter((b) => b.amountMinor !== null && (b.status === "bid" || b.status === "lost"))
-    .sort((a, b) => b.amountMinor! - a.amountMinor! || (a.answeredAt ?? 0) - (b.answeredAt ?? 0));
-}
-
-/** Award the best remaining bid at its own amount; unsold when nobody is left. */
-async function awardNext(ctx: MutationCtx, round: Doc<"rounds">, why: string): Promise<void> {
-  for (const b of ranked(await bidsOf(ctx, round._id))) {
-    const company = await companyName(ctx, b.advertiserId);
-    const next = await awardCore(ctx, round, b._id, b.amountMinor!, null, `${company} gets the spot at its ${usd(b.amountMinor!)} bid (${why}).`);
-    if (next !== "skip") return;
-  }
-  await endUnsold(ctx, round, `Payment failed: ${why}. No runner-up left.`);
+  const reasons = [];
+  for (const b of await bidsOf(ctx, roundId)) reasons.push(`${await companyName(ctx, b.advertiserId)}: ${answerOf(b)}`);
+  await endUnsold(ctx, round, `Unsold: no deal at or above the ${usd(round.floorMinor)} floor. ${reasons.join("; ")}.`);
 }
 
 /**
- * Award the spot to one bid at a price: a quote and a hold for the rest of
- * the spot, the winner told to pay (round_won) within 60 s, the others told
- * they lost. "skip" when this bid's key can't buy any more; "ended" when the
- * spot itself is gone (the round ends unsold).
+ * The deal: a quote and a hold for the rest of the spot at the agreed price,
+ * the company told to pay (round_won) within 60 s, every other company told
+ * the spot is gone. "skip" when this key can't buy any more; "ended" when
+ * the spot itself is gone (the round ends unsold).
  */
 export async function awardCore(
   ctx: MutationCtx,
   round: Doc<"rounds">,
   bidId: Id<"roundBids">,
   priceMinor: number,
-  runnerUpBidId: Id<"roundBids"> | null,
   outcome: string,
 ): Promise<"awarded" | "skip" | "ended"> {
   const bid = (await ctx.db.get(bidId))!;
@@ -351,7 +335,7 @@ export async function awardCore(
     currency: "USD",
     expiresAt: now + 10 * 60_000,
     pricingBasis: [
-      `Bidding round on ${billboard?.name ?? "screen"}: floor ${usd(round.floorMinor)}, asking ${usd(round.askingMinor)}, won at ${usd(priceMinor)}`,
+      `Round on ${billboard?.name ?? "screen"}: floor ${usd(round.floorMinor)}, offered at ${usd(round.askingMinor)}, deal at ${usd(priceMinor)}`,
       ...round.signals.map((sig) => sig.reason),
     ],
     confidence: "medium",
@@ -375,15 +359,15 @@ export async function awardCore(
     await ctx.db.patch(quoteId, { status: "expired" });
     const data = error.data as { code?: string; message?: string };
     const why =
-      data.code === "SLOT_UNAVAILABLE" ? SOLD_ELSEWHERE : data.code === "AUCTION_OPEN" ? "Spot went to a slot auction before the close." : `Couldn't hold the spot: ${data.message ?? data.code ?? "unknown error"}.`;
+      data.code === "SLOT_UNAVAILABLE" ? SOLD_ELSEWHERE : `Couldn't hold the spot: ${data.message ?? data.code ?? "unknown error"}.`;
     await endUnsold(ctx, round, why);
     return "ended";
   }
   await ctx.db.patch(round._id, {
     status: "awarded",
     winnerBidId: bidId,
-    runnerUpBidId: runnerUpBidId ?? undefined,
     priceMinor,
+    closedAt: Date.now(),
     holdId,
     outcome,
   });
@@ -391,7 +375,7 @@ export async function awardCore(
     if (b._id === bidId) {
       await ctx.db.patch(b._id, { status: "won" });
       await ctx.scheduler.runAfter(0, internal.roundDelivery.deliver, { bidId: b._id, event: "round_won" });
-    } else if (b.status === "bid") {
+    } else if (b.status === "bid" || b.status === "invited") {
       await ctx.db.patch(b._id, { status: "lost" });
       await ctx.scheduler.runAfter(0, internal.roundDelivery.deliver, { bidId: b._id, event: "round_lost" });
     }
@@ -408,7 +392,7 @@ export async function awardCore(
   return "awarded";
 }
 
-/** The winner didn't pay: release its hold, mark it defaulted, and give the spot to the next bid. */
+/** The company didn't pay: release its hold, mark it defaulted, and end the round unsold (the next round offers the spot again). */
 async function defaultWinner(ctx: MutationCtx, round: Doc<"rounds">, holdId: Id<"holds">, reason: string): Promise<void> {
   const hold = await ctx.db.get(holdId);
   if (hold?.status === "active") await endHold(ctx, hold, "released", "system", `Round winner didn't pay: ${reason}`);
@@ -416,7 +400,7 @@ async function defaultWinner(ctx: MutationCtx, round: Doc<"rounds">, holdId: Id<
   if (winner) await ctx.db.patch(winner._id, { status: "defaulted" });
   const who = winner ? await companyName(ctx, winner.advertiserId) : "The winner";
   await ctx.db.patch(round._id, { holdId: undefined, winnerBidId: undefined });
-  await awardNext(ctx, (await ctx.db.get(round._id))!, `${who}'s payment failed: ${reason}`);
+  await endUnsold(ctx, round, `Payment failed: ${who}'s payment failed: ${reason}.`);
 }
 
 /** The winner's payment was blocked (e.g. empty wallet, no CDP keys). Idempotent per hold. */
@@ -434,7 +418,7 @@ export const paymentFailed = internalMutation({
   },
 });
 
-/** 60 s after the award: paid -> nothing; a payment settling -> look again; otherwise the next bid gets it. */
+/** 60 s after the deal: paid -> nothing; a payment settling -> look again; otherwise unsold. */
 export const payDeadline = internalMutation({
   args: { roundId: v.id("rounds"), holdId: v.id("holds") },
   returns: v.null(),
@@ -463,14 +447,18 @@ export const closeRound = internalMutation({
 });
 
 /**
- * An invited agent's one sealed answer (POST /api/agent/rounds/{id}/bid):
- * an amount at or above the floor within its own limits, or null to pass.
- * Answering again replaces the earlier answer until the round closes; the
- * last answer closes the round at once.
+ * An invited company's answer (POST /api/agent/rounds/{id}/bid), dealt with
+ * on its own: `amountMinor` at or above the host's price to it is a deal at
+ * that price; between the floor and that price, the host counters once
+ * (round_counter) and a second offer is a deal; null passes. The first deal
+ * takes the spot; everyone else is told it's gone.
  */
 export const submitBid = internalMutation({
   args: { token: v.string(), roundId: v.string(), amountMinor: v.union(v.number(), v.null()), reasoning: v.optional(v.string()) },
-  returns: v.object({ status: v.union(v.literal("bid"), v.literal("passed")) }),
+  returns: v.object({
+    status: v.union(v.literal("deal"), v.literal("countered"), v.literal("passed"), v.literal("unavailable")),
+    priceMinor: v.union(v.number(), v.null()),
+  }),
   handler: async (ctx, args) => {
     const agent = await authenticateAgent(ctx, args.token, "bid");
     const roundId = ctx.db.normalizeId("rounds", args.roundId);
@@ -482,26 +470,37 @@ export const submitBid = internalMutation({
       .first();
     if (!row || row.agentKeyId !== agent.key._id) fail("NOT_INVITED", "This key wasn't invited to this round");
     const now = Date.now();
-    if (round.status !== "bidding" || now > round.closesAt) fail("ROUND_CLOSED", "This round is closed");
+    if (round.status !== "bidding" || now > round.closesAt) fail("ROUND_CLOSED", "This spot is no longer for sale");
+    if (row.status !== "invited") fail("ALREADY_ANSWERED", "You already passed on this spot");
     const reasoning = args.reasoning?.slice(0, 300);
     if (args.amountMinor === null) {
-      await ctx.db.patch(row._id, { amountMinor: null, status: "passed", reasoning, answeredAt: now });
-    } else {
-      const amount = args.amountMinor;
-      if (!Number.isSafeInteger(amount) || amount <= 0) fail("INVALID_INPUT", "amountMinor must be whole cents above 0, or null to pass");
-      if (amount < round.floorMinor) fail("BELOW_FLOOR", `Bids start at the ${usd(round.floorMinor)} floor`);
-      const over = replyAllowed(agent.key.standing, amount, await spentTodayForAdvertiserMinor(ctx, agent.key.advertiserId, now));
-      if (over) fail("OVER_LIMIT", `Bid is ${over}`);
-      try {
-        await assertWithinBudget(ctx, agent.key, amount);
-      } catch {
-        fail("OVER_LIMIT", "Bid is over this key's budget cap");
-      }
-      await ctx.db.patch(row._id, { amountMinor: amount, status: "bid", reasoning, answeredAt: now });
+      await ctx.db.patch(row._id, { status: "passed", reasoning, answeredAt: now });
+      if ((await bidsOf(ctx, round._id)).every((b) => b.status !== "invited")) await closeRoundCore(ctx, round._id);
+      return { status: "passed" as const, priceMinor: null };
     }
-    const bids = await bidsOf(ctx, round._id);
-    if (bids.every((b) => b.status !== "invited")) await closeRoundCore(ctx, round._id);
-    return { status: args.amountMinor === null ? ("passed" as const) : ("bid" as const) };
+    const amount = args.amountMinor;
+    if (!Number.isSafeInteger(amount) || amount <= 0) fail("INVALID_INPUT", "amountMinor must be whole cents above 0, or null to pass");
+    if (amount < round.floorMinor) fail("BELOW_FLOOR", `Offers start at the ${usd(round.floorMinor)} floor`);
+    const over = replyAllowed(agent.key.standing, amount, await spentTodayForAdvertiserMinor(ctx, agent.key.advertiserId, now));
+    if (over) fail("OVER_LIMIT", `Offer is ${over}`);
+    try {
+      await assertWithinBudget(ctx, agent.key, amount);
+    } catch {
+      fail("OVER_LIMIT", "Offer is over this key's budget cap");
+    }
+    const reply = hostReply({ amountMinor: amount, priceMinor: row.offerMinor ?? round.askingMinor, countered: row.countered === true });
+    if (reply.kind === "counter") {
+      await ctx.db.patch(row._id, { amountMinor: amount, offerMinor: reply.priceMinor, countered: true, reasoning, answeredAt: now });
+      await ctx.scheduler.runAfter(0, internal.roundDelivery.deliver, { bidId: row._id, event: "round_counter" });
+      return { status: "countered" as const, priceMinor: reply.priceMinor };
+    }
+    await ctx.db.patch(row._id, { amountMinor: amount, reasoning, answeredAt: now, status: "bid" });
+    const company = await companyName(ctx, row.advertiserId);
+    const outcome = `${company} took the spot at ${usd(reply.priceMinor)}${row.countered ? " after a counter" : ""}.`;
+    const result = await awardCore(ctx, round, row._id, reply.priceMinor, outcome);
+    if (result === "skip") fail("OVER_LIMIT", "This key can no longer buy");
+    if (result === "ended") return { status: "unavailable" as const, priceMinor: null };
+    return { status: "deal" as const, priceMinor: reply.priceMinor };
   },
 });
 
@@ -544,7 +543,7 @@ export const sellNow = mutation({
   },
 });
 
-/** Turn "auto-sell when idle" on or off for the workspace (off by default: every sale spends testnet USDC). */
+/** Turn "auto-sell when idle" on or off for the workspace (on by default; each company's daily budget caps what it spends). */
 export const setAutoSell = mutation({
   args: { workspaceId: v.optional(v.id("workspaces")), enabled: v.boolean() },
   returns: v.null(),
@@ -556,20 +555,20 @@ export const setAutoSell = mutation({
   },
 });
 
-/** Every minute: for workspaces with auto-sell on, a round on each online screen idle for 2 minutes. */
+/** Every minute: unless the host turned auto-sell off, a round on each online screen whose spot on air is unsold (at most one per 2 minutes). */
 export const autoSellTick = internalMutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
     const now = Date.now();
     const workspaces = await ctx.db.query("workspaces").take(MAX_AUTO_WORKSPACES * 4);
-    for (const ws of workspaces.filter((w) => w.autoSellRounds).slice(0, MAX_AUTO_WORKSPACES)) {
+    for (const ws of workspaces.filter((w) => w.autoSellRounds !== false).slice(0, MAX_AUTO_WORKSPACES)) {
       const screens = await ctx.db
         .query("billboards")
         .withIndex("by_workspace", (q) => q.eq("workspaceId", ws._id))
         .take(MAX_AUTO_SCREENS);
       for (const screen of screens) {
-        if (screen.deviceStatus !== "online") continue;
+        if (screen.deviceStatus !== "online" || !screen.deviceId) continue;
         const last = await latestRound(ctx, screen._id);
         if (last && now - last.createdAt < AUTO_SELL_GAP_MS) continue;
         await startRoundCore(ctx, screen._id, "timer");
@@ -600,7 +599,9 @@ const roundView = v.object({
       company: v.string(),
       amountMinor: v.union(v.number(), v.null()),
       reasoning: v.union(v.string(), v.null()),
+      offerMinor: v.union(v.number(), v.null()),
       match: v.union(v.number(), v.null()),
+      companyFactor: v.union(v.number(), v.null()),
       status: roundBidStatus,
     }),
   ),
@@ -613,7 +614,9 @@ async function toView(ctx: QueryCtx, round: Doc<"rounds">) {
       company: await companyName(ctx, b.advertiserId),
       amountMinor: b.amountMinor,
       reasoning: b.reasoning ?? null,
+      offerMinor: b.offerMinor ?? null,
       match: b.match,
+      companyFactor: b.companyFactor ?? null,
       status: b.status,
     });
   }
@@ -655,7 +658,7 @@ export const live = query({
       const round = await latestRound(ctx, s._id);
       out.push({ billboardId: s._id, name: s.name, online: s.deviceStatus === "online", round: round ? await toView(ctx, round) : null });
     }
-    return { autoSell: workspace?.autoSellRounds === true, screens: out };
+    return { autoSell: workspace?.autoSellRounds !== false, screens: out };
   },
 });
 
@@ -669,6 +672,8 @@ export const myRounds = query({
       roundStatus: roundStatus,
       outcome: v.union(v.string(), v.null()),
       amountMinor: v.union(v.number(), v.null()),
+      /** The host's price to this company (its own, after the research factor and any counter). */
+      offerMinor: v.union(v.number(), v.null()),
       reasoning: v.union(v.string(), v.null()),
       bidStatus: roundBidStatus,
       createdAt: v.number(),
@@ -691,6 +696,7 @@ export const myRounds = query({
         roundStatus: round.status,
         outcome: round.outcome ?? null,
         amountMinor: b.amountMinor,
+        offerMinor: b.offerMinor ?? null,
         reasoning: b.reasoning ?? null,
         bidStatus: b.status,
         createdAt: round.createdAt,

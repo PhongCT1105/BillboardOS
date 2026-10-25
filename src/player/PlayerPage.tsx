@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { preconnect } from "react-dom";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
@@ -75,8 +75,7 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
     screenLive.mode === "playing" && screenLive.spotEndAt !== null && now >= screenLive.spotEndAt
       ? ({ ...screenLive, mode: "your_ad_here", nowPlaying: null } as Screen)
       : screenLive;
-  const liveMode =
-    screen.mode === "announce" || screen.mode === "auction" || screen.mode === "negotiation" || screen.mode === "settling";
+  const liveMode = screen.mode === "auction" || screen.mode === "settling";
 
   return (
     <div className="relative grid min-h-[100dvh] place-items-center overflow-hidden bg-ink">
@@ -124,11 +123,6 @@ export function PlayerPage({ billboardId, camera = false }: { billboardId: Id<"b
           </p>
           <p className="mt-6 text-[clamp(1.1rem,2vw,2rem)] text-muted">
             {state.houseAd.message}
-            {state.houseAd.fromPriceMinor !== null && (
-              <>
-                {" "}From <span className="tabular font-mono text-fg">{money(state.houseAd.fromPriceMinor)}</span> per 15 minutes.
-              </>
-            )}
           </p>
         </div>
       )}
@@ -177,70 +171,23 @@ function ProofStrip({ playing }: { playing: NonNullable<Screen["nowPlaying"]> })
   );
 }
 
-/** Announce, live auction and negotiation: the screen never sits blank between ads. */
+/** A live sale on the spot on air: the screen never sits blank between ads. */
 function LiveScreen({ screen }: { screen: Screen }) {
   const now = useNow(250);
-  const auction = screen.mode === "auction" || screen.mode === "negotiation";
-  // Bidding rounds keep bids sealed until the close: only the count is public.
-  const sealedBids = "sealedBids" in screen ? screen.sealedBids : undefined;
+  // Each company's offer stays private: only how many are negotiating is public.
+  const negotiating = "sealedBids" in screen ? (screen.sealedBids ?? 0) : 0;
   const left = screen.closesAt ? Math.max(0, Math.ceil((screen.closesAt - now) / 1000)) : 0;
 
-  // The clock visibly jumps when a late bid extends the auction.
-  const [bumped, setBumped] = useState(false);
-  const lastClose = useRef<number | null>(null);
-  useEffect(() => {
-    const prev = lastClose.current;
-    lastClose.current = screen.closesAt;
-    if (prev !== null && screen.closesAt !== null && screen.closesAt > prev) {
-      setBumped(true);
-      const id = setTimeout(() => setBumped(false), 1200);
-      return () => clearTimeout(id);
-    }
-    setBumped(false);
-  }, [screen.closesAt]);
-
-  if (screen.mode === "settling" && screen.nowPlaying) {
+  if (screen.mode === "settling") {
     return (
       <div className="fade-in flex h-full min-h-[100dvh] w-full flex-col justify-between p-[clamp(1.25rem,3vw,3rem)]">
         <span className="w-fit rounded-full bg-red-500 px-3 py-1 text-[clamp(0.75rem,1.2vw,1.2rem)] font-bold text-white">SOLD</span>
-        <div>
-          <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">
-            {screen.nowPlaying.company}
-            <br />
-            won at <span className="tabular font-mono">{money(screen.nowPlaying.wonAtMinor)}</span>
-          </p>
-          <p className="mt-5 text-[clamp(1rem,1.8vw,1.8rem)] text-muted">settling payment on Base…</p>
-        </div>
-        <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">{screen.screenName}</span>
-      </div>
-    );
-  }
-
-  if (!auction) {
-    return (
-      <div className="fade-in flex h-full min-h-[100dvh] w-full flex-col justify-between p-[clamp(1.25rem,3vw,3rem)]">
-        <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">{screen.screenName} · now</span>
-        <div>
-          <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">
-            This screen is available
-            <br />
-            for the next {screen.minutesLeft} minutes
-          </p>
-          <p className="mt-5 text-[clamp(1rem,1.8vw,1.8rem)] text-muted">
-            {screen.peopleInView !== null && (
-              <span className="mr-3 rounded-full bg-emerald-500/20 px-3 py-0.5 text-emerald-400">● camera</span>
-            )}
-            {screen.peopleInView !== null && `${screen.peopleInView} ${screen.peopleInView === 1 ? "person" : "people"} here now`}
-            {screen.eventName && ` · ${screen.eventName} next door`}
-          </p>
-        </div>
-        <p className="text-[clamp(1rem,1.8vw,1.8rem)] text-muted">
-          {screen.openingMinor !== null && (
-            <>
-              Bidding opens at <span className="tabular font-mono text-fg">{money(screen.openingMinor)}</span> · advertisers' agents notified
-            </>
-          )}
+        <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">
+          Deal made.
+          <br />
+          <span className="text-muted">Paying over x402 on Base…</span>
         </p>
+        <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">{screen.screenName}</span>
       </div>
     );
   }
@@ -248,48 +195,32 @@ function LiveScreen({ screen }: { screen: Screen }) {
   return (
     <div className="fade-in flex h-full min-h-[100dvh] w-full flex-col justify-between p-[clamp(1.25rem,3vw,3rem)]">
       <div className="flex items-center justify-between">
-        <span className="rounded-full bg-red-500 px-3 py-1 text-[clamp(0.75rem,1.2vw,1.2rem)] font-bold text-white">
-          {screen.mode === "negotiation" ? "NEGOTIATING" : "LIVE AUCTION"}
-        </span>
+        <span className="rounded-full bg-red-500 px-3 py-1 text-[clamp(0.75rem,1.2vw,1.2rem)] font-bold text-white">LIVE SALE</span>
         <span className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">
           next {screen.minutesLeft} min · {screen.screenName}
         </span>
       </div>
       <div className="flex items-center gap-[4vw]">
-        <ol className="tabular flex flex-1 flex-col gap-2 font-mono text-[clamp(1rem,2.2vw,2.2rem)]">
-          {screen.ladder.length === 0 && (
-            <li className="text-muted">
-              {sealedBids
-                ? `${sealedBids} sealed ${sealedBids === 1 ? "bid" : "bids"} in`
-                : sealedBids === 0
-                  ? "Agents are deciding"
-                  : "Waiting for the first bid"}
-            </li>
-          )}
-          {screen.ladder.map((row) => (
-            <li
-              key={`${row.at}-${row.company}-${row.amountMinor}`}
-              className={`flex justify-between rounded-md px-3 py-1 ${row.leading ? "bg-accent/25 font-bold" : "bg-white/5"}`}
-            >
-              <span>{row.company}</span>
-              <span>{money(row.amountMinor)}</span>
-            </li>
-          ))}
-        </ol>
+        <div className="flex-1">
+          <p className="text-[clamp(2.2rem,6vw,6rem)] leading-[1.1] font-extrabold tracking-tight">This spot is for sale</p>
+          <p className="mt-5 text-[clamp(1rem,1.8vw,1.8rem)] text-muted">
+            {negotiating > 0
+              ? `Negotiating with ${negotiating} ${negotiating === 1 ? "company" : "companies"}`
+              : "Company agents are deciding"}
+            {screen.peopleInView !== null && ` · ${screen.peopleInView} ${screen.peopleInView === 1 ? "person" : "people"} here now`}
+            {screen.eventName && ` · ${screen.eventName} next door`}
+          </p>
+        </div>
         <div className="text-center">
-          <div
-            className={`tabular font-mono text-[clamp(3rem,9vw,9rem)] leading-none font-black transition-colors ${bumped ? "text-emerald-400" : ""}`}
-          >
-            {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}
-          </div>
-          <div className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">{bumped ? "extended" : "left"}</div>
+          <div className="tabular font-mono text-[clamp(3rem,9vw,9rem)] leading-none font-black">{left}s</div>
+          <div className="text-[clamp(0.7rem,1vw,1rem)] tracking-[0.12em] text-muted uppercase">left</div>
         </div>
       </div>
       <p className="text-[clamp(0.9rem,1.5vw,1.5rem)] text-muted">
-        {screen.why ? `Why: ${screen.why}` : ""}
+        {screen.why ? `Price: ${screen.why}` : ""}
         {screen.openingMinor !== null && (
           <>
-            {screen.why ? " · " : ""}opened at <span className="tabular font-mono text-fg">{money(screen.openingMinor)}</span>
+            {screen.why ? " · " : ""}from <span className="tabular font-mono text-fg">{money(screen.openingMinor)}</span>
           </>
         )}
       </p>

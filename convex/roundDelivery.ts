@@ -5,14 +5,15 @@ import { keyStatus } from "./lib/agentKeys";
 import { SIGNATURE_HEADER, TIMESTAMP_HEADER, signWebhook } from "./lib/webhook";
 
 /**
- * Signed webhooks for bidding rounds: `round_offer` (the invitation),
- * `round_won` (pay this hold over x402), `round_lost`. Same signing as every
+ * Signed webhooks for rounds: `round_offer` (the host's offer),
+ * `round_counter` (the host's one counter to this company), `round_won`
+ * (deal: pay this hold over x402), `round_lost` (another company took it). Same signing as every
  * other BillboardOS webhook: HMAC-SHA256 over "<timestamp>.<raw body>" with
  * the agent key's webhook secret. Rounds close in seconds: 5 s timeout, one
  * quick retry.
  */
 
-export const roundEvent = v.union(v.literal("round_offer"), v.literal("round_won"), v.literal("round_lost"));
+export const roundEvent = v.union(v.literal("round_offer"), v.literal("round_counter"), v.literal("round_won"), v.literal("round_lost"));
 const TIMEOUT_MS = 5_000;
 
 function siteUrl(): string {
@@ -26,28 +27,37 @@ export const loadForDelivery = internalQuery({
     const bid = await ctx.db.get(args.bidId);
     const round = bid ? await ctx.db.get(bid.roundId) : null;
     if (!bid || !round) return { ok: false as const, reason: "round missing" };
-    if (args.event === "round_offer" && round.status !== "bidding") return { ok: false as const, reason: "round already closed" };
+    if ((args.event === "round_offer" || args.event === "round_counter") && (round.status !== "bidding" || bid.status !== "invited")) {
+      return { ok: false as const, reason: "round already closed" };
+    }
     const key = await ctx.db.get(bid.agentKeyId);
     if (!key?.webhookUrl || keyStatus(key, Date.now()) !== "active") return { ok: false as const, reason: "agent key inactive or without webhook" };
     const billboard = await ctx.db.get(round.billboardId);
     const base = siteUrl();
     const common = { roundId: round._id, advertiserId: bid.advertiserId, campaignId: bid.campaignId };
     let payload: Record<string, unknown>;
-    if (args.event === "round_offer") {
+    if (args.event === "round_offer" || args.event === "round_counter") {
       payload = {
-        type: "round_offer",
+        type: args.event,
         ...common,
         screen: { billboardId: round.billboardId, name: billboard?.name ?? "", locationLabel: billboard?.locationLabel ?? "" },
         spotEndAt: round.spotEndAt,
         floorMinor: round.floorMinor,
         askingMinor: round.askingMinor,
+        /** The host's price to you now: accept it, or offer less (at or above floorMinor). */
+        priceMinor: bid.offerMinor ?? round.askingMinor,
+        yourLastOfferMinor: bid.amountMinor,
+        /** The host already countered once: your next offer at or above the floor is a deal. */
+        finalCounter: bid.countered === true,
         signals: round.signals,
         crowd: round.crowd,
-        audienceMatch: bid.match,
         closesAt: round.closesAt,
         standingInstructions: key.standing ?? null,
         links: { base, bid: `/api/agent/rounds/${round._id}/bid` },
-        bidFormat: { amountMinor: "whole cents at or above floorMinor, or null to pass", reasoning: "one sentence (optional)" },
+        bidFormat: {
+          amountMinor: "priceMinor or more accepts; less (at or above floorMinor) counters; null passes",
+          reasoning: "one sentence (optional)",
+        },
       };
     } else if (args.event === "round_won") {
       const hold = round.holdId ? await ctx.db.get(round.holdId) : null;

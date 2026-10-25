@@ -59,3 +59,11 @@ export function dayLabel(ms: number): string {
 export function words(value: string): string {
   return value.replaceAll("_", " ");
 }
+
+/** Basescan link for a settlement transaction hash, or null for anything else. */
+export function txUrl(network: string | null, tx: string): string | null {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return null;
+  if (network === "eip155:84532") return `https://sepolia.basescan.org/tx/${tx}`;
+  if (network === "eip155:8453") return `https://basescan.org/tx/${tx}`;
+  return null;
+}

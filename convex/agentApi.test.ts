@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
+import { holdFor, modules, quoteFor, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { RATE_LIMIT_PER_MINUTE } from "./lib/agentKeys";
 
 // 09:07 PDT. slots[8] airs 11:15 local: screen price $40.00.
@@ -129,7 +129,7 @@ describe("agent HTTP API", () => {
     expect(await call(w.anon, k.key, "GET", "me")).toMatchObject({ status: 401, body: { error: { code: "KEY_REVOKED" } } });
   });
 
-  test("me, inventory, quote and hold as the company's agent; audited as the key", async () => {
+  test("me as the company's agent: its key, its campaigns, last used", async () => {
     const w = await world();
     const k = await issue(w.custA);
     const me = await call(w.anon, k.key, "GET", "me");
@@ -139,129 +139,25 @@ describe("agent HTTP API", () => {
       key: { name: "buyer-bot", scopes: ["quote", "hold", "bid", "pay"], committedMinor: 0 },
     });
     expect(me.body.campaigns.map((c: { campaignId: string }) => c.campaignId)).toEqual([w.campaignA]);
-
-    const inv = await call(w.anon, k.key, "GET", `inventory?campaignId=${w.campaignA}&hours=6`);
-    expect(inv.status).toBe(200);
-    expect(inv.body.screens[0]).toMatchObject({ name: "Moscone West Screen", matchScore: null });
-    const slot8 = inv.body.screens[0].slots.find((s: { slotId: string }) => s.slotId === w.slots[8]._id);
-    expect(slot8).toMatchObject({ screenPriceMinor: 4000, auction: null });
-    expect((await call(w.anon, k.key, "GET", `inventory?campaignId=${w.campaignB}`)).body.error.code).toBe("NOT_COMPANY_MEMBER");
-
-    const q = await call(w.anon, k.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[8]._id] });
-    expect(q.status).toBe(201);
-    expect(q.body).toMatchObject({ amountMinor: 4000, currency: "USD" });
-    const h = await call(w.anon, k.key, "POST", "holds", { quoteId: q.body.quoteId, idempotencyKey: "agent-hold-1" });
-    expect(h.status).toBe(201);
-    expect(h.body).toMatchObject({ amountMinor: 4000, status: "active", replayed: false });
-    const again = await call(w.anon, k.key, "POST", "holds", { quoteId: q.body.quoteId, idempotencyKey: "agent-hold-1" });
-    expect(again).toMatchObject({ status: 200, body: { holdId: h.body.holdId, replayed: true } });
-
-    const audit = await w.host.query(api.audit.recent, {});
-    const actor = "agent:Golden Gate Coffee Co./buyer-bot";
-    expect(audit.find((e) => e.type === "quote.created")?.actor).toBe(actor);
-    expect(audit.find((e) => e.type === "slot.held")?.actor).toBe(actor);
     const listed = (await w.custA.query(api.agentKeys.list, {}))[0];
-    expect(listed.committedMinor).toBe(4000);
     expect(Math.abs((listed.lastUsedAt ?? 0) - Date.now())).toBeLessThan(1000);
-
-    // Malformed ids and bodies are clean 4xx, not 500s.
-    expect((await call(w.anon, k.key, "POST", "quotes", { campaignId: "nope", slotIds: ["x"] })).status).toBe(404);
-    expect((await call(w.anon, k.key, "POST", "quotes", { campaignId: w.campaignA })).status).toBe(400);
     expect((await call(w.anon, k.key, "GET", "nothing-here")).status).toBe(404);
   });
 
-  test("scopes are enforced per endpoint", async () => {
+  test("answering a round needs the bid scope; a key lists only its allowed campaigns", async () => {
     const w = await world();
     const quoteOnly = await issue(w.custA, { scopes: ["quote"], name: "quoter" });
-    const q = await call(w.anon, quoteOnly.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[8]._id] });
-    expect(q.status).toBe(201);
-    expect(await call(w.anon, quoteOnly.key, "POST", "holds", { quoteId: q.body.quoteId, idempotencyKey: "h" })).toMatchObject({
+    expect(await call(w.anon, quoteOnly.key, "POST", "rounds/nope/bid", { amountMinor: 100 })).toMatchObject({
       status: 403,
       body: { error: { code: "SCOPE_MISSING" } },
     });
-    const { auctionId } = await w.host.mutation(api.auctions.open, { slotIds: [w.slots[10]._id] });
-    expect((await call(w.anon, quoteOnly.key, "POST", `auctions/${auctionId}/join`, { campaignId: w.campaignA })).body.error.code).toBe(
-      "SCOPE_MISSING",
-    );
-    const holdOnly = await issue(w.custA, { scopes: ["hold"], name: "holder" });
-    expect((await call(w.anon, holdOnly.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[9]._id] })).body.error.code).toBe(
-      "SCOPE_MISSING",
-    );
-    // Reads need no scope.
-    expect((await call(w.anon, holdOnly.key, "GET", "inventory")).status).toBe(200);
-    expect((await call(w.anon, holdOnly.key, "GET", "alerts")).body).toMatchObject({ alerts: [] });
-  });
-
-  test("a key acts only for its own company and its allowed campaigns", async () => {
-    const w = await world();
-    const k = await issue(w.custA);
-    expect(await call(w.anon, k.key, "POST", "quotes", { campaignId: w.campaignB, slotIds: [w.slots[8]._id] })).toMatchObject({
-      status: 403,
-      body: { error: { code: "NOT_COMPANY_MEMBER" } },
-    });
-    // B's quote can't be held with A's key.
-    const qb = await w.custB.mutation(api.quotes.create, { campaignId: w.campaignB, slotIds: [w.slots[8]._id] });
-    expect((await call(w.anon, k.key, "POST", "holds", { quoteId: qb.quoteId, idempotencyKey: "steal" })).body.error.code).toBe(
-      "NOT_COMPANY_MEMBER",
-    );
-
-    const second = await w.custA.mutation(api.campaigns.create, { brief: "Second", budgetMinor: 50_000 });
+    const bidder = await issue(w.custA, { name: "bidder" });
+    expect((await call(w.anon, bidder.key, "POST", "rounds/nope/bid", { amountMinor: 100 })).status).toBe(404);
+    await w.custA.mutation(api.campaigns.create, { brief: "Second", budgetMinor: 50_000 });
     const scoped = await issue(w.custA, { campaignIds: [w.campaignA], name: "scoped" });
-    expect((await call(w.anon, scoped.key, "POST", "quotes", { campaignId: second, slotIds: [w.slots[9]._id] })).body.error.code).toBe(
-      "CAMPAIGN_NOT_ALLOWED",
-    );
     expect((await call(w.anon, scoped.key, "GET", "me")).body.campaigns.map((c: { campaignId: string }) => c.campaignId)).toEqual([
       w.campaignA,
     ]);
-  });
-
-  test("budget cap counts active holds and leading auction bids", async () => {
-    const w = await world();
-    const k = await issue(w.custA, { budgetCapMinor: 7000 });
-    const q1 = await call(w.anon, k.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[8]._id] });
-    expect((await call(w.anon, k.key, "POST", "holds", { quoteId: q1.body.quoteId, idempotencyKey: "a" })).status).toBe(201);
-    const q2 = await call(w.anon, k.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[9]._id] });
-    const refused = await call(w.anon, k.key, "POST", "holds", { quoteId: q2.body.quoteId, idempotencyKey: "b" });
-    expect(refused).toMatchObject({ status: 409, body: { error: { code: "BUDGET_CAP", committedMinor: 4000, budgetCapMinor: 7000 } } });
-
-    // Auctions: a max beyond the remaining $30 is refused; within it is fine and then counts.
-    const { auctionId } = await w.host.mutation(api.auctions.open, { slotIds: [w.slots[12]._id] });
-    const join = await call(w.anon, k.key, "POST", `auctions/${auctionId}/join`, { campaignId: w.campaignA });
-    expect(join.status).toBe(200);
-    const bidderKey = join.body.bidderKey as string;
-    expect(
-      (await call(w.anon, k.key, "POST", `auctions/${auctionId}/auto-bid`, { campaignId: w.campaignA, bidderKey, maxMinor: 3500 })).body.error
-        .code,
-    ).toBe("BUDGET_CAP");
-    // Free the hold; now a bid at the reserve fits, and the leading bid counts as committed.
-    await w.custA.mutation(api.holds.release, { holdId: (await w.anon.run(async (ctx) => ctx.db.query("holds").first()))!._id, idempotencyKey: "a" });
-    const reserve = (await w.anon.query(api.auctions.forSlot, { slotId: w.slots[12]._id }))!.reserveMinor;
-    const ok = await call(w.anon, k.key, "POST", `auctions/${auctionId}/auto-bid`, { campaignId: w.campaignA, bidderKey, maxMinor: reserve });
-    expect(ok).toMatchObject({ status: 200, body: { leading: true, currentMinor: reserve } });
-    expect((await call(w.anon, k.key, "GET", "me")).body.key.committedMinor).toBe(reserve);
-  });
-
-  test("auction join, bid and status over HTTP", async () => {
-    const w = await world();
-    const k = await issue(w.custA);
-    const { auctionId } = await w.host.mutation(api.auctions.open, { slotIds: [w.slots[12]._id] });
-    const join = await call(w.anon, k.key, "POST", `auctions/${auctionId}/join`, { campaignId: w.campaignA });
-    expect(join.body).toMatchObject({ bidderLabel: "Bidder A" });
-    const bid = await call(w.anon, k.key, "POST", `auctions/${auctionId}/bid`, {
-      campaignId: w.campaignA,
-      bidderKey: join.body.bidderKey,
-      amountMinor: join.body.minNextBidMinor,
-    });
-    expect(bid).toMatchObject({ status: 200, body: { leading: true } });
-    const status = await call(w.anon, k.key, "GET", `auctions/${auctionId}/status?campaignId=${w.campaignA}`, undefined, {
-      "X-Bidder-Key": join.body.bidderKey,
-    });
-    expect(status.body).toMatchObject({ outcome: "leading", bidderLabel: "Bidder A" });
-    expect((await call(w.anon, k.key, "GET", `auctions/${auctionId}/status?campaignId=${w.campaignA}`)).status).toBe(400);
-    // Posted price is closed for that slot, also for agents.
-    expect((await call(w.anon, k.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[12]._id] })).body.error.code).toBe(
-      "AUCTION_OPEN",
-    );
   });
 
   test("rate limit per key", async () => {
@@ -289,9 +185,8 @@ describe("x402 pay check", () => {
     const payer = await issue(w.custA, { name: "payer" });
     const noPay = await issue(w.custA, { scopes: ["quote", "hold"], name: "no-pay" });
     const other = await issue(w.custB, { name: "other" });
-    const q = await call(w.anon, payer.key, "POST", "quotes", { campaignId: w.campaignA, slotIds: [w.slots[8]._id] });
-    const h = await call(w.anon, payer.key, "POST", "holds", { quoteId: q.body.quoteId, idempotencyKey: "pay-1" });
-    const holdId = h.body.holdId as string;
+    const h = await holdFor(w.anon, await quoteFor(w.anon, { campaignId: w.campaignA, slotIds: [w.slots[8]._id] }), "pay-1");
+    const holdId = h.holdId as string;
 
     expect((await verify(w.anon, { agentKey: payer.key, holdId }, "Bearer wrong")).status).toBe(401);
     expect(await verify(w.anon, { agentKey: payer.key, holdId })).toMatchObject({
@@ -306,35 +201,5 @@ describe("x402 pay check", () => {
     await w.host.mutation(api.workspaces.setPayoutAddress, { workspaceId, payoutAddress: "0x2222222222222222222222222222222222222222" });
     const res = await w.anon.fetch(`/internal/holds?holdId=${holdId}`, { headers: { Authorization: `Bearer ${SECRET}` } });
     expect((await res.json()).payTo).toBe("0x2222222222222222222222222222222222222222");
-  });
-});
-
-describe("valuation visibility per workspace", () => {
-  test("a host sees only companies that quoted or bid on its screens", async () => {
-    const w = await world();
-    const hostB = await signedInOperator(w.anon, "b@mission.test", "Mission Screens");
-    await hostB.mutation(api.billboards.create, {
-      name: "Mission Street Screen",
-      city: "San Francisco",
-      locationLabel: "Mission St",
-      utcOffsetMinutes: -420,
-      baseRateMinor: 3000,
-      reserveFloorMinor: 1500,
-    });
-    expect(await w.host.query(api.valuation.list, {})).toEqual([]);
-    await w.custA.mutation(api.quotes.create, { campaignId: w.campaignA, slotIds: [w.slots[8]._id] });
-    expect((await w.host.query(api.valuation.list, {})).map((r) => r.displayName)).toEqual(["Golden Gate Coffee Co."]);
-    expect(await hostB.query(api.valuation.list, {})).toEqual([]);
-    expect(await errorCode(hostB.query(api.valuation.history, { advertiserId: w.seed.advertiserIds[0] }))).toBe("NOT_FOUND");
-    expect(
-      await errorCode(hostB.mutation(api.valuation.override, { advertiserId: w.seed.advertiserIds[0], multiplier: 1.2, reason: "x" })),
-    ).toBe("NOT_FOUND");
-    // Bidding (without quoting) also creates the relationship.
-    const { auctionId } = await w.host.mutation(api.auctions.open, { slotIds: [w.slots[12]._id] });
-    await w.custB.mutation(api.auctions.join, { auctionId, campaignId: w.campaignB });
-    expect((await w.host.query(api.valuation.list, {})).map((r) => r.displayName).sort()).toEqual([
-      "Bay Robotics",
-      "Golden Gate Coffee Co.",
-    ]);
   });
 });

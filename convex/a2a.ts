@@ -1,12 +1,13 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, internalQuery, mutation, query, type QueryCtx } from "./_generated/server";
+import { internalMutation, internalQuery, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags } from "./schema";
 import { recordAudit } from "./lib/audit";
-import { authenticateAgent } from "./lib/agentKeys";
-import { hashKey } from "./lib/auction";
-import { DEFAULT_POLICY, policyOf, validatePolicy, usd } from "./lib/negotiation";
-import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
+import { authenticateAgent, hashKey } from "./lib/agentKeys";
+import { ROUND_CLOSE_MS } from "./lib/rounds";
+
+const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
+import { requireCustomer, resolveWorkspace } from "./lib/tenancy";
 
 /**
  * Seller-agent data for the x402 server (ADR 0005): agent card, the paid
@@ -63,7 +64,6 @@ export const agentCard = internalQuery({
     const workspaceId = workspaceIdOf(ctx, args.workspaceId);
     const ws = await ctx.db.get(workspaceId);
     if (!ws) fail("NOT_FOUND", "Host not found");
-    const policy = policyOf(ws);
     const screens = await ctx.db
       .query("billboards")
       .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
@@ -73,8 +73,8 @@ export const agentCard = internalQuery({
       name: ws.name,
       city: ws.city,
       payoutAddress: ws.payoutAddress ?? null,
-      // The floor ratio stays private: it is the seller's reservation price.
-      negotiation: { maxRounds: policy.maxRounds, offerValiditySeconds: Math.round(policy.offerTtlMs / 1000) },
+      // Rounds: the host counters once; an offer is open until the round closes.
+      negotiation: { maxRounds: 2, offerValiditySeconds: ROUND_CLOSE_MS / 1000 },
       screens: screens.map((b) => ({
         billboardId: b._id,
         name: b.name,
@@ -356,55 +356,5 @@ export const dataPurchasesMine = query({
       .order("desc")
       .take(20);
     return await saleRows(ctx, rows);
-  },
-});
-
-// ---------------------------------------------------------------- policy (owners)
-
-export const policyView = v.object({
-  floorRatio: v.number(),
-  maxRounds: v.number(),
-  offerTtlSeconds: v.number(),
-  isDefault: v.boolean(),
-});
-
-export const negotiationPolicy = query({
-  args: { workspaceId: v.optional(v.id("workspaces")) },
-  returns: policyView,
-  handler: async (ctx, args) => {
-    const me = await resolveWorkspace(ctx, args.workspaceId);
-    const ws = (await ctx.db.get(me.workspaceId))!;
-    const p = policyOf(ws);
-    return {
-      floorRatio: p.floorRatio,
-      maxRounds: p.maxRounds,
-      offerTtlSeconds: Math.round(p.offerTtlMs / 1000),
-      isDefault: ws.negotiationFloorRatio === undefined && ws.negotiationMaxRounds === undefined && ws.negotiationOfferTtlMs === undefined,
-    };
-  },
-});
-
-export const setNegotiationPolicy = mutation({
-  args: { workspaceId: v.id("workspaces"), floorRatio: v.number(), maxRounds: v.number(), offerTtlSeconds: v.number() },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const owner = await requireWorkspaceMember(ctx, args.workspaceId, "owner");
-    const policy = { floorRatio: args.floorRatio, maxRounds: args.maxRounds, offerTtlMs: Math.round(args.offerTtlSeconds * 1000) };
-    const problem = validatePolicy(policy);
-    if (problem) fail("INVALID_INPUT", problem);
-    await ctx.db.patch(args.workspaceId, {
-      negotiationFloorRatio: policy.floorRatio,
-      negotiationMaxRounds: policy.maxRounds,
-      negotiationOfferTtlMs: policy.offerTtlMs,
-    });
-    await recordAudit(ctx, {
-      workspaceId: args.workspaceId,
-      traceId: `workspace:${args.workspaceId}`,
-      actor: owner.actor,
-      type: "workspace.policy_changed",
-      subjectId: args.workspaceId,
-      reason: `Seller agent policy: floor ${Math.round(policy.floorRatio * 100)}% of screen price, ${policy.maxRounds} rounds, offers valid ${args.offerTtlSeconds}s (defaults ${DEFAULT_POLICY.floorRatio}, ${DEFAULT_POLICY.maxRounds}, ${DEFAULT_POLICY.offerTtlMs / 1000}s)`,
-    });
-    return null;
   },
 });

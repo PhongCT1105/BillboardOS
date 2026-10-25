@@ -4,12 +4,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
-import { creativeReady } from "./lib/momentHooks";
+import { creativeReady } from "./lib/sale";
 
 /**
  * The marketer's whole setup (ADR 0007, demo flow): paste the ad video, pick a
- * daily limit. We read the video, build the company's card and its audience
- * (the ICP), name the company after the channel, and the agent bids with it.
+ * daily limit. We read the video, name the company after the channel, the
+ * research agent reads the company, and the agent answers offers with it.
  */
 
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -83,7 +83,7 @@ async function world() {
 }
 
 describe("companyAgents.quickSetup", () => {
-  test("video + daily limit: limits derived, video read, company named, ICP built from the video, ad ready to sell", async () => {
+  test("video + daily limit: limits derived, video read, company named and researched, ad ready to sell", async () => {
     const { t, workspaceId, advertiserId, customer, campaignId } = await world();
     const r = await customer.mutation(api.companyAgents.quickSetup, { videoUrl: `https://youtu.be/${ID}`, dailyBudgetMinor: 500 });
     expect(r.campaignId).toBe(campaignId);
@@ -107,10 +107,8 @@ describe("companyAgents.quickSetup", () => {
       description: "Fresh coffee, pastries and brunch at our cafes.",
       status: "ok",
     });
-    expect(mine?.profile).toMatchObject({ category: "food & beverage", method: "heuristic", building: false });
-    // The ICP is the card's, not the starter campaign's guess.
-    expect(campaign?.targetAudience).toEqual(mine?.profile?.audienceTags);
-    expect(campaign?.targetAudience).not.toEqual({ startups: 0.6, software: 0.4 });
+    // No Claude key in tests: the research agent falls back to rules (average price, the campaign's audience).
+    expect(mine?.profile).toMatchObject({ method: "rules", priceFactor: 1 });
 
     expect(await t.run(async (ctx) => creativeReady(ctx, (await ctx.db.get(campaignId))!, workspaceId))).toBe(true);
   });

@@ -2,11 +2,11 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { audienceSource } from "./schema";
 
-import { AUDIENCE_BUCKET_MS } from "./lib/pricing";
+/** Camera counts are kept in 15-minute buckets. */
+export const AUDIENCE_BUCKET_MS = 15 * 60_000;
 import { requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
 import { internal } from "./_generated/api";
 
-export { AUDIENCE_BUCKET_MS };
 const MAX_COUNT = 100_000;
 
 /**

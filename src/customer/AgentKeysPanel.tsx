@@ -254,25 +254,23 @@ function KeyRow({ k }: { k: Key }) {
   );
 }
 
-/** Standing instructions (ADR 0006): what the agent may do with live-moment flash offers. Enforced server-side too. */
+/** The key's limits: the most its agent may offer per spot and per day. Enforced server-side on every answer. */
 function StandingInstructions({ k }: { k: Key }) {
-  const save = useMutation(api.moments.setStanding);
+  const save = useMutation(api.agentKeys.setStanding);
   const [editing, setEditing] = useState(false);
   const s = k.standing;
   const [max, setMax] = useState(s ? String(s.maxPricePerSpotMinor / 100) : "50");
   const [minViewers, setMinViewers] = useState(s ? String(s.minRelevantViewers) : "10");
   const [daily, setDaily] = useState(s ? String(s.dailyBudgetMinor / 100) : "200");
-  const [policy, setPolicy] = useState<"auto_accept" | "counter" | "pass">(s?.policy ?? "auto_accept");
-  const [ratio, setRatio] = useState(s?.counterRatio ? String(Math.round(s.counterRatio * 100)) : "85");
   const { busy, error, setError, run } = useAction();
   const summary = s
-    ? `${s.policy === "auto_accept" ? "Auto-accept" : s.policy === "counter" ? `Counter at ${Math.round((s.counterRatio ?? 0.85) * 100)}%` : "Pass"} · max ${money(s.maxPricePerSpotMinor)}/spot · ${s.minRelevantViewers}+ relevant viewers · ${money(s.dailyBudgetMinor)}/day`
-    : "No standing instructions: this key gets no flash offers.";
+    ? `max ${money(s.maxPricePerSpotMinor)}/spot · ${money(s.dailyBudgetMinor)}/day`
+    : "No limits set: only the key's budget cap applies.";
   if (!editing) {
     return (
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-ink px-3 py-2 text-sm">
         <span className="text-muted">
-          <span className="text-fg">Flash offers:</span> {summary}
+          <span className="text-fg">Limits:</span> {summary}
         </span>
         {k.status === "active" && (
           <button type="button" className="text-sm text-accent hover:underline" onClick={() => setEditing(true)}>
@@ -297,8 +295,6 @@ function StandingInstructions({ k }: { k: Key }) {
               maxPricePerSpotMinor: maxMinor,
               minRelevantViewers: Number(minViewers),
               dailyBudgetMinor: dailyMinor,
-              policy,
-              counterRatio: policy === "counter" ? Number(ratio) / 100 : undefined,
             },
           });
           return true;
@@ -306,13 +302,6 @@ function StandingInstructions({ k }: { k: Key }) {
         if (ok) setEditing(false);
       }}
     >
-      <Field label="Policy">
-        <select value={policy} onChange={(e) => setPolicy(e.target.value as typeof policy)} className={inputCls}>
-          <option value="auto_accept">Auto-accept</option>
-          <option value="counter">Counter</option>
-          <option value="pass">Pass</option>
-        </select>
-      </Field>
       <Field label="Max per spot (USD)">
         <input value={max} onChange={(e) => setMax(e.target.value)} inputMode="decimal" className={`${inputCls} font-mono`} />
       </Field>
@@ -322,11 +311,6 @@ function StandingInstructions({ k }: { k: Key }) {
       <Field label="Daily budget (USD)">
         <input value={daily} onChange={(e) => setDaily(e.target.value)} inputMode="decimal" className={`${inputCls} font-mono`} />
       </Field>
-      {policy === "counter" && (
-        <Field label="Counter at (% of ask)">
-          <input value={ratio} onChange={(e) => setRatio(e.target.value)} inputMode="numeric" className={`${inputCls} font-mono`} />
-        </Field>
-      )}
       <div className="col-span-full flex items-center gap-2">
         <button type="submit" disabled={busy} className={primaryBtn}>
           Save

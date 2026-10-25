@@ -4,7 +4,8 @@ import type { Id } from "./_generated/dataModel";
 import { audienceTags, eventFields, eventSource } from "./schema";
 import { internal } from "./_generated/api";
 import { recordAudit } from "./lib/audit";
-import { EVENT_UPLIFT_MAX } from "./lib/stages";
+/** An event can lift the price by at most this factor. */
+const EVENT_UPLIFT_MAX = 1.5;
 import { validateTags } from "./lib/match";
 import { requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
 

@@ -3,7 +3,7 @@ import { mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audienceTags, campaignStatus, creativeStatus, currency } from "./schema";
 import { validateTags } from "./lib/match";
-import { requestAssessment } from "./valuation";
+import { requestResearch } from "./research";
 import { requireCustomer, requireUser } from "./lib/tenancy";
 import { recordAudit } from "./lib/audit";
 
@@ -146,8 +146,8 @@ export const create = mutation({
       creativeStatus: "none",
       targetAudience: args.targetAudience,
     });
-    // Company analyst: assess (or refresh) this advertiser in the background.
-    await requestAssessment(ctx, advertiserId, "campaign created");
+    // Research agent: learn who this company sells to and what the right crowd is worth to it.
+    await requestResearch(ctx, advertiserId);
     await recordAudit(ctx, {
       traceId: `campaign:${campaignId}`,
       actor: customer.actor,

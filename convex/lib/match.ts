@@ -5,6 +5,9 @@
  */
 export type AudienceTags = Record<string, number>;
 
+/** Unknown audience match (no screen or campaign profile) counts as this: it scales value, never blocks a sale. */
+export const NEUTRAL_MATCH = 0.5;
+
 const MAX_TAGS = 12;
 
 /** Keep finite, non-negative weights with sane keys; scale to sum 1. Empty -> {}. */

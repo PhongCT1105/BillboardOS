@@ -246,6 +246,7 @@ export const auditEventType = v.union(
   v.literal("inventory.generated"),
   v.literal("billboard.baseline_changed"),
   v.literal("billboard.live_pricing_changed"),
+  v.literal("billboard.floor_changed"),
   v.literal("billboard.audience_tags_changed"),
   v.literal("event.recorded"),
   v.literal("valuation.assessed"),
@@ -357,6 +358,16 @@ export const billboardFields = {
   reofferDueAt: v.optional(v.number()),
   /** Bidding rounds: people usually in view (the crowd signal's baseline). Missing = 3. */
   usualInView: v.optional(v.number()),
+  /** The paired device showing this screen (one device = one screen). */
+  deviceId: v.optional(v.id("screenDevices")),
+  /** Where the device is, if its browser shared it. */
+  latitude: v.optional(v.number()),
+  longitude: v.optional(v.number()),
+  /** The audience agent's one-line read of who is here (it also sets audienceTags). */
+  audienceSummary: v.optional(v.string()),
+  audienceReadAt: v.optional(v.number()),
+  /** Taken out of service (old simulated screens): never sold, never listed. */
+  retiredAt: v.optional(v.number()),
 };
 
 export const slotFields = {
@@ -1110,12 +1121,14 @@ export const companyRole = v.union(v.literal("owner"), v.literal("member"));
 
 import { knowledgeTables } from "./schemaParts/knowledge";
 import { roundTables } from "./schemaParts/rounds";
+import { salesTables } from "./schemaParts/sales";
 import { autopilotTables } from "./lib/autopilotSchema";
 export default defineSchema({
   // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
   ...authTables,
   ...knowledgeTables,
   ...roundTables,
+  ...salesTables,
   ...autopilotTables,
 
   /** One per user: which side of the marketplace they signed up for. */
@@ -1148,7 +1161,7 @@ export default defineSchema({
     momentMinMatch: v.optional(v.number()),
     /** Legacy: kept so old rows validate; no new code writes it. Owner-only, OFF by default: settle a blocked winner with a labeled REHEARSAL (simulated) payment. */
     rehearsalSettlement: v.optional(v.boolean()),
-    /** Bidding rounds: start a round on idle online screens every couple of minutes. Off by default (it spends testnet USDC). */
+    /** Bidding rounds: start a round on online screens whose spot on air is unsold. On unless this is false. */
     autoSellRounds: v.optional(v.boolean()),
   }).index("by_name", ["name"]),
 

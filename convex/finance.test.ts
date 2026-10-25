@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInOperator, signedInUser, type TestClient, joinCompanies } from "./test.setup";
+import { modules, signedInOperator, signedInUser, type TestClient, joinCompanies, quoteFor, holdFor } from "./test.setup";
 import { FIXTURE_AS_OF, FIXTURE_BANK_LINES } from "./fixtures/financeFixture";
 import {
   COLLECTION_ANSWERS,
@@ -373,8 +373,8 @@ describe("booking on terms", () => {
       brief: "Robot demo day",
       budgetMinor: 50_000,
     });
-    const q = await t.mutation(api.quotes.create, { campaignId, slotIds: [slots[0]._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "terms-1", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId, slotIds: [slots[0]._id] });
+    const hold = await holdFor(t, q, "terms-1", "buyer");
 
     expect(
       await errorCode(t.mutation(api.bookings.confirmOnTerms, { holdId: hold.holdId, idempotencyKey: "wrong" })),
@@ -412,8 +412,8 @@ describe("booking on terms", () => {
     expect(pay.outcome === "exception" && pay.kind).toBe("duplicate_payment");
 
     // Prepay advertiser (Golden Gate Coffee, demo campaign) cannot book on terms.
-    const q2 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id] });
-    const hold2 = await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "terms-2", actor: "buyer" });
+    const q2 = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[1]._id] });
+    const hold2 = await holdFor(t, q2, "terms-2", "buyer");
     expect(
       await errorCode(t.mutation(api.bookings.confirmOnTerms, { holdId: hold2.holdId, idempotencyKey: "terms-2" })),
     ).toBe("TERMS_NOT_ALLOWED");
@@ -429,8 +429,8 @@ describe("booking on terms", () => {
       from: FIXTURE_AS_OF,
       to: FIXTURE_AS_OF + DAY_MS,
     });
-    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "late", actor: "buyer" });
+    const q = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const hold = await holdFor(t, q, "late", "buyer");
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     const pay = await t.mutation(internal.payments.recordVerified, {
       holdId: hold.holdId,
@@ -643,13 +643,13 @@ describe("demo reset", () => {
       to: FIXTURE_AS_OF + DAY_MS,
     });
     // A real booking paid via x402, and a late x402 payment that became an exception.
-    const q1 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const h1 = await t.mutation(api.holds.create, { quoteId: q1.quoteId, idempotencyKey: "real-1", actor: "buyer" });
+    const q1 = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const h1 = await holdFor(t, q1, "real-1", "buyer");
     const booked = await t.mutation(internal.payments.recordVerified, {
       holdId: h1.holdId, provider: "x402", externalRef: "0xreal", amountMinor: q1.amountMinor, asset: "USDC", idempotencyKey: "r1",
     });
-    const q2 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id] });
-    const h2 = await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "real-2", actor: "buyer" });
+    const q2 = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[1]._id] });
+    const h2 = await holdFor(t, q2, "real-2", "buyer");
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     const late = await t.mutation(internal.payments.recordVerified, {
       holdId: h2.holdId, provider: "x402", externalRef: "0xlate", amountMinor: q2.amountMinor, asset: "USDC", idempotencyKey: "r2",
@@ -683,8 +683,8 @@ describe("demo reset", () => {
       from: FIXTURE_AS_OF,
       to: FIXTURE_AS_OF + DAY_MS,
     });
-    const q1 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
-    const h1 = await t.mutation(api.holds.create, { quoteId: q1.quoteId, idempotencyKey: "b1", actor: "buyer" });
+    const q1 = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
+    const h1 = await holdFor(t, q1, "b1", "buyer");
     await t.mutation(internal.payments.recordVerified, {
       holdId: h1.holdId,
       provider: "x402",
@@ -694,8 +694,8 @@ describe("demo reset", () => {
       network: "eip155:84532",
       idempotencyKey: "x402:demo",
     });
-    const q2 = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[1]._id, slots[2]._id] });
-    await t.mutation(api.holds.create, { quoteId: q2.quoteId, idempotencyKey: "b2", actor: "buyer" });
+    const q2 = await quoteFor(t, { campaignId: seed.campaignId, slotIds: [slots[1]._id, slots[2]._id] });
+    await holdFor(t, q2, "b2", "buyer");
 
     const r = await t.mutation(internal.seed.resetBookingDemo, {});
     expect(r.holdsReleased).toBe(1);

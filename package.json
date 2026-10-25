@@ -13,7 +13,7 @@
     "typecheck": "tsc -b --noEmit && tsc -p convex --noEmit && tsc -p server --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "seed": "convex run seed:demo && convex run seed:pricingDemo",
+    "seed": "convex run seed:demo",
     "buyer": "tsx server/buyer-agent.ts",
     "postinstall": "node -e \"require('fs').cpSync('node_modules/@mediapipe/tasks-vision/wasm','public/mediapipe',{recursive:true})\"",
     "webhook:listen": "tsx server/webhook-receiver.ts",

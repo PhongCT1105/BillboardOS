@@ -2,20 +2,13 @@ import { useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { useNow } from "../lib/hooks";
 import { KpiStrip } from "./KpiStrip";
-import { SlotBoard } from "./SlotBoard";
 import { ExceptionList } from "./ExceptionList";
 import { CreativeQueue } from "./CreativeQueue";
 import { ActivityFeed } from "./ActivityFeed";
-import { AddScreenForm } from "../auth/Onboarding";
-import { LiveAuctions } from "../auctions/LiveAuctions";
-import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
-import { AutopilotPanel } from "../autopilot/AutopilotPanel";
+import { PairScreenForm } from "../screens/PairScreenForm";
 import { HostOverview } from "../demo/HostOverview";
 import { CreaoRehearsalPanel } from "./CreaoRehearsalPanel";
-
-const QUARTER_HOUR = 15 * 60 * 1000;
 
 export function ConsolePage() {
   const billboards = useQuery(api.billboards.mine, {});
@@ -31,11 +24,11 @@ export function ConsolePage() {
         <div>
           <h1 className="text-xl font-semibold">No screens yet</h1>
           <p className="mt-2 max-w-[60ch] text-muted">
-            Add your first screen; 12 hours of 15-minute slots go on sale right
-            away.
+            Pair your first device. Once it's online, company agents get
+            offers for the spot on air automatically.
           </p>
         </div>
-        <AddScreenForm />
+        <PairScreenForm />
         <CreaoRehearsalPanel />
       </main>
     );
@@ -60,7 +53,7 @@ export function ConsolePage() {
       </div>
       {adding && (
         <div className="mb-8">
-          <AddScreenForm />
+          <PairScreenForm onDone={() => setAdding(false)} />
         </div>
       )}
       <HostOverview />
@@ -72,7 +65,7 @@ export function ConsolePage() {
         onToggle={(e) => setShowTools(e.currentTarget.open)}
       >
         <summary>
-          Operational tools · scheduling, auctions, and approvals
+          Operational tools · creatives, finance exceptions, activity
         </summary>
         {showTools && (
           <div>
@@ -94,9 +87,6 @@ export function ConsolePage() {
                 </select>
               </label>
             )}
-            <div className="mb-10">
-              <AutopilotPanel />
-            </div>
             {billboardId && <ConsoleBody billboardId={billboardId} />}
           </div>
         )}
@@ -106,27 +96,11 @@ export function ConsolePage() {
 }
 
 function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
-  const now = useNow(5_000);
-  const minute = Math.floor(now / 60_000) * 60_000;
-  // Two hours of history, the current slot and the next 12 hours.
-  const from =
-    Math.floor(minute / QUARTER_HOUR) * QUARTER_HOUR - 8 * QUARTER_HOUR;
-  const to = from + 14 * 60 * 60 * 1000;
-
   const summary = useQuery(api.dashboard.summary, {});
-  const outlook = useQuery(api.autopilot.outlook, {
-    billboardId,
-    from,
-    to,
-    atMinute: minute,
-  });
   const audience = useQuery(api.audience.recentForBillboard, { billboardId });
   const exceptions = useQuery(api.finance.openExceptions, {});
   const pending = useQuery(api.creatives.pendingReview, {});
   const activity = useQuery(api.audit.recent, {});
-  const negotiations = useQuery(api.negotiations.forWorkspace, {});
-  const dataSales = useQuery(api.a2a.dataSalesForWorkspace, {});
-
   const row = summary?.billboards.find((b) => b.billboardId === billboardId);
 
   return (
@@ -134,30 +108,8 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
       <KpiStrip summary={row} audience={audience} />
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex flex-col gap-10">
-          <LiveAuctions billboardId={billboardId} />
-          <SlotBoard outlook={outlook} now={now} />
           <ExceptionList exceptions={exceptions} />
           <CreativeQueue pending={pending} />
-          <section
-            aria-labelledby="negotiations-heading"
-            className="flex flex-col gap-4"
-          >
-            <div>
-              <h2 id="negotiations-heading" className="text-lg font-semibold">
-                Seller agent
-              </h2>
-              <p className="mt-1 text-sm text-muted">
-                Buyer agents negotiating with your seller agent, and data they
-                bought, paid over x402.
-              </p>
-            </div>
-            <NegotiationTimeline
-              items={negotiations}
-              sales={dataSales?.recent}
-              perspective="host"
-              empty="No agent conversations yet. Buyer agents find your seller agent at /a2a/hosts/<workspace>/agent.json on the x402 server."
-            />
-          </section>
         </div>
         <ActivityFeed events={activity} />
       </div>

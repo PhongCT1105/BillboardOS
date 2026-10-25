@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
@@ -9,16 +9,15 @@ import { SEGMENTS } from "../lib/segments";
 import { Card, ErrorLine, Field, Pill, inputCls, primaryBtn, secondaryBtn, useAction } from "../customer/ui";
 import { RoundsPanel } from "./RoundsPanel";
 
-type Live = FunctionReturnType<typeof api.moments.live>;
-type Device = Live["devices"][number];
+type Screen = FunctionReturnType<typeof api.billboards.mine>[number];
 
 const MINUTE = 60_000;
 
-/** Host presenter view: devices, the bidding round on this screen (Sell now, bids with reasons), pricing, event and top-ups. */
+/** Host presenter view: who the audience agent thinks is here, the live sale (Sell now, every answer), events, floor and top-ups. */
 export function MomentPage() {
   const screens = useQuery(api.billboards.mine, {});
   const [picked, setPicked] = useState<Id<"billboards"> | null>(null);
-  const billboardId = picked ?? screens?.[0]?._id ?? null;
+  const screen = screens?.find((s) => s._id === picked) ?? screens?.[0] ?? null;
   if (screens === undefined) {
     return (
       <main className="mx-auto max-w-[1400px] px-4 pt-8 md:px-6">
@@ -26,10 +25,10 @@ export function MomentPage() {
       </main>
     );
   }
-  if (!billboardId) {
+  if (!screen) {
     return (
       <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
-        <p className="text-muted">Add a screen first (Workspace).</p>
+        <p className="text-muted">Pair a screen first (Dashboard, Add a display).</p>
       </main>
     );
   }
@@ -39,7 +38,7 @@ export function MomentPage() {
         <select
           aria-label="Screen"
           className="mb-4 rounded-md border border-line bg-panel px-3 py-2 text-sm text-fg"
-          value={billboardId}
+          value={screen._id}
           onChange={(e) => setPicked(e.target.value as Id<"billboards">)}
         >
           {screens.map((s) => (
@@ -49,145 +48,83 @@ export function MomentPage() {
           ))}
         </select>
       )}
-      <MomentStage key={billboardId} billboardId={billboardId} />
+      <div key={screen._id} className="flex flex-col gap-6">
+        <ScreenHeader screen={screen} />
+        <RoundsPanel billboardId={screen._id} />
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <FloorPanel screen={screen} />
+          <EventPanel billboardId={screen._id} />
+          <TopUpPanel />
+        </div>
+      </div>
     </main>
   );
 }
 
-function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
-  const now = useNow(100);
-  const atMinute = Math.floor(now / 15_000) * 15_000;
-  // Keep showing the last result while the query re-subscribes with new time args (no flicker on stage).
-  const live = useSticky(useQuery(api.moments.live, { billboardId, atMinute }));
-
-  if (live === undefined) return <div className="h-96 animate-pulse rounded-lg bg-panel" />;
-
+function ScreenHeader({ screen }: { screen: Screen }) {
+  const now = useNow(30_000);
+  const tags = Object.entries(screen.audienceTags ?? {}).sort((a, b) => b[1] - a[1]);
+  const label = (key: string) => SEGMENTS.find((s) => s.key === key)?.label ?? key;
   return (
-    <div className="flex flex-col gap-6">
-      <header>
-        <p className="text-xs font-medium tracking-widest text-accent uppercase">Bidding rounds</p>
-        <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">{live.screen.name}</h1>
-        <p className="mt-1 text-sm text-muted">
-          {live.screen.locationLabel}
-          {live.screen.event && ` · ${live.screen.event.name} next door`}
+    <header className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">{screen.name}</h1>
+        <Pill tone={screen.deviceStatus === "online" ? "ok" : "danger"}>{screen.deviceStatus}</Pill>
+        {!screen.deviceId && <Pill tone="muted">no device paired</Pill>}
+      </div>
+      <p className="text-sm text-muted">
+        {screen.locationLabel}, {screen.city}
+      </p>
+      <Card className="flex flex-col gap-2">
+        <p className="text-xs tracking-widest text-muted uppercase">
+          Who is here (audience agent{screen.audienceReadAt ? `, read ${ago(screen.audienceReadAt, now)}` : ", not read yet"})
         </p>
-      </header>
-
-      <Devices devices={live.devices} queue={live.queue} now={now} active={billboardId} />
-
-      <RoundsPanel billboardId={billboardId} />
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <PricingPanel billboardId={billboardId} />
-        <EventPanel billboardId={billboardId} />
-        <TopUpPanel />
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------- devices and queue
-
-const MODE_LABEL: Record<Device["mode"], string> = {
-  announce: "Announcing a spot",
-  auction: "Live auction",
-  negotiation: "Negotiating",
-  settling: "Winner paying",
-  playing: "Playing a paid ad",
-  your_ad_here: "Waiting",
-};
-
-function Devices({ devices, queue, now, active }: { devices: Live["devices"]; queue: Live["queue"]; now: number; active: Id<"billboards"> }) {
-  return (
-    <section className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-      <div className="flex flex-col gap-3">
-        <p className="text-xs tracking-widest text-muted uppercase">Devices</p>
-        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {devices.map((d) => {
-            // The query never reads the clock: a paid spot that has ended no longer counts as playing.
-            const expired = d.mode === "playing" && d.spotEndAt !== null && now > d.spotEndAt;
-            const mode = expired ? "your_ad_here" : d.mode;
-            const busy = mode !== "your_ad_here";
-            return (
-              <li key={d.billboardId} className={`rounded-lg border bg-panel px-4 py-3 ${d.billboardId === active ? "border-accent/60" : "border-line"}`}>
-                <div className="flex items-start justify-between gap-3">
-                  <p className="truncate text-xl font-semibold">{d.name}</p>
-                  <Pill tone={d.online ? "ok" : "danger"}>{d.online ? "online" : "offline"}</Pill>
-                </div>
-                <p className="tabular mt-2 font-mono text-4xl font-semibold">
-                  {d.peopleInView === null ? "-" : d.peopleInView}
-                  <span className="ml-2 font-sans text-sm font-normal text-muted">{d.peopleInView === null ? "no camera reading" : d.peopleInView === 1 ? "person in view" : "people in view"}</span>
-                </p>
-                <p className={`mt-1 text-sm ${busy ? "text-accent" : "text-muted"}`}>{MODE_LABEL[mode]}</p>
-                <a href={`#/player/${d.billboardId}`} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-accent underline-offset-4 hover:underline">
-                  Open the screen
-                </a>
+        {screen.audienceSummary && <p className="text-sm text-fg">{screen.audienceSummary}</p>}
+        {tags.length > 0 ? (
+          <ul className="flex flex-wrap gap-2 text-sm">
+            {tags.map(([k, w]) => (
+              <li key={k} className="rounded-md border border-line px-2 py-1">
+                {label(k)} <span className="tabular font-mono text-muted">{Math.round(w * 100)}%</span>
               </li>
-            );
-          })}
-        </ul>
-      </div>
-      <div className="flex flex-col gap-3">
-        <p className="text-xs tracking-widest text-muted uppercase">Auction queue</p>
-        <Card className="flex-1">
-          {queue.length === 0 ? (
-            <p className="text-sm text-muted">No screen is waiting. One live auction runs at a time; the next screen to detect a crowd queues here.</p>
-          ) : (
-            <ol className="flex flex-col gap-2">
-              {queue.map((q, i) => (
-                <li key={q.billboardId} className="flex items-baseline justify-between gap-3">
-                  <span className="text-lg">
-                    <span className="tabular mr-2 font-mono text-muted">{i + 1}</span>
-                    {q.name}
-                  </span>
-                  <span className="text-xs text-faint">waiting {ago(q.queuedAt, now)}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-        </Card>
-      </div>
-    </section>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted">Until it's read, every company with an approved ad gets offers.</p>
+        )}
+      </Card>
+    </header>
   );
 }
 
-function PricingPanel({ billboardId }: { billboardId: Id<"billboards"> }) {
-  const screens = useQuery(api.billboards.mine, {});
-  const set = useMutation(api.billboards.setLivePricing);
+function FloorPanel({ screen }: { screen: Screen }) {
+  const set = useMutation(api.billboards.setFloor);
   const { busy, error, run } = useAction();
   const [saved, setSaved] = useState(false);
-  const screen = screens?.find((s) => s._id === billboardId);
-  if (!screen) return null;
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     setSaved(false);
     const ok = await run(async () => {
-      await set({ billboardId, minimumMinor: Math.round(Number(f.get("min")) * 100), cpmMinor: Math.round(Number(f.get("cpm")) * 100) });
+      await set({ billboardId: screen._id, floorMinor: Math.round(Number(f.get("floor")) * 100) });
       return true;
     });
     if (ok) setSaved(true);
   }
   return (
     <Card>
-      <h2 className="font-semibold">Live pricing: {screen.name}</h2>
-      <p className="mt-1 text-sm text-muted">The published minimum no spot sells under, and the starting price per 1,000 views.</p>
-      <form key={`${screen.reserveFloorMinor}${screen.cpmMinor}`} className="mt-4 grid grid-cols-2 gap-4" onSubmit={onSubmit}>
-        <Field label="Minimum price ($)" hint={`Up to ${money(screen.baseRateMinor)}`}>
-          <input name="min" defaultValue={(screen.reserveFloorMinor / 100).toFixed(2)} inputMode="decimal" className={`${inputCls} font-mono`} />
+      <h2 className="font-semibold">Floor price</h2>
+      <p className="mt-1 text-sm text-muted">The least a spot sells for. Each offer is the floor × crowd × demand here × that company's research factor.</p>
+      <form key={screen.reserveFloorMinor} className="mt-4 flex flex-col gap-4" onSubmit={onSubmit}>
+        <Field label="Floor ($ per spot)" hint={`Now ${money(screen.reserveFloorMinor)}`}>
+          <input name="floor" defaultValue={(screen.reserveFloorMinor / 100).toFixed(2)} inputMode="decimal" className={`${inputCls} font-mono`} />
         </Field>
-        <Field label="Starting CPM ($ per 1,000 views)">
-          <input name="cpm" defaultValue={((screen.cpmMinor ?? 500) / 100).toFixed(2)} inputMode="decimal" className={`${inputCls} font-mono`} />
-        </Field>
-        <div className="col-span-2 flex items-center gap-3">
+        <div className="flex items-center gap-3">
           <button type="submit" disabled={busy} className={primaryBtn}>
-            Save pricing
+            Save floor
           </button>
           {saved && <span className="text-sm text-emerald-300">Saved</span>}
         </div>
-        <div className="col-span-2">
-          <ErrorLine error={error} />
-        </div>
+        <ErrorLine error={error} />
       </form>
     </Card>
   );
@@ -219,7 +156,7 @@ function EventPanel({ billboardId }: { billboardId: Id<"billboards"> }) {
   return (
     <Card>
       <h2 className="font-semibold">Add event</h2>
-      <p className="mt-1 text-sm text-muted">An event happening now next to the screen. The pricing agent counts it when it prices the spot.</p>
+      <p className="mt-1 text-sm text-muted">Something happening next to the screen now. It raises the price and starts a sale.</p>
       <form className="mt-4 grid grid-cols-2 gap-4" onSubmit={onSubmit}>
         <Field label="Event name" className="col-span-2">
           <input name="name" required maxLength={80} className={inputCls} placeholder="Startup demo day" />
@@ -259,7 +196,7 @@ function TopUpPanel() {
   return (
     <Card>
       <h2 className="font-semibold">Top up a company</h2>
-      <p className="mt-1 text-sm text-muted">Send $2.00 test USDC from the operator wallet to a company agent's wallet so it can pay (the faucet covers it if the operator wallet is short). Five top-ups a day per company, shared with the company's own faucet top-ups.</p>
+      <p className="mt-1 text-sm text-muted">Send $2.00 test USDC from the operator wallet to a company agent's wallet so it can pay. Five top-ups a day per company.</p>
       {companies === undefined ? null : companies.length === 0 ? (
         <p className="mt-4 text-sm text-muted">No company has set up an agent yet.</p>
       ) : (
@@ -293,11 +230,4 @@ function TopUpPanel() {
       <ErrorLine error={error} />
     </Card>
   );
-}
-
-/** The latest defined value of a query result. */
-function useSticky<T>(value: T | undefined): T | undefined {
-  const last = useRef<T | undefined>(value);
-  if (value !== undefined) last.current = value;
-  return value ?? last.current;
 }

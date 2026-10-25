@@ -4,14 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import {
-  joinCompanies,
-  modules,
-  signedInCustomer,
-  signedInOperator,
-  signedInUser,
-  type TestClient,
-} from "./test.setup";
+import { joinCompanies, modules, signedInCustomer, signedInOperator, signedInUser, type TestClient, quoteFor, holdFor } from "./test.setup";
 import { PLATFORM_AUDIT_TYPES, TENANT_TABLES } from "./migrations";
 
 // 09:07 PDT; slots[8] airs 11:15 local (2 h out).
@@ -48,7 +41,7 @@ async function marketplace() {
   const seed = await hostA.mutation(internal.seed.demo, {});
   await hostA.mutation(internal.seed.finance, {});
   const hostB = await signedInOperator(anon, "b@mission.test", "Mission Screens");
-  const billboardB = await hostB.mutation(api.billboards.create, {
+  const billboardB = await hostB.mutation(internal.billboards.create, {
     name: "Mission Street Screen",
     city: "San Francisco",
     locationLabel: "Mission St & 16th",
@@ -151,7 +144,6 @@ describe("host isolation", () => {
       m.hostB.query(api.audit.recent, { workspaceId: m.workspaceA }),
       m.hostB.query(api.dashboard.summary, { workspaceId: m.workspaceA }),
       m.hostB.query(api.collections.tasks, { workspaceId: m.workspaceA }),
-      m.hostB.query(api.valuation.list, { workspaceId: m.workspaceA }),
       m.hostB.mutation(api.finance.runReconciliation, { workspaceId: m.workspaceA }),
     ]) {
       expect(await errorCode(call)).toBe("NOT_WORKSPACE_MEMBER");
@@ -159,13 +151,10 @@ describe("host isolation", () => {
     expect((await m.hostB.query(api.billboards.mine, {})).map((b) => b._id)).toEqual([m.billboardB]);
   });
 
-  test("host B can't change host A's screens, auctions, holds or approvals", async () => {
+  test("host B can't change host A's screens, holds or approvals", async () => {
     const m = await marketplace();
     const bb = m.seed.billboardId;
     const slot = m.slotsA[8]._id;
-    expect(await errorCode(m.hostB.mutation(api.billboards.setAudienceBaseline, { billboardId: bb, peoplePer15Min: 5 }))).toBe(
-      "NOT_WORKSPACE_MEMBER",
-    );
     expect(
       await errorCode(m.hostB.mutation(api.billboards.setAudienceTags, { billboardId: bb, audienceTags: { finance: 1 } })),
     ).toBe("NOT_WORKSPACE_MEMBER");
@@ -174,10 +163,9 @@ describe("host isolation", () => {
         m.hostB.mutation(api.audience.addArrivals, { billboardId: bb, arrivals: 1, peakInView: 1, confidence: 1, source: "camera" }),
       ),
     ).toBe("NOT_WORKSPACE_MEMBER");
-    expect(await errorCode(m.hostB.mutation(api.auctions.open, { slotIds: [slot] }))).toBe("NOT_WORKSPACE_MEMBER");
 
-    const q = await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slot] });
-    const hold = await m.custA.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "hA", actor: "web" });
+    const q = await quoteFor(m.custA, { campaignId: m.campaignA, slotIds: [slot] });
+    const hold = await holdFor(m.custA, q, "hA", "web");
     await expect(m.anon.mutation(internal.payments.recordVerified, {
       holdId: hold.holdId,
       provider: "x402",
@@ -211,7 +199,7 @@ describe("host isolation", () => {
     expect((await m.hostA.query(api.creatives.pendingReview, {})).map((r) => r.campaignId)).toEqual([m.campaignA]);
   });
 
-  test("separation of duties is per workspace; company overrides are per workspace", async () => {
+  test("separation of duties is per workspace", async () => {
     const m = await marketplace();
     const controllerA = await signedInOperator(m.anon, "controller@moscone.test");
     const inv = (await m.anon.run(async (ctx) => ctx.db.query("invoices").withIndex("by_number", (x) => x.eq("number", "INV-1013")).unique()))!;
@@ -221,23 +209,11 @@ describe("host isolation", () => {
     ).toBe("SOD_VIOLATION");
     const r = await controllerA.mutation(api.approvals.decide, { approvalId: req.approvalId, decision: "approved", note: "ok" });
     expect(r.status).toBe("approved");
-
-    // Host B pins Golden Gate at x1.5 in ITS workspace (after Golden Gate quoted B); host A's quotes don't change.
-    const slotsB0 = await m.anon.query(api.slots.listForBillboard, { billboardId: m.billboardB, from: START, to: START + 24 * 60 * MIN });
-    await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slotsB0[7]._id] });
-    await m.hostB.mutation(api.valuation.override, { advertiserId: m.seed.advertiserIds[0], multiplier: 1.5, reason: "B only" });
-    const qa = await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [m.slotsA[8]._id] });
-    expect(qa.amountMinor).toBe(qa.priceBreakdown[0].screenMinor);
-    const slotsB = await m.anon.query(api.slots.listForBillboard, { billboardId: m.billboardB, from: START, to: START + 24 * 60 * MIN });
-    const qb = await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slotsB[8]._id] });
-    expect(qb.amountMinor).toBe(Math.round(qb.priceBreakdown[0].screenMinor * 1.5));
-    const listA = await m.hostA.query(api.valuation.list, {});
-    expect(listA.find((x) => x.advertiserId === m.seed.advertiserIds[0])?.assessment?.method).not.toBe("override");
   });
 });
 
 describe("customer isolation", () => {
-  test("customer B can't see or act on customer A's campaigns, quotes, holds or bids", async () => {
+  test("customer B can't see or act on customer A's campaigns or holds", async () => {
     const m = await marketplace();
     expect((await m.custA.query(api.campaigns.list, {})).map((c) => c._id)).toEqual([m.campaignA]);
     expect((await m.custB.query(api.campaigns.list, {})).map((c) => c._id)).toEqual([m.campaignB]);
@@ -246,13 +222,9 @@ describe("customer isolation", () => {
       await errorCode(m.custB.mutation(api.campaigns.create, { advertiserId: m.seed.advertiserIds[0], brief: "x", budgetMinor: 100 })),
     ).toBe("NOT_COMPANY_MEMBER");
     const slot = m.slotsA[8]._id;
-    expect(await errorCode(m.custB.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slot] }))).toBe("NOT_COMPANY_MEMBER");
 
-    const q = await m.custA.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [slot] });
-    expect(await errorCode(m.custB.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "steal", actor: "x" }))).toBe(
-      "NOT_COMPANY_MEMBER",
-    );
-    const hold = await m.custA.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "mine-1", actor: "web" });
+    const q = await quoteFor(m.custA, { campaignId: m.campaignA, slotIds: [slot] });
+    const hold = await holdFor(m.custA, q, "mine-1", "web");
     expect(await errorCode(m.custB.mutation(api.holds.release, { holdId: hold.holdId, idempotencyKey: "mine-1" }))).toBe(
       "NOT_COMPANY_MEMBER",
     );
@@ -263,32 +235,17 @@ describe("customer isolation", () => {
     expect(
       await errorCode(m.custB.mutation(api.creatives.attach, { campaignId: m.campaignA, storageId, contentType: "image/png" })),
     ).toBe("NOT_COMPANY_MEMBER");
-
-    const { auctionId } = await m.hostA.mutation(api.auctions.open, { slotIds: [m.slotsA[10]._id] });
-    const joinA = await m.custA.mutation(api.auctions.join, { auctionId, campaignId: m.campaignA });
-    expect(await errorCode(m.custB.mutation(api.auctions.join, { auctionId, campaignId: m.campaignA }))).toBe("NOT_COMPANY_MEMBER");
-    // Even holding A's bidder key, B can't bid or read status as A.
-    const asA = { auctionId, campaignId: m.campaignA, bidderKey: joinA.bidderKey };
-    expect(await errorCode(m.custB.mutation(api.auctions.bid, { ...asA, amountMinor: 9000 }))).toBe("NOT_COMPANY_MEMBER");
-    expect(await errorCode(m.custB.mutation(api.auctions.setAutoBid, { ...asA, maxMinor: 9000 }))).toBe("NOT_COMPANY_MEMBER");
-    expect(await errorCode(m.custB.query(api.auctions.myStatus, asA))).toBe("NOT_COMPANY_MEMBER");
-    await expect(m.custA.mutation(api.auctions.bid, { ...asA, amountMinor: 9000 })).resolves.toMatchObject({ leading: true });
   });
 
   test("customer actions need sign-in; marketplace browsing stays public", async () => {
     const m = await marketplace();
     const { anon } = m;
     expect(await errorCode(anon.query(api.campaigns.list, {}))).toBe("UNAUTHENTICATED");
-    expect(await errorCode(anon.mutation(api.quotes.create, { campaignId: m.campaignA, slotIds: [m.slotsA[8]._id] }))).toBe(
-      "UNAUTHENTICATED",
-    );
     expect(await errorCode(anon.mutation(api.creatives.generateUploadUrl, {}))).toBe("UNAUTHENTICATED");
     const hostOnly = await signedInUser(anon, "nobody@nowhere.test");
     expect(await errorCode(hostOnly.mutation(api.campaigns.create, { brief: "x", budgetMinor: 100 }))).toBe("NO_COMPANY");
 
     expect((await anon.query(api.billboards.list, {})).length).toBe(2);
-    expect((await anon.query(api.billboards.recommend, { targetAudience: { software: 1 } })).length).toBe(2);
-    await expect(anon.query(api.auctions.live, { now: Date.now() })).resolves.toBeDefined();
     await expect(anon.query(api.player.nowPlaying, { billboardId: m.billboardB, atMinute: START })).resolves.toBeDefined();
   });
 });
@@ -300,10 +257,10 @@ describe("tenancy migration", () => {
     const seed = await op.mutation(internal.seed.demo, {});
     await op.mutation(internal.seed.finance, {});
     await joinCompanies(op);
-    // Produce rows in many tables: quote, hold, x402 payment, booking, auction, reconciliation, collections.
+    // Produce rows in many tables: quote, hold, x402 payment, booking, reconciliation, collections.
     const slots = await t.query(api.slots.listForBillboard, { billboardId: seed.billboardId, from: START, to: START + 24 * 60 * MIN });
-    const q = await op.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[8]._id] });
-    const h = await op.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "m1", actor: "web" });
+    const q = await quoteFor(op, { campaignId: seed.campaignId, slotIds: [slots[8]._id] });
+    const h = await holdFor(op, q, "m1", "web");
     await op.mutation(internal.payments.recordVerified, {
       holdId: h.holdId,
       provider: "x402",
@@ -313,13 +270,12 @@ describe("tenancy migration", () => {
       network: "eip155:84532",
       idempotencyKey: "x402:pre-migration",
     });
-    await op.mutation(api.auctions.open, { slotIds: [slots[12]._id] });
     await op.mutation(internal.reconciliation.run, {});
     await op.mutation(internal.collections.plan, {});
 
     // A second, already-tenanted workspace whose legacy children must follow their billboard.
     const other = await signedInOperator(t, "b@mission.test", "Mission Screens");
-    const billboardB = await other.mutation(api.billboards.create, {
+    const billboardB = await other.mutation(internal.billboards.create, {
       name: "Mission Street Screen",
       city: "San Francisco",
       locationLabel: "Mission St",

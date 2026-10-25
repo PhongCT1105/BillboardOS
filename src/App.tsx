@@ -7,7 +7,7 @@ import type { Id } from "../convex/_generated/dataModel";
 import { useHashParams, useHashRoute } from "./lib/hooks";
 import { ConsolePage } from "./console/ConsolePage";
 import { PlayerPage } from "./player/PlayerPage";
-import { BookPage } from "./book/BookPage";
+import { ScreenPage } from "./screens/ScreenPage";
 import { FinancePage } from "./finance/FinancePage";
 import { SensorPage } from "./sensor/SensorPage";
 import { SignInPage } from "./auth/SignInPage";
@@ -34,7 +34,9 @@ export function App() {
   }, [route]);
   if (route === "/" || route === "/landing") return <LandingPage />;
   if (route === "/demo") return <DemoPage />;
-  // The screen itself stays public by billboard id. `?camera=1` also counts people on this device.
+  // A device that becomes (or already is) a screen: pairing code, then the player with a heartbeat.
+  if (route === "/screen") return <ScreenPage camera={params.get("camera") === "1"} />;
+  // The screen itself stays public by billboard id (a preview: no heartbeat). `?camera=1` also counts people on this device.
   const playerMatch = route.match(/^\/player\/([^/]+)$/);
   if (playerMatch)
     return (
@@ -80,7 +82,7 @@ function Shell({ route }: { route: string }) {
                 </NavLink>
                 <NavLink
                   href="#/customer/displays"
-                  active={route === "/book" || route === "/customer/displays"}
+                  active={route === "/customer/displays"}
                 >
                   Find displays
                 </NavLink>
@@ -129,21 +131,10 @@ function HostArea({ route }: { route: string }) {
   if (route === "/finance") return <FinancePage />;
   if (route === "/workspace") return <WorkspacePage />;
   if (route === "/moment") return <MomentPage />;
-  if (route === "/book") {
-    return (
-      <main className="mx-auto max-w-[1400px] px-4 py-16 md:px-6">
-        <p className="text-muted">
-          Booking is for customer accounts. Sign in with a customer account to
-          buy ad time.
-        </p>
-      </main>
-    );
-  }
   return <ConsolePage />;
 }
 
 function CustomerArea({ me, route }: { me: Me; route: string }) {
-  if (route === "/book") return <BookPage />;
   const tabMatch = route.match(/^\/customer(?:\/([a-z]+))?$/);
   if (
     tabMatch ||
@@ -187,10 +178,12 @@ function HostNav({ route }: { route: string }) {
       >
         Dashboard
       </NavLink>
+      <NavLink href="#/moment" active={route === "/moment"}>
+        Live sales
+      </NavLink>
       <details className="demo-header-tools">
         <summary>More</summary>
         <div className="demo-advanced-menu">
-          <a href="#/moment">Live moment</a>
           <a href="#/finance">Finance</a>
           <a href="#/workspace">Workspace settings</a>
           {first && <a href={`#/sensor/${first._id}`}>Audience sensor</a>}

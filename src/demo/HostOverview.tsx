@@ -2,6 +2,7 @@ import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { money } from "../lib/format";
 import { Displays } from "./Displays";
+import { LiveSales } from "./LiveSales";
 import { DashboardSkeleton, Metrics } from "./ui";
 
 export function HostOverview() {
@@ -44,6 +45,7 @@ export function HostOverview() {
           },
         ]}
       />
+      <LiveSales />
       <Displays
         displays={screens.map((s) => ({
           id: s._id,

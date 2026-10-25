@@ -1,6 +1,5 @@
 import type { MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
-import { scheduleMatch } from "../watch";
 
 export const SLOT_MS = 15 * 60 * 1000;
 /** Keep this much future inventory available on every billboard. */
@@ -41,7 +40,5 @@ export async function ensureUpcomingSlots(
     startAt += SLOT_MS;
     created++;
   }
-  // New inventory: let watch rules see it (no-op when nobody is watching).
-  if (created > 0) await scheduleMatch(ctx, { billboardIds: [billboardId], reason: "slots generated" });
   return created;
 }

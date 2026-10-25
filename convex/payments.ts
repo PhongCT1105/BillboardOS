@@ -4,11 +4,9 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { financeExceptionKind, paymentProvider } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { ACCEPTED_PAYMENT_ASSETS, MAX_KEY_LENGTH } from "./lib/constants";
-import { creativeReady, onMomentPaid } from "./lib/momentHooks";
+import { creativeReady } from "./lib/sale";
 import { onRoundPaid } from "./lib/roundHooks";
 import { scheduleBooking } from "./lib/scheduling";
-import { recordSaleHistory } from "./lib/marketHistory";
-import { markAuctionSettled } from "./auctions";
 
 /**
  * Result of reporting a verified payment. Discriminated on `outcome`:
@@ -290,31 +288,13 @@ export async function applyVerifiedPayment(
     data: { holdId: hold._id, quoteId: hold.quoteId, slotIds: hold.slotIds, paymentId },
   });
 
-  // Market evidence for future quotes (market-history stage).
-  const booked = await ctx.db.get(bookingId);
-  if (booked) {
-    const liveMoment = await ctx.db.query("moments").withIndex("by_hold", (q) => q.eq("holdId", hold._id)).first();
-    const round = liveMoment ? null : await ctx.db.query("rounds").withIndex("by_hold", (q) => q.eq("holdId", hold._id)).first();
-    const live = liveMoment ?? round;
-    await recordSaleHistory(
-      ctx,
-      booked,
-      (live || hold.auctionId) ? "auction" : "posted",
-      now,
-      live ? live.spotEndAt - live.spotStartAt : undefined,
-    );
-  }
-  await markAuctionSettled(ctx, hold, bookingId);
-
   // Creative already approved (platform-wide, or ready for this host's screens) -> straight to scheduled (P0-07, ADR 0006).
   const campaign = await ctx.db.get(quote.campaignId);
   if (campaign && (await creativeReady(ctx, campaign, hold.workspaceId))) {
     const booking = await ctx.db.get(bookingId);
     if (booking) await scheduleBooking(ctx, booking, now, "system");
   }
-  // Live moment (ADR 0006): payment settled -> timeline.
-  await onMomentPaid(ctx, hold._id, bookingId, { provider: args.provider, externalRef: args.externalRef, network: args.network, amountMinor: args.amountMinor });
-  // Bidding round: payment settled -> the round is paid (the player plays the booking).
+  // Round: payment settled -> the round is paid (the player plays the booking).
   await onRoundPaid(ctx, hold._id, bookingId, { provider: args.provider, externalRef: args.externalRef, network: args.network, amountMinor: args.amountMinor });
 
   return { outcome: "booked", paymentId, bookingId, replayed: false };

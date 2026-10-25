@@ -1,8 +1,7 @@
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
-import { ago, money } from "../lib/format";
+import { ago, money, txUrl } from "../lib/format";
 import { useNow } from "../lib/hooks";
-import { txUrl } from "../a2a/NegotiationTimeline";
 
 /** Data-product revenue (ADR 0005): audience reports sold by the seller agent over x402. Its own revenue line. */
 export function DataSales() {
