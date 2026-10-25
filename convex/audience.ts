@@ -4,7 +4,7 @@ import { audienceSource } from "./schema";
 
 import { AUDIENCE_BUCKET_MS } from "./lib/pricing";
 import { requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
-import { scheduleDetect } from "./moments";
+import { internal } from "./_generated/api";
 
 export { AUDIENCE_BUCKET_MS };
 const MAX_COUNT = 100_000;
@@ -65,8 +65,8 @@ export const record = mutation({
       source: args.source,
       confidence: args.confidence,
     };
-    // Live moment detector (ADR 0006) re-checks after every reading.
-    await scheduleDetect(ctx, args.billboardId, "arrivals");
+    // Bidding rounds: a camera reading may start a round (priced on this reading; scheduled so it's saved first).
+    await ctx.scheduler.runAfter(0, internal.rounds.trigger, { billboardId: args.billboardId, trigger: "camera" });
     if (existing) {
       await ctx.db.patch(existing._id, fields);
       return { aggregateId: existing._id, bucketStart };
@@ -141,8 +141,8 @@ export const addArrivals = mutation({
       )
       .first();
 
-    // Live moment detector (ADR 0006) re-checks after new arrivals.
-    if (args.arrivals > 0) await scheduleDetect(ctx, args.billboardId, "arrivals");
+    // Bidding rounds: new arrivals may start a round (priced on this reading; scheduled so it's saved first).
+    if (args.arrivals > 0) await ctx.scheduler.runAfter(0, internal.rounds.trigger, { billboardId: args.billboardId, trigger: "camera" });
     if (existing) {
       const countEstimate = Math.min(MAX_COUNT, existing.countEstimate + args.arrivals);
       const peakInView = Math.max(existing.peakInView ?? 0, args.peakInView);

@@ -382,3 +382,61 @@ describe("rounds: award, pay, runner-up", () => {
     expect((await w.bids(id)).find((b) => b._id === r.winnerBidId)?.advertiserId).toBe(rivet.advertiserId);
   });
 });
+
+describe("rounds: triggers", () => {
+  const roundsOn = (w: { t: TestClient; led: Id<"billboards"> }) =>
+    w.t.run(async (ctx) =>
+      ctx.db
+        .query("rounds")
+        .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", w.led))
+        .take(20),
+    );
+  const camera = (w: { host: TestClient; led: Id<"billboards"> }, people: number) =>
+    w.host.mutation(api.audience.addArrivals, { billboardId: w.led, arrivals: people, peakInView: people, confidence: 1, source: "camera" });
+
+  test("S5: the camera starts a round priced on the crowd; an agent capped under the asking price still wins", async () => {
+    const w = await world();
+    await camera(w, 6);
+    await flush(w.t);
+    const [r] = await roundsOn(w);
+    expect(r).toMatchObject({ trigger: "camera", crowd: 6, floorMinor: 100, askingMinor: 200 });
+    expect(r.signals[0]).toMatchObject({ key: "crowd", factor: 2 });
+    await w.bid(w.companies[0], r._id, 150);
+    await w.bid(w.companies[1], r._id, null);
+    expect(await w.round(r._id)).toMatchObject({ status: "awarded", priceMinor: 150 });
+  });
+
+  test("S10: the camera waits 60 s after a round; Sell now doesn't", async () => {
+    const w = await world();
+    const id = (await w.start("camera"))!;
+    await w.bid(w.companies[0], id, null);
+    await w.bid(w.companies[1], id, null);
+    expect((await w.round(id)).status).toBe("unsold");
+    expect(await w.start("camera")).toBeNull();
+    const now = await w.host.mutation(api.rounds.sellNow, { billboardId: w.led });
+    expect(now.roundId).not.toBeNull();
+    expect((await w.host.mutation(api.rounds.sellNow, { billboardId: w.led })).reason).toMatch(/already running/);
+  });
+
+  test("review: a burst of camera arrivals starts exactly one round", async () => {
+    const w = await world();
+    await camera(w, 2);
+    await camera(w, 3);
+    await camera(w, 4);
+    await flush(w.t);
+    expect(await roundsOn(w)).toHaveLength(1);
+  });
+
+  test("S12: auto-sell is off by default; on, it starts one round per idle online screen, at most one per 2 minutes", async () => {
+    const w = await world();
+    await w.t.mutation(internal.rounds.autoSellTick, {});
+    expect(await roundsOn(w)).toHaveLength(0);
+    await w.host.mutation(api.rounds.setAutoSell, { enabled: true });
+    await w.t.mutation(internal.rounds.autoSellTick, {});
+    expect((await roundsOn(w)).map((r) => r.trigger)).toEqual(["timer"]);
+    vi.advanceTimersByTime(60_000);
+    await w.t.finishInProgressScheduledFunctions();
+    await w.t.mutation(internal.rounds.autoSellTick, {});
+    expect(await roundsOn(w)).toHaveLength(1);
+  });
+});

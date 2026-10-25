@@ -1,5 +1,5 @@
 import { ConvexError, v, type Infer } from "convex/values";
-import { internalMutation, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { roundTrigger } from "./schemaParts/rounds";
@@ -11,8 +11,9 @@ import { holdLockKey, lockHeld } from "./lib/paymentLock";
 import { PRICING_POLICY_VERSION } from "./lib/pricing";
 import { endHold, takeHold } from "./holds";
 import { creativeReady } from "./lib/momentHooks";
-import { CAMERA_COOLDOWN_MS, MAX_INVITES, ROUND_CLOSE_MS, askingPrice, closeOutcome, priceSignals } from "./lib/rounds";
+import { AUTO_SELL_GAP_MS, CAMERA_COOLDOWN_MS, MAX_INVITES, ROUND_CLOSE_MS, askingPrice, closeOutcome, priceSignals } from "./lib/rounds";
 import { activeEvent, spentTodayForAdvertiserMinor } from "./moments";
+import { requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
 
 /**
  * Simple bidding rounds (spec 2026-10-24-simple-bidding-rounds-design):
@@ -31,6 +32,8 @@ const SOLD_ELSEWHERE = "Spot was sold elsewhere.";
 const ROUND_HOLD_TTL_MS = 3 * 60_000;
 /** While a payment is settling at the pay deadline, look again this much later (within the hold's TTL). */
 const PAY_RECHECK_MS = 20_000;
+const MAX_AUTO_WORKSPACES = 50;
+const MAX_AUTO_SCREENS = 20;
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 
@@ -468,5 +471,72 @@ export const submitBid = internalMutation({
     const bids = await bidsOf(ctx, round._id);
     if (bids.every((b) => b.status !== "invited")) await closeRoundCore(ctx, round._id);
     return { status: args.amountMinor === null ? ("passed" as const) : ("bid" as const) };
+  },
+});
+
+// ---------------------------------------------------------------- triggers
+
+/**
+ * Camera arrivals and a live event start a round through here. Scheduled
+ * (not called inline) so the round prices on the reading that was just saved.
+ */
+export const trigger = internalMutation({
+  args: { billboardId: v.id("billboards"), trigger: roundTrigger },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await startRoundCore(ctx, args.billboardId, args.trigger);
+    return null;
+  },
+});
+
+/** The host's "Sell now": start a round on this screen right away (no camera cooldown). */
+export const sellNow = mutation({
+  args: { billboardId: v.id("billboards") },
+  returns: v.object({ roundId: v.union(v.id("rounds"), v.null()), reason: v.union(v.string(), v.null()) }),
+  handler: async (ctx, args) => {
+    await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
+    const last = await latestRound(ctx, args.billboardId);
+    if (last && (last.status === "bidding" || last.status === "awarded")) {
+      return { roundId: null, reason: "A round is already running on this screen." };
+    }
+    const roundId = await startRoundCore(ctx, args.billboardId, "sell_now");
+    return roundId
+      ? { roundId, reason: null }
+      : { roundId: null, reason: "Nothing on air to sell: the current spot is sold or ends in under 3 minutes, and the next one isn't free." };
+  },
+});
+
+/** Turn "auto-sell when idle" on or off for the workspace (off by default: every sale spends testnet USDC). */
+export const setAutoSell = mutation({
+  args: { workspaceId: v.optional(v.id("workspaces")), enabled: v.boolean() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    await requireWorkspaceMember(ctx, me.workspaceId);
+    await ctx.db.patch(me.workspaceId, { autoSellRounds: args.enabled });
+    return null;
+  },
+});
+
+/** Every minute: for workspaces with auto-sell on, a round on each online screen idle for 2 minutes. */
+export const autoSellTick = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const now = Date.now();
+    const workspaces = await ctx.db.query("workspaces").take(MAX_AUTO_WORKSPACES * 4);
+    for (const ws of workspaces.filter((w) => w.autoSellRounds).slice(0, MAX_AUTO_WORKSPACES)) {
+      const screens = await ctx.db
+        .query("billboards")
+        .withIndex("by_workspace", (q) => q.eq("workspaceId", ws._id))
+        .take(MAX_AUTO_SCREENS);
+      for (const screen of screens) {
+        if (screen.deviceStatus !== "online") continue;
+        const last = await latestRound(ctx, screen._id);
+        if (last && now - last.createdAt < AUTO_SELL_GAP_MS) continue;
+        await startRoundCore(ctx, screen._id, "timer");
+      }
+    }
+    return null;
   },
 });

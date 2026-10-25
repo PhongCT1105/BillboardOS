@@ -165,7 +165,15 @@ async function liveWorld() {
 
   /** The camera reports `people` in view on a screen (as the host's sensor laptop). */
   async function camera(billboardId: Id<"billboards">, people: number) {
-    return await host.mutation(api.audience.addArrivals, { billboardId, arrivals: people, peakInView: people, confidence: 1, source: "camera" });
+    const result = await host.mutation(api.audience.addArrivals, { billboardId, arrivals: people, peakInView: people, confidence: 1, source: "camera" });
+    // Bidding rounds replaced the live moment on the camera path; these tests drive the dormant moment detector as the camera used to.
+    await t.run(async (ctx) => {
+      for (const s of await ctx.db.system.query("_scheduled_functions").take(200)) {
+        if (s.name.startsWith("rounds") && s.state.kind === "pending") await ctx.scheduler.cancel(s._id);
+      }
+      await momentsModule.scheduleDetect(ctx, billboardId, "arrivals");
+    });
+    return result;
   }
 
   /** Run everything scheduled "now", step by step, without jumping the clock. */

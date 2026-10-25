@@ -18,4 +18,7 @@ crons.interval("autopilot plan", { minutes: 1 }, internal.autopilot.planAll, {})
 // Finance autopilot: the AR clerk reconciles new bank lines and chases what is still open.
 crons.interval("finance autopilot", { minutes: 5 }, internal.financeAutopilot.tick, {});
 
+// Bidding rounds: auto-sell idle screens (only for workspaces that turned it on).
+crons.interval("auto-sell rounds", { minutes: 1 }, internal.rounds.autoSellTick, {});
+
 export default crons;
