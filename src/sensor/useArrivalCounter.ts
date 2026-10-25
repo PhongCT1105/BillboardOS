@@ -32,6 +32,15 @@ export type AudienceFrame = {
 
 const round3 = (n: number) => Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000;
 
+/** What went wrong with the camera, in words an operator can act on. */
+function cameraProblem(err: unknown): string {
+  const name = err instanceof DOMException ? err.name : "";
+  if (name === "NotAllowedError") return "Camera blocked: allow camera access for this site, then reload.";
+  if (name === "NotReadableError") return "Camera busy: close other apps or tabs using it, then reload.";
+  if (name === "NotFoundError" || name === "OverconstrainedError") return "No camera found on this device.";
+  return err instanceof Error ? err.message : "Camera unavailable";
+}
+
 /**
  * Runs person detection on the camera in the browser and tracks each person across
  * frames, so someone is one arrival however long they stay. Frames never leave the
@@ -98,7 +107,7 @@ export function useArrivalCounter(
         await el.play();
         loop();
       } catch (err) {
-        if (!cancelled) setState({ status: "error", message: err instanceof Error ? err.message : "Camera unavailable" });
+        if (!cancelled) setState({ status: "error", message: cameraProblem(err) });
       }
     }
 

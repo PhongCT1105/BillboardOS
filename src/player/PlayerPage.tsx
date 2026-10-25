@@ -221,6 +221,18 @@ function AudienceSensor({ device, windows, now, onPeople }: { device: Device | n
     }
   }, [onAir, now, running, device, audience, reportWindow]);
 
-  // In the page so the browser keeps decoding the camera, but invisible: the billboard shows only the ad.
-  return <video ref={video} muted playsInline aria-hidden className="pointer-events-none fixed top-0 left-0 h-px w-px opacity-0" />;
+  // Nothing of the camera shows, but if it isn't counting the operator needs to know why.
+  const problem =
+    state.status === "error" ? state.message : state.status === "camera" ? "Waiting for camera access: allow it in the browser to count people." : state.status === "loading" ? "Starting the people counter…" : null;
+  return (
+    <>
+      {/* In the page so the browser keeps decoding the camera, but invisible: the billboard shows only the ad. */}
+      <video ref={video} muted playsInline aria-hidden className="pointer-events-none fixed top-0 left-0 h-px w-px opacity-0" />
+      {problem && (
+        <p role="status" className="absolute top-4 left-4 max-w-[40ch] rounded-md bg-black/70 px-3 py-1.5 text-[clamp(0.75rem,1vw,0.95rem)] text-white">
+          {problem}
+        </p>
+      )}
+    </>
+  );
 }
