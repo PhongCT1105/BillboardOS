@@ -9,8 +9,9 @@ import { errorMessage } from "../lib/format";
  * #/screen: this device becomes one screen. It keeps a random key in this
  * browser, shows a pairing code until a host claims it in "Add a screen",
  * then plays its screen and sends a heartbeat every 10 s (that is what
- * "online" means). `?camera=1` also runs the person detector in a small
- * window and sends how many people are in view with each heartbeat.
+ * "online" means). `?camera=1` also runs the person detector (nothing of the
+ * camera shows on screen) and sends how many people are in view with each
+ * heartbeat, the live view's boxes while someone watches, and each window's audience.
  */
 
 const STORE = "billboardos.device";
@@ -100,7 +101,7 @@ export function ScreenPage({ camera }: { camera: boolean }) {
     return () => clearInterval(timer);
   }, [device, heartbeat]);
 
-  if (status?.billboardId) return <PlayerPage billboardId={status.billboardId} camera={camera} onPeople={onPeople} />;
+  if (status?.billboardId) return <PlayerPage billboardId={status.billboardId} camera={camera} onPeople={onPeople} device={device} />;
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center gap-8 bg-ink px-4 text-center text-fg">

@@ -1136,6 +1136,7 @@ export const companyRole = v.union(v.literal("owner"), v.literal("member"));
 import { knowledgeTables } from "./schemaParts/knowledge";
 import { roundTables } from "./schemaParts/rounds";
 import { salesTables } from "./schemaParts/sales";
+import { liveAudienceTables } from "./schemaParts/liveAudience";
 import { autopilotTables } from "./lib/autopilotSchema";
 export default defineSchema({
   // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
@@ -1143,6 +1144,7 @@ export default defineSchema({
   ...knowledgeTables,
   ...roundTables,
   ...salesTables,
+  ...liveAudienceTables,
   ...autopilotTables,
 
   /** One per user: which side of the marketplace they signed up for. */

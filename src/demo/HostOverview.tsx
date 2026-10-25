@@ -8,6 +8,7 @@ import { LiveSales } from "./LiveSales";
 import { DashboardSkeleton } from "./ui";
 import { ArrowRight, CheckCircle, Warning } from "@phosphor-icons/react";
 import { useEffect } from "react";
+import { ReportToast, audienceText, useNewReport, windowTime } from "../audience/LiveAudience";
 
 export function HostOverview({ focusDisplays = false }: { focusDisplays?: boolean }) {
   const screens = useQuery(api.billboards.mine, {});
@@ -47,6 +48,7 @@ export function HostOverview({ focusDisplays = false }: { focusDisplays?: boolea
         <PlaybackSummary completed={summary.billboards.reduce((sum, b) => sum + b.slotCounts.played, 0)} />
       </aside>
       </div>
+      <WindowAudienceToast />
       {summary.billboards.some((b) => b.openExceptions > 0) && (
         <a href="#/console?tools=1" className="demo-text-link text-danger">
           {summary.totals.openExceptions} open finance{" "}
@@ -61,6 +63,19 @@ export function HostOverview({ focusDisplays = false }: { focusDisplays?: boolea
         </p>
       )}
     </div>
+  );
+}
+
+/** A notice each time one of the host's screens reports a window's audience. */
+function WindowAudienceToast() {
+  const rows = useQuery(api.liveAudience.hostWindows, { limit: 5 });
+  const [fresh, dismiss] = useNewReport(rows, () => true);
+  return (
+    <ReportToast
+      title={fresh ? `${fresh.screen} · window at ${windowTime(fresh.spotStartAt)} (${fresh.company ?? "house ad"})` : null}
+      detail={fresh ? audienceText(fresh.audience) : null}
+      onDismiss={dismiss}
+    />
   );
 }
 

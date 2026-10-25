@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { preconnect } from "react-dom";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -24,17 +24,21 @@ type Window = Screen["windows"][number];
 /**
  * Fullscreen billboard. Back-to-back 30-second windows: each plays the ad
  * that won it once it is paid; otherwise our house ad. A strip shows the
- * next window's live sale. With the camera on, a small window runs the person
- * detector and reports how many people are in view (it feeds the price).
+ * next window's live sale. With the camera on, the person detector runs
+ * invisibly and reports how many people are in view (it feeds the price); on
+ * a paired device it also feeds the live view and each window's audience.
  */
 export function PlayerPage({
   billboardId,
   camera = false,
   onPeople,
+  device = null,
 }: {
   billboardId: Id<"billboards">;
   camera?: boolean;
   onPeople?: (inView: number) => void;
+  /** The paired device this page runs on (#/screen); a preview has none and reports nothing. */
+  device?: Device | null;
 }) {
   const now = useNow(TICK_MS);
   const screen = useLast(useQuery(api.player.screenState, { billboardId }));
@@ -92,7 +96,7 @@ export function PlayerPage({
         )}
       </div>
       <NextSale screen={screen} now={now} playing={playing} />
-      {camera && <CameraWindow onPeople={onPeople} />}
+      {camera && <AudienceSensor device={device} windows={screen.windows} now={now} onPeople={onPeople} />}
     </div>
   );
 }
@@ -148,47 +152,75 @@ function NextSale({ screen, now, playing }: { screen: Screen; now: number; playi
   );
 }
 
+type Device = { deviceId: Id<"screenDevices">; deviceKey: string };
+
+/** Live view frames per second while someone watches: 3. */
+const LIVE_FRAME_MS = 333;
+/** A window is reported only if the camera was counting from (nearly) its start. */
+const FROM_START_MS = 2_000;
+const RETRY_MS = 3_000;
+
 /**
- * The people counter: a small camera window in the corner running the person
- * detector (EfficientDet-Lite0, a TensorFlow Lite CNN, in the browser). Frames
- * never leave the device; only the count is reported.
+ * The people counter, with nothing of the camera on screen: the person detector
+ * (EfficientDet-Lite0) and a face model run on the camera in the browser. Frames
+ * never leave the device. It reports how many people are in view (it feeds the
+ * price), sends boxes only while the host or the payer has the live view open,
+ * and when each window ends, what the camera saw during it.
  */
-function CameraWindow({ onPeople }: { onPeople?: (inView: number) => void }) {
+function AudienceSensor({ device, windows, now, onPeople }: { device: Device | null; windows: Window[]; now: number; onPeople?: (inView: number) => void }) {
   const video = useRef<HTMLVideoElement>(null);
-  const { state } = useArrivalCounter(video, true);
-  const inView = state.status === "running" ? state.inView : null;
+  const { state, audience } = useArrivalCounter(video, true, { attention: true });
+  const running = state.status === "running";
+  const inView = running ? state.inView : null;
   useEffect(() => {
     if (inView !== null) onPeople?.(inView);
   }, [inView, onPeople]);
-  const w = video.current?.videoWidth || 1;
-  const h = video.current?.videoHeight || 1;
-  return (
-    <div className="absolute top-4 right-4 w-[clamp(140px,16vw,240px)] overflow-hidden rounded-lg border border-white/20 bg-black/70">
-      <div className="relative aspect-video">
-        <video ref={video} muted playsInline className="absolute inset-0 h-full w-full -scale-x-100 object-cover" />
-        {state.status === "running" &&
-          state.detections.map((d, i) =>
-            d.boundingBox ? (
-              <div
-                key={i}
-                className="absolute border-2 border-emerald-400"
-                style={{
-                  right: `${(d.boundingBox.originX / w) * 100}%`,
-                  top: `${(d.boundingBox.originY / h) * 100}%`,
-                  width: `${(d.boundingBox.width / w) * 100}%`,
-                  height: `${(d.boundingBox.height / h) * 100}%`,
-                }}
-              />
-            ) : null,
-          )}
-      </div>
-      <p className="px-2 py-1 text-[0.75rem] text-fg">
-        {state.status === "running"
-          ? `${state.inView} ${state.inView === 1 ? "person" : "people"} in view`
-          : state.status === "error"
-            ? state.message
-            : "Starting camera…"}
-      </p>
-    </div>
-  );
+
+  // Live view: a new request (or a renewal) starts the frames; the server says when nobody is watching any more.
+  const wantedUntil = useQuery(api.liveAudience.wanted, device ? { deviceId: device.deviceId } : "skip");
+  const pushFrame = useMutation(api.liveAudience.pushFrame);
+  const [sending, setSending] = useState(false);
+  useEffect(() => {
+    if (wantedUntil) setSending(true);
+  }, [wantedUntil]);
+  useEffect(() => {
+    if (!sending || !device || !running) return;
+    let stopped = false;
+    const timer = setInterval(() => {
+      const frame = audience.liveFrame();
+      if (!frame) return;
+      pushFrame({ ...device, ...frame })
+        .then((r) => {
+          if (!r.wanted && !stopped) setSending(false);
+        })
+        .catch(() => undefined);
+    }, LIVE_FRAME_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [sending, device, running, audience, pushFrame]);
+
+  // Window report: count each window on air from its start; when it ends, send what the camera saw.
+  const reportWindow = useMutation(api.liveAudience.reportWindow);
+  const onAir = windows.find((w) => w.spotStartAt <= now && now < w.spotEndAt) ?? null;
+  const tracked = useRef<{ roundId: Id<"rounds">; fromStart: boolean } | null>(null);
+  useEffect(() => {
+    const ended = tracked.current;
+    if (ended && ended.roundId !== onAir?.roundId) {
+      tracked.current = null;
+      if (device && running && ended.fromStart) {
+        const report = { ...device, roundId: ended.roundId, ...audience.windowStats() };
+        // Reports are idempotent per window, so one retry after a dropped connection is safe.
+        reportWindow(report).catch(() => setTimeout(() => void reportWindow(report).catch(() => undefined), RETRY_MS));
+      }
+    }
+    if (onAir && !tracked.current) {
+      audience.startWindow();
+      tracked.current = { roundId: onAir.roundId, fromStart: running && now - onAir.spotStartAt <= FROM_START_MS };
+    }
+  }, [onAir, now, running, device, audience, reportWindow]);
+
+  // In the page so the browser keeps decoding the camera, but invisible: the billboard shows only the ad.
+  return <video ref={video} muted playsInline aria-hidden className="pointer-events-none fixed top-0 left-0 h-px w-px opacity-0" />;
 }
