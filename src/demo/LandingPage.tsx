@@ -2,11 +2,57 @@ import {
   ArrowRight,
   ArrowUpRight,
   ChartBar,
-  Check,
   MapPin,
   MonitorPlay,
 } from "@phosphor-icons/react";
+import { PROOF_LOGOS, ProofLogo } from "./ProofLogos";
 import { Brand, PrimaryLink } from "./ui";
+
+const STEPS = [
+  {
+    icon: MapPin,
+    title: "Pick your place",
+    body: "Find a screen in the city you want to reach.",
+  },
+  {
+    icon: MonitorPlay,
+    title: "Make it yours",
+    body: "Add your creative, choose your time, and book.",
+  },
+  {
+    icon: ChartBar,
+    title: "See what happens",
+    body: "Follow your bookings and confirmed ad plays.",
+  },
+] as const;
+
+function LogoMarquee() {
+  // Two identical groups → translateX(-50%) loops seamlessly.
+  const groups = [0, 1] as const;
+  return (
+    <div className="demo-proof" aria-label="Brands already on local screens">
+      <p className="demo-proof-label">On screens for</p>
+      <ul className="sr-only">
+        {PROOF_LOGOS.map(({ name }) => (
+          <li key={name}>{name}</li>
+        ))}
+      </ul>
+      <div className="demo-proof-viewport" aria-hidden="true">
+        <div className="demo-proof-track">
+          {groups.map((group) => (
+            <div key={group} className="demo-proof-group">
+              {PROOF_LOGOS.map(({ name, src, width }) => (
+                <span key={`${group}-${name}`} className="demo-proof-logo">
+                  <ProofLogo name="" src={src} width={width} />
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function LandingPage() {
   return (
@@ -28,10 +74,6 @@ export function LandingPage() {
           aria-labelledby="hero-title"
         >
           <div className="demo-hero-copy fade-in">
-            <p className="demo-eyebrow">
-              <span />
-              Digital ads. Physical places.
-            </p>
             <h1 id="hero-title">
               One click.
               <br />
@@ -41,6 +83,7 @@ export function LandingPage() {
               Get your ad onto local screens. Reach people where they already
               are.
             </p>
+            <LogoMarquee />
             <div className="demo-hero-actions">
               <PrimaryLink href="#/signin">Get your ad out there</PrimaryLink>
               <a href="#/demo" className="demo-text-link">
@@ -48,94 +91,50 @@ export function LandingPage() {
               </a>
             </div>
           </div>
-          <div className="demo-hero-scene">
-            <img
-              className="demo-cafe-photo"
-              src="/images/neighborhood-cafe.jpg"
-              alt="A neighborhood café, one of the everyday places where customers discover local brands"
-              width="1600"
-              height="1057"
-              fetchPriority="high"
-            />
-            <div className="demo-scene-shade" />
-            <div
-              className="demo-physical-screen"
-              aria-label="Illustrative advertisement on a café display"
-            >
-              <div className="demo-coffee-ad">
-                <span>GOLDEN GATE COFFEE CO.</span>
-                <strong>
-                  Your next
-                  <br />
-                  great idea
-                  <br />
-                  <em>starts here.</em>
-                </strong>
-                <div>
-                  Cold brew. Around the corner.
-                  <ArrowUpRight size={25} />
-                </div>
-              </div>
-              <span className="demo-screen-brand">BILLBOARD OS</span>
+
+          <div className="demo-hero-visual">
+            <div className="demo-hero-scene">
+              <img
+                className="demo-cafe-photo"
+                src="/images/billboard-cafe-real.jpg"
+                alt="A BillboardOS screen in a café showing a live Golden Gate Coffee ad"
+                width="1600"
+                height="900"
+                fetchPriority="high"
+              />
             </div>
-            <p className="demo-scene-caption">
-              A small screen. A real-world connection.
-              <span>Illustrative placement</span>
-            </p>
           </div>
         </section>
+
         <section
           className="demo-how demo-container"
           aria-labelledby="how-heading"
         >
           <div className="demo-how-heading">
-            <p className="demo-eyebrow">From your screen to theirs</p>
-            <h2 id="how-heading">
-              Less setup.
-              <br />
-              More showing up.
-            </h2>
-            <p>
-              Your campaign, its displays, and the results.
-              <br />
-              Everything you need in one clear view.
-            </p>
+            <h2 id="how-heading">Make your company known in 3 steps:</h2>
           </div>
           <div className="demo-steps">
-            <div>
-              <MapPin size={24} />
-              <div>
-                <h3>Pick your place</h3>
-                <p>Find a screen in the city you want to reach.</p>
-              </div>
-              <span>01</span>
-            </div>
-            <div>
-              <MonitorPlay size={24} />
-              <div>
-                <h3>Make it yours</h3>
-                <p>Add your creative, choose your time, and book.</p>
-              </div>
-              <span>02</span>
-            </div>
-            <div>
-              <ChartBar size={24} />
-              <div>
-                <h3>See what happens</h3>
-                <p>Follow your bookings and confirmed ad plays.</p>
-              </div>
-              <span>03</span>
-            </div>
+            {STEPS.map((step, index) => {
+              const Icon = step.icon;
+              return (
+                <div key={step.title} className="demo-step">
+                  <span className="demo-step-index">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <Icon size={28} weight="regular" aria-hidden="true" />
+                  <h3>{step.title}</h3>
+                  <p>{step.body}</p>
+                </div>
+              );
+            })}
           </div>
         </section>
+
         <section
           className="demo-bottom-cta demo-container"
           aria-labelledby="cta-heading"
         >
           <div>
-            <div className="demo-cta-note">
-              <Check size={17} /> Built for the places people go.
-            </div>
             <h2 id="cta-heading">
               Meet your next customer.
               <br />

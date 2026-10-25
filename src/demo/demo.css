@@ -59,6 +59,7 @@
   font-weight: 550;
   line-height: 1.5;
   white-space: nowrap;
+  cursor: pointer;
   transition:
     background 150ms,
     transform 150ms;
@@ -101,20 +102,25 @@
   outline-offset: 5px;
 }
 .demo-hero {
-  display: grid;
-  grid-template-columns: 1.1fr 1fr;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 28px;
-  padding-block: 64px 76px;
+  gap: 48px;
+  padding-block: 72px 56px;
+  text-align: center;
 }
 .demo-hero-copy {
-  padding-block: 28px;
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 820px;
 }
 .demo-eyebrow {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   font-size: 11px;
   font-weight: 500;
@@ -129,171 +135,193 @@
   border-radius: 50%;
 }
 .demo-hero h1 {
-  font-size: clamp(46px, 5.15vw, 72px);
-  line-height: 1.065;
-  letter-spacing: -0.065em;
+  font-size: clamp(48px, 7vw, 84px);
+  line-height: 1.02;
+  letter-spacing: -0.07em;
   font-weight: 550;
-  margin: 28px -45px 25px 0;
+  margin: 0;
+  text-wrap: balance;
 }
 .demo-hero h1 > span {
   color: var(--color-accent);
 }
 .demo-hero-lead {
   color: var(--color-muted);
-  max-width: 340px;
-  font-size: 16px;
-  line-height: 1.75;
+  max-width: 420px;
+  font-size: 17px;
+  line-height: 1.7;
+  margin-top: 22px;
+}
+.demo-hero-copy .demo-proof {
+  width: min(860px, calc(100vw - 48px));
+  margin-top: 28px;
 }
 .demo-hero-actions {
   display: flex;
   align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
   gap: 23px;
-  margin-top: 34px;
+  margin-top: 28px;
+}
+.demo-hero-visual {
+  width: min(920px, 100%);
+  position: relative;
 }
 .demo-hero-scene {
   position: relative;
   min-width: 0;
-  height: 500px;
+  height: clamp(360px, 48vw, 520px);
   overflow: hidden;
-  border-radius: 12px;
   isolation: isolate;
-  background: #302721;
-}
-.demo-cafe-photo,
-.demo-scene-shade {
-  position: absolute;
-  width: 100%;
-  height: 100%;
-  inset: 0;
-  object-fit: cover;
+  background: #1c1814;
 }
 .demo-cafe-photo {
-  object-position: 62% center;
-  filter: brightness(0.7) saturate(0.6);
-}
-.demo-scene-shade {
-  background: linear-gradient(0deg, #101113e8, transparent 45%);
-}
-.demo-physical-screen {
   position: absolute;
-  width: 54%;
-  left: 23%;
-  top: 10%;
-  border: 7px solid #171718;
-  border-bottom-width: 19px;
-  border-radius: 6px;
-  box-shadow: 5px 15px 35px #0008;
-  transform: perspective(1000px) rotateY(-8deg) rotateZ(-3deg);
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center center;
+  filter: brightness(0.92) saturate(0.95);
 }
-.demo-coffee-ad {
-  aspect-ratio: 3 / 3.6;
-  background: #ef7547;
-  color: #251a15;
-  padding: 22px 19px 18px;
+.demo-proof {
+  border: 0;
+  padding-block: 0;
+  overflow: hidden;
+  width: 100%;
+}
+.demo-proof-label {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+  margin-bottom: 16px;
+}
+.demo-proof-viewport {
+  position: relative;
+  overflow: hidden;
+  mask-image: linear-gradient(
+    90deg,
+    transparent,
+    #000 8%,
+    #000 92%,
+    transparent
+  );
+}
+.demo-proof-track {
   display: flex;
-  flex-direction: column;
-  justify-content: space-between;
+  width: max-content;
+  animation: demo-marquee 32s linear infinite;
 }
-.demo-coffee-ad > span {
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  font-weight: 650;
+.demo-proof-viewport:hover .demo-proof-track,
+.demo-proof-viewport:focus-within .demo-proof-track {
+  animation-play-state: paused;
 }
-.demo-coffee-ad > strong {
-  font-size: clamp(29px, 3.2vw, 46px);
-  letter-spacing: -0.055em;
-  line-height: 1.08;
-  font-weight: 650;
-}
-.demo-coffee-ad em {
-  font-style: normal;
-  color: #fff1e2;
-}
-.demo-coffee-ad > div {
+.demo-proof-group {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 10px;
-  font-weight: 500;
-}
-.demo-screen-brand {
-  position: absolute;
-  bottom: -15px;
-  left: 0;
-  width: 100%;
-  color: #949494;
-  text-align: center;
-  font-size: 5px;
-  letter-spacing: 0.25em;
-}
-.demo-scene-caption {
-  position: absolute;
-  bottom: 21px;
-  left: 25px;
-  font-size: 12px;
-}
-.demo-scene-caption > span {
-  display: block;
-  margin-top: 4px;
-  font-size: 10px;
-  color: #a3a5a8;
-}
-.demo-how {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 80px;
-  border-top: 1px solid var(--color-line);
-  padding-block: 62px 72px;
-}
-.demo-how h2 {
-  font-size: 36px;
-  letter-spacing: -0.045em;
-  line-height: 1.15;
-  font-weight: 500;
-  margin-top: 18px;
-}
-.demo-how-heading > p:last-child {
-  color: var(--color-muted);
-  font-size: 14px;
-  line-height: 1.8;
-  margin-top: 20px;
-}
-.demo-steps {
-  display: flex;
-  flex-direction: column;
-}
-.demo-steps > div {
-  display: flex;
-  align-items: flex-start;
-  gap: 20px;
-  padding-block: 22px;
-  border-bottom: 1px solid var(--color-line);
-}
-.demo-steps > div:first-child {
-  padding-top: 7px;
-}
-.demo-steps svg {
-  color: var(--color-accent);
-  margin-top: 4px;
+  gap: 56px;
+  padding-inline-end: 56px;
   flex-shrink: 0;
 }
-.demo-steps h3 {
-  font-size: 16px;
-  letter-spacing: -0.02em;
-  font-weight: 500;
+.demo-proof-logo {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.62;
+  transition: opacity 180ms ease;
 }
-.demo-steps p {
-  font-size: 13px;
+.demo-proof-logo:hover {
+  opacity: 1;
+}
+.demo-proof-mark {
+  display: block;
+  height: 28px;
+  width: auto;
+  object-fit: contain;
+  filter: grayscale(1) brightness(1.05);
+}
+.demo-site .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+@keyframes demo-marquee {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+.demo-how {
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+  border-top: 1px solid var(--color-line);
+  padding-block: 72px 80px;
+}
+.demo-how-heading {
+  max-width: 640px;
+  text-align: center;
+  margin-inline: auto;
+}
+.demo-how h2 {
+  font-size: clamp(28px, 3.6vw, 40px);
+  letter-spacing: -0.045em;
+  line-height: 1.2;
+  font-weight: 500;
+  margin: 0;
+  text-wrap: balance;
+}
+.demo-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 40px 48px;
+}
+.demo-step {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+  /* Swiss / YC: flat columns, no cards, no borders, no gradients */
+  border: 0;
+  background: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+}
+.demo-step-index {
+  font: 11px var(--font-mono);
+  letter-spacing: 0.08em;
+  color: var(--color-faint);
+}
+.demo-step svg {
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+.demo-step h3 {
+  font-size: 18px;
+  letter-spacing: -0.03em;
+  font-weight: 550;
+  margin: 0;
+}
+.demo-step p {
+  font-size: 14px;
   line-height: 1.7;
   color: var(--color-muted);
-  margin-top: 7px;
-}
-.demo-steps > div > span {
-  margin-left: auto;
-  font: 10px var(--font-mono);
-  color: var(--color-faint);
+  margin: 0;
+  max-width: 280px;
 }
 .demo-bottom-cta {
   display: flex;
@@ -303,22 +331,12 @@
   border-top: 1px solid var(--color-line);
   padding-block: 57px 67px;
 }
-.demo-cta-note {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--color-muted);
-  font-size: 12px;
-}
-.demo-cta-note svg {
-  color: var(--color-accent);
-}
 .demo-bottom-cta h2 {
   font-size: 42px;
   font-weight: 500;
   letter-spacing: -0.05em;
   line-height: 1.15;
-  margin-top: 20px;
+  margin: 0;
 }
 .demo-bottom-cta h2 span {
   color: var(--color-accent);
@@ -821,7 +839,7 @@
 }
 @media (min-width: 1500px) {
   .demo-hero h1 {
-    font-size: 74px;
+    font-size: 88px;
   }
 }
 @media (max-width: 1023px) {
@@ -829,25 +847,21 @@
     width: calc(100% - 48px);
   }
   .demo-hero {
-    gap: 30px;
+    gap: 36px;
+    padding-block: 56px 44px;
   }
   .demo-hero h1 {
-    font-size: 51px;
-    margin-right: -35px;
+    font-size: clamp(44px, 7vw, 64px);
   }
   .demo-hero-scene {
-    height: 440px;
-  }
-  .demo-physical-screen {
-    width: 74%;
-    left: 12%;
-    top: 16%;
-  }
-  .demo-coffee-ad > strong {
-    font-size: 35px;
+    height: clamp(320px, 52vw, 440px);
   }
   .demo-how {
-    gap: 45px;
+    gap: 40px;
+    padding-block: 56px 64px;
+  }
+  .demo-steps {
+    gap: 32px 28px;
   }
   .demo-display-layout {
     grid-template-columns: 1fr 1fr;
@@ -885,16 +899,11 @@
     font-size: 17px;
   }
   .demo-hero {
-    grid-template-columns: 1fr;
-    padding-block: 29px 44px;
-    gap: 10px;
-  }
-  .demo-hero-copy {
-    padding-block: 20px 32px;
+    padding-block: 36px 40px;
+    gap: 28px;
   }
   .demo-hero h1 {
-    font-size: clamp(43px, 9.5vw, 65px);
-    margin: 22px 0;
+    font-size: clamp(40px, 10vw, 56px);
   }
   .demo-hero-lead {
     font-size: 15px;
@@ -911,23 +920,29 @@
     font-size: 12px;
   }
   .demo-hero-scene {
-    height: 415px;
+    height: 360px;
   }
-  .demo-physical-screen {
-    width: 56%;
-    top: 8%;
-    left: 22%;
-  }
-  .demo-coffee-ad > strong {
-    font-size: clamp(29px, 7.8vw, 47px);
+  .demo-proof-group {
+    gap: 40px;
+    padding-inline-end: 40px;
   }
   .demo-how {
-    grid-template-columns: 1fr;
-    gap: 30px;
-    padding-block: 40px;
+    gap: 36px;
+    padding-block: 48px;
   }
   .demo-how h2 {
-    font-size: 32px;
+    font-size: 30px;
+  }
+  .demo-steps {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+  .demo-step {
+    align-items: center;
+    text-align: center;
+  }
+  .demo-step p {
+    max-width: 320px;
   }
   .demo-bottom-cta {
     padding-block: 42px;
@@ -1023,14 +1038,7 @@
 }
 @media (max-width: 380px) {
   .demo-hero-scene {
-    height: 360px;
-  }
-  .demo-physical-screen {
-    width: 64%;
-    left: 18%;
-  }
-  .demo-coffee-ad {
-    padding: 17px 14px;
+    height: 300px;
   }
   .demo-tabs {
     gap: 17px;
