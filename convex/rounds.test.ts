@@ -462,11 +462,7 @@ describe("rounds: screens and pages", () => {
     await w.bid(lk, id, 300);
     await w.bid(rivet, id, 180);
     const bidding = await w.t.query(api.player.screenState, { billboardId: w.led });
-    expect(bidding).toMatchObject({ mode: "auction", openingMinor: 100, minimumMinor: 100 });
-    expect(bidding.ladder.map((l) => [l.company, l.amountMinor, l.leading])).toEqual([
-      ["LaunchKit", 300, true],
-      ["Rivet", 180, false],
-    ]);
+    expect(bidding).toMatchObject({ mode: "auction", openingMinor: 100, minimumMinor: 100, ladder: [], sealedBids: 2 });
 
     await w.bid(w.companies[2], id, null);
     expect((await w.t.query(api.player.screenState, { billboardId: w.led })).mode).toBe("settling");
@@ -503,5 +499,73 @@ describe("rounds: screens and pages", () => {
     const mine = await lk.customer.query(api.rounds.myRounds, {});
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ screen: "LED", amountMinor: 200, bidStatus: "won", roundStatus: "awarded" });
+  });
+});
+
+describe("rounds: final review fixes", () => {
+  test("I-1: an auction opening on the slot mid-round ends the round unsold instead of leaving it stuck", async () => {
+    const w = await world();
+    const id = (await w.start())!;
+    await w.t.run(async (ctx) => {
+      const round = (await ctx.db.get(id))!;
+      const auctionId = await ctx.db.insert("auctions", {
+        workspaceId: round.workspaceId,
+        billboardId: round.billboardId,
+        slotIds: [round.slotId],
+        reserveMinor: 100,
+        currentMinor: 100,
+        status: "open",
+        openedAt: Date.now(),
+        endsAt: Date.now() + 60_000,
+        hardEndsAt: Date.now() + 120_000,
+        incrementRule: { percentBps: 500, minMinor: 5 },
+        softCloseMs: 10_000,
+        openedBy: "test",
+        openReason: "test",
+        traceId: "test",
+        extensions: 0,
+      });
+      await ctx.db.patch(round.slotId, { auctionId });
+    });
+    await w.bid(w.companies[0], id, 300);
+    await w.bid(w.companies[1], id, 180);
+    const r = await w.round(id);
+    expect(r.status).toBe("unsold");
+    expect(r.outcome).toMatch(/auction/i);
+    expect((await w.bids(id)).find((b) => b.advertiserId === w.companies[1].advertiserId)?.amountMinor).toBe(180);
+  });
+
+  test("I-1: a round stuck past its close (its close never ran) is closed before a new round starts", async () => {
+    const w = await world();
+    const id = (await w.start())!;
+    await w.t.run(async (ctx) => {
+      for (const s of await ctx.db.system.query("_scheduled_functions").take(50)) {
+        if (s.name.includes("closeRound") && s.state.kind === "pending") await ctx.scheduler.cancel(s._id);
+      }
+    });
+    vi.advanceTimersByTime(30_000);
+    const next = await w.host.mutation(api.rounds.sellNow, { billboardId: w.led });
+    expect((await w.round(id)).status).toBe("unsold");
+    expect(next.roundId).not.toBeNull();
+  });
+
+  test("I-2 (S10): no round while the spot on air is sold, even if the next slot is free", async () => {
+    const w = await world();
+    await w.t.run(async (ctx) => {
+      const now = Date.now();
+      const start = now - (now % (15 * 60_000));
+      await ctx.db.insert("slots", { billboardId: w.led, workspaceId: w.workspaceId, startAt: start, endAt: start + 15 * 60_000, state: "booked" });
+    });
+    expect(await w.start("camera")).toBeNull();
+    expect((await w.host.mutation(api.rounds.sellNow, { billboardId: w.led })).reason).toMatch(/already sold/);
+  });
+
+  test("I-3: the public screen shows how many sealed bids are in, never who bid what, until the close", async () => {
+    const w = await world({ companies: ["LaunchKit", "Rivet", "Quiet"] });
+    const id = (await w.start())!;
+    await w.bid(w.companies[0], id, 300);
+    await w.bid(w.companies[1], id, 180);
+    const s = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(s).toMatchObject({ mode: "auction", ladder: [], sealedBids: 2 });
   });
 });

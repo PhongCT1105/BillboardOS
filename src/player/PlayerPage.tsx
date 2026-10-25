@@ -181,6 +181,8 @@ function ProofStrip({ playing }: { playing: NonNullable<Screen["nowPlaying"]> })
 function LiveScreen({ screen }: { screen: Screen }) {
   const now = useNow(250);
   const auction = screen.mode === "auction" || screen.mode === "negotiation";
+  // Bidding rounds keep bids sealed until the close: only the count is public.
+  const sealedBids = "sealedBids" in screen ? screen.sealedBids : undefined;
   const left = screen.closesAt ? Math.max(0, Math.ceil((screen.closesAt - now) / 1000)) : 0;
 
   // The clock visibly jumps when a late bid extends the auction.
@@ -255,7 +257,15 @@ function LiveScreen({ screen }: { screen: Screen }) {
       </div>
       <div className="flex items-center gap-[4vw]">
         <ol className="tabular flex flex-1 flex-col gap-2 font-mono text-[clamp(1rem,2.2vw,2.2rem)]">
-          {screen.ladder.length === 0 && <li className="text-muted">Waiting for the first bid</li>}
+          {screen.ladder.length === 0 && (
+            <li className="text-muted">
+              {sealedBids
+                ? `${sealedBids} sealed ${sealedBids === 1 ? "bid" : "bids"} in`
+                : sealedBids === 0
+                  ? "Agents are deciding"
+                  : "Waiting for the first bid"}
+            </li>
+          )}
           {screen.ladder.map((row) => (
             <li
               key={`${row.at}-${row.company}-${row.amountMinor}`}

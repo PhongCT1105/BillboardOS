@@ -33,6 +33,8 @@ const SOLD_ELSEWHERE = "Spot was sold elsewhere.";
 const ROUND_HOLD_TTL_MS = 3 * 60_000;
 /** While a payment is settling at the pay deadline, look again this much later (within the hold's TTL). */
 const PAY_RECHECK_MS = 20_000;
+/** A round still "bidding" this long past its close never got closed (its scheduled close failed). */
+const STALE_GRACE_MS = 10_000;
 const MAX_AUTO_WORKSPACES = 50;
 const MAX_AUTO_SCREENS = 20;
 
@@ -61,25 +63,32 @@ async function companyName(ctx: QueryCtx, advertiserId: Id<"advertisers">): Prom
   return (await ctx.db.get(advertiserId))?.displayName ?? "A company";
 }
 
-/**
- * The spot on air now: the rest of the current slot (>= 3 min left), else the
- * next slot if it starts within one slot length (a new screen's inventory
- * starts at the next quarter hour). Available only. The autopilot hands over
- * slots under 15 min out, so rounds and forward offers never overlap.
- */
-async function onAirSpot(ctx: QueryCtx, billboardId: Id<"billboards">, now: number): Promise<Doc<"slots"> | null> {
+/** The slot playing right now on this screen, if any. */
+async function currentSlot(ctx: QueryCtx, billboardId: Id<"billboards">, now: number): Promise<Doc<"slots"> | null> {
   const slots = await ctx.db
     .query("slots")
-    .withIndex("by_billboard_and_startAt", (q) => q.eq("billboardId", billboardId).gte("startAt", now - BUCKET_MS).lte("startAt", now + BUCKET_MS))
-    .take(4);
+    .withIndex("by_billboard_and_startAt", (q) => q.eq("billboardId", billboardId).gt("startAt", now - BUCKET_MS).lte("startAt", now))
+    .take(2);
+  return slots.find((s) => s.endAt > now) ?? null;
+}
+
+/**
+ * The spot on air now: the rest of the current slot when it has >= 3 min
+ * left. A current slot that's already sold means no round (never interrupt
+ * a paid ad). Only when there's no current slot (a new screen's inventory
+ * starts at the next quarter hour) or it's nearly over, the next slot if it
+ * starts within one slot length. The autopilot hands over slots under 15
+ * min out, so rounds and forward offers never overlap.
+ */
+async function onAirSpot(ctx: QueryCtx, billboardId: Id<"billboards">, now: number): Promise<Doc<"slots"> | null> {
   const free = async (s: Doc<"slots">) => s.state === "available" && !(s.auctionId && (await ctx.db.get(s.auctionId))?.status === "open");
-  for (const s of slots) {
-    if (s.startAt <= now && s.endAt - now >= MIN_REMAINING_MS && (await free(s))) return s;
-  }
-  for (const s of slots) {
-    if (s.startAt > now && (await free(s))) return s;
-  }
-  return null;
+  const current = await currentSlot(ctx, billboardId, now);
+  if (current && current.endAt - now >= MIN_REMAINING_MS) return (await free(current)) ? current : null;
+  const next = await ctx.db
+    .query("slots")
+    .withIndex("by_billboard_and_startAt", (q) => q.eq("billboardId", billboardId).gt("startAt", now).lte("startAt", now + BUCKET_MS))
+    .first();
+  return next && (await free(next)) ? next : null;
 }
 
 /** People in view in the screen's current 15-minute camera bucket, or null without a reading. */
@@ -155,6 +164,25 @@ async function invitees(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: numbe
 }
 
 /**
+ * A round left open by a close or pay deadline that never ran ends now, so it
+ * can't block the screen: past its close -> closed; awarded with its hold gone
+ * or expired -> the winner defaults. Returns the screen's latest round after.
+ */
+async function clearStale(ctx: MutationCtx, billboardId: Id<"billboards">, now: number): Promise<Doc<"rounds"> | null> {
+  const last = await latestRound(ctx, billboardId);
+  if (!last) return null;
+  if (last.status === "bidding" && now > last.closesAt + STALE_GRACE_MS) {
+    await closeRoundCore(ctx, last._id);
+  } else if (last.status === "awarded") {
+    const hold = last.holdId ? await ctx.db.get(last.holdId) : null;
+    if (!hold || hold.status === "released" || hold.status === "expired" || (hold.status === "active" && hold.expiresAt < now)) {
+      await defaultWinner(ctx, last, last.holdId!, "its hold expired before payment");
+    }
+  }
+  return await ctx.db.get(last._id);
+}
+
+/**
  * Start a round on a screen (every trigger calls this). Null when the
  * screen has a round open, the camera is cooling down, or nothing is on air
  * to sell. With nobody to invite, the round ends unsold at once.
@@ -167,7 +195,7 @@ export async function startRoundCore(
   const now = Date.now();
   const billboard = await ctx.db.get(billboardId);
   if (!billboard?.workspaceId) return null;
-  const last = await latestRound(ctx, billboardId);
+  const last = await clearStale(ctx, billboardId, now);
   if (last && (last.status === "bidding" || last.status === "awarded")) return null;
   if (trigger === "camera" && last && now - (last.closedAt ?? last.createdAt) < CAMERA_COOLDOWN_MS) return null;
   const spot = await onAirSpot(ctx, billboardId, now);
@@ -342,12 +370,14 @@ export async function awardCore(
     });
     holdId = hold._id;
   } catch (error) {
+    if (!(error instanceof ConvexError)) throw error;
+    // The spot can't be held any more: end the round with the reason (never leave the screen stuck in a round).
     await ctx.db.patch(quoteId, { status: "expired" });
-    if (error instanceof ConvexError && (error.data as { code?: string }).code === "SLOT_UNAVAILABLE") {
-      await endUnsold(ctx, round, SOLD_ELSEWHERE);
-      return "ended";
-    }
-    throw error;
+    const data = error.data as { code?: string; message?: string };
+    const why =
+      data.code === "SLOT_UNAVAILABLE" ? SOLD_ELSEWHERE : data.code === "AUCTION_OPEN" ? "Spot went to a slot auction before the close." : `Couldn't hold the spot: ${data.message ?? data.code ?? "unknown error"}.`;
+    await endUnsold(ctx, round, why);
+    return "ended";
   }
   await ctx.db.patch(round._id, {
     status: "awarded",
@@ -496,14 +526,21 @@ export const sellNow = mutation({
   returns: v.object({ roundId: v.union(v.id("rounds"), v.null()), reason: v.union(v.string(), v.null()) }),
   handler: async (ctx, args) => {
     await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
-    const last = await latestRound(ctx, args.billboardId);
+    const now = Date.now();
+    const last = await clearStale(ctx, args.billboardId, now);
     if (last && (last.status === "bidding" || last.status === "awarded")) {
       return { roundId: null, reason: "A round is already running on this screen." };
     }
     const roundId = await startRoundCore(ctx, args.billboardId, "sell_now");
-    return roundId
-      ? { roundId, reason: null }
-      : { roundId: null, reason: "Nothing on air to sell: the current spot is sold or ends in under 3 minutes, and the next one isn't free." };
+    if (roundId) return { roundId, reason: null };
+    const current = await currentSlot(ctx, args.billboardId, now);
+    return {
+      roundId: null,
+      reason:
+        current && current.state !== "available" && current.endAt - now >= MIN_REMAINING_MS
+          ? "The spot on air is already sold."
+          : "Nothing on air to sell: the current spot ends in under 3 minutes and the next one isn't free.",
+    };
   },
 });
 

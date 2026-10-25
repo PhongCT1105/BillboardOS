@@ -374,15 +374,9 @@ async function roundScreen(ctx: QueryCtx, billboard: Doc<"billboards">, round: D
     .take(20);
   const name = async (id: Id<"advertisers">) => (await ctx.db.get(id))?.displayName ?? "A company";
   if (round.status === "bidding") {
-    const shown = bids
-      .filter((b) => b.status === "bid" && b.amountMinor !== null)
-      .sort((a, b) => b.amountMinor! - a.amountMinor! || (a.answeredAt ?? 0) - (b.answeredAt ?? 0))
-      .slice(0, 6);
-    const ladder: Ladder = [];
-    for (const [i, b] of shown.entries()) {
-      ladder.push({ company: await name(b.advertiserId), amountMinor: b.amountMinor!, at: b.answeredAt ?? round.createdAt, leading: i === 0 });
-    }
-    return { mode: "auction" as const, ...base, closesAt: round.closesAt, ladder };
+    // Sealed: the public screen shows how many bids are in, never who bid what, until the close.
+    const sealedBids = bids.filter((b) => b.status === "bid").length;
+    return { mode: "auction" as const, ...base, closesAt: round.closesAt, sealedBids };
   }
   if (round.status === "awarded") return { mode: "settling" as const, ...base };
   if (round.status === "paid") {
@@ -428,6 +422,8 @@ export const screenState = query({
     minimumMinor: v.union(v.number(), v.null()),
     why: v.union(v.string(), v.null()),
     closesAt: v.union(v.number(), v.null()),
+    /** Bidding rounds: sealed bids in so far (the ladder stays empty until the close). */
+    sealedBids: v.optional(v.number()),
     /** End of the latest moment's spot; the client expires "playing" with its own clock. */
     spotEndAt: v.union(v.number(), v.null()),
     ladder: v.array(
