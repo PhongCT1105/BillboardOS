@@ -182,3 +182,142 @@
   .host-footer { padding-inline: 16px; flex-wrap: wrap; }
 }
 @media (prefers-reduced-transparency: reduce) { .host-shell .app-header { backdrop-filter: none; background: #f5f5f7; } }
+
+/* Live Sales — Apple utility density on the host parchment canvas. */
+.live-sales .live-header { padding-block: 8px 4px; }
+.live-sales .live-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--color-faint);
+}
+.live-sales .live-status.is-online { color: #24743d; }
+.live-sales .live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 11px;
+  background: #fafafc;
+  border: 1px solid rgb(0 0 0 / .04);
+  font-size: 14px;
+  color: #333;
+}
+.live-sales .live-card {
+  background: #ffffff;
+  border: 1px solid var(--color-line);
+  border-radius: 18px;
+  padding: 24px;
+}
+.live-sales .live-card > h2 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -.37px;
+  line-height: 1.24;
+}
+.live-sales .live-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+  padding: 20px 0;
+  border-block: 1px solid var(--color-line);
+}
+.live-sales .live-stats dt {
+  font-size: 14px;
+  color: var(--color-faint);
+  margin-bottom: 6px;
+}
+.live-sales .live-stats dd {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -.3px;
+  line-height: 1.15;
+  color: var(--color-fg);
+  overflow-wrap: anywhere;
+}
+.live-sales .live-progress {
+  height: 3px;
+  border-radius: 99px;
+  background: #efedef;
+  overflow: hidden;
+  margin-top: 16px;
+}
+.live-sales .live-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: inherit;
+  transition: width 200ms linear;
+}
+.live-sales .live-board {
+  overflow: visible;
+}
+.live-sales .live-bid {
+  position: absolute;
+  top: 0;
+  inset-inline: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: #fafafc;
+  box-shadow: 0 0 0 rgb(0 0 0 / 0);
+  will-change: transform;
+  transition:
+    transform 720ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 420ms ease,
+    border-color 420ms ease,
+    box-shadow 420ms ease;
+}
+.live-sales .live-bid.is-lead {
+  background: #f0faf4;
+  border-color: #c6e6d2;
+}
+.live-sales .live-bid.is-moving {
+  box-shadow: 0 10px 28px rgb(15 23 42 / 0.12);
+}
+.live-sales .live-badge,
+.live-sales .live-bid-price,
+.live-sales .live-bid-rank {
+  transition: color 320ms ease, background-color 320ms ease, opacity 220ms ease;
+}
+.live-sales .live-badge {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #f5f5f7;
+  color: var(--color-faint);
+}
+.live-sales .live-badge-won,
+.live-sales .live-badge-bid { background: #e8f6ee; color: #24743d; }
+.live-sales .live-badge-defaulted { background: #fdeceb; color: var(--color-danger); }
+@media (prefers-reduced-motion: reduce) {
+  .live-sales .live-bid,
+  .live-sales .live-badge,
+  .live-sales .live-bid-price,
+  .live-sales .live-bid-rank {
+    transition: none;
+    will-change: auto;
+  }
+  .live-sales .live-bid.is-moving { box-shadow: none; }
+}
+.live-sales .live-topup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: 12px;
+  border-top: 1px solid var(--color-line);
+}
+.live-sales .live-topup-row:first-child { border-top: 0; padding-top: 4px; }
+@media (max-width: 767px) {
+  .live-sales .live-stats { grid-template-columns: 1fr; gap: 14px; }
+  .live-sales .live-stats dd { font-size: 24px; }
+  .live-sales .live-card { padding: 20px; }
+}

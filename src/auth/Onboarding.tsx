@@ -102,7 +102,7 @@ export function CreateWorkspace() {
   const [city, setCity] = useState("");
   const { busy, error, run } = useSubmit();
   return (
-    <Shell title="Create your host workspace" lead="Your screens, team, payouts and finance desk live here. You can invite teammates later.">
+    <Shell title="Create your host workspace" lead="Your screens, team and payouts live here. You can invite teammates later.">
       <form className="mt-8 flex flex-col gap-5" onSubmit={(e) => run(e, () => create({ name, city }))}>
         <label className="flex flex-col gap-2 text-sm">
           <span className="text-muted">Workspace name</span>
