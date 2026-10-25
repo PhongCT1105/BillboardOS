@@ -4,7 +4,7 @@ import { internal } from "./_generated/api";
 import { creativeStatus } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { scheduleBooking } from "./lib/scheduling";
-import type { QueryCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireCampaignAccess, requireCustomer, resolveWorkspace } from "./lib/tenancy";
 import {
@@ -13,7 +13,9 @@ import {
   hasCreative,
   oembedUrl,
   parseOEmbed,
+  parseWatchPage,
   parseYouTubeUrl,
+  watchUrl,
 } from "./lib/youtube";
 import {
   recordHostDecision,
@@ -120,6 +122,9 @@ export const attach = mutation({
 });
 
 const OEMBED_TIMEOUT_MS = 5_000;
+const WATCH_PAGE_TIMEOUT_MS = 6_000;
+/** The description sits in the first part of the page; cap what we scan. */
+const MAX_WATCH_PAGE_CHARS = 3_000_000;
 
 /**
  * Attach a YouTube link as the campaign's creative (ADR 0007): stored as the
@@ -134,76 +139,112 @@ export const attachYouTube = mutation({
     const parsed = parseYouTubeUrl(args.url);
     if (!parsed.ok) throw new ConvexError({ code: "INVALID_INPUT", message: parsed.error });
     const { campaign, customer } = await requireCampaignAccess(ctx, args.campaignId);
-    if (campaign.creativeStatus === "approved") {
-      throw new ConvexError({ code: "CREATIVE_LOCKED", message: "Campaign already has an approved creative" });
-    }
-    if (campaign.creativeStorageId) await ctx.storage.delete(campaign.creativeStorageId);
-    const now = Date.now();
-    const existing = await youtubeOf(ctx, args.campaignId);
-    const row = {
-      campaignId: campaign._id,
-      advertiserId: campaign.advertiserId,
-      videoId: parsed.videoId,
-      url: parsed.url,
-      thumbnailUrl: defaultThumbnailUrl(parsed.videoId),
-      oembedStatus: "pending" as const,
-      attachedAt: now,
-    };
-    if (existing) await ctx.db.replace(existing._id, row);
-    else await ctx.db.insert("youtubeCreatives", row);
-    await resetCreativeReviews(ctx, args.campaignId);
-    await ctx.db.patch(args.campaignId, {
-      creativeStorageId: undefined,
-      creativeContentType: YOUTUBE_CONTENT_TYPE,
-      creativeStatus: "pending_review",
-      creativeSubmittedAt: now,
-      creativeReviewReason: undefined,
-    });
-    await recordAudit(ctx, {
-      traceId: `campaign:${args.campaignId}`,
-      actor: customer.actor,
-      type: "creative.attached",
-      subjectId: args.campaignId,
-      reason: `YouTube creative ${parsed.url} submitted for review`,
-      data: { provider: "youtube", videoId: parsed.videoId, url: parsed.url },
-    });
-    // Title and channel first; the review and the knowledge card follow once they are in.
-    await ctx.scheduler.runAfter(0, internal.creatives.fetchYouTubeDetails, { campaignId: args.campaignId, videoId: parsed.videoId });
+    await attachYouTubeCreative(ctx, campaign, customer.actor, parsed);
     return { campaignId: args.campaignId, creativeStatus: "pending_review" as const, videoId: parsed.videoId };
   },
 });
 
+/** Shared by attachYouTube and the company agent's one-step setup. The caller checked access. */
+export async function attachYouTubeCreative(
+  ctx: MutationCtx,
+  campaign: Doc<"campaigns">,
+  actor: string,
+  parsed: { videoId: string; url: string },
+): Promise<void> {
+  if (campaign.creativeStatus === "approved") {
+    throw new ConvexError({ code: "CREATIVE_LOCKED", message: "Campaign already has an approved creative" });
+  }
+  if (campaign.creativeStorageId) await ctx.storage.delete(campaign.creativeStorageId);
+  const now = Date.now();
+  const existing = await youtubeOf(ctx, campaign._id);
+  const row = {
+    campaignId: campaign._id,
+    advertiserId: campaign.advertiserId,
+    videoId: parsed.videoId,
+    url: parsed.url,
+    thumbnailUrl: defaultThumbnailUrl(parsed.videoId),
+    oembedStatus: "pending" as const,
+    attachedAt: now,
+  };
+  if (existing) await ctx.db.replace(existing._id, row);
+  else await ctx.db.insert("youtubeCreatives", row);
+  await resetCreativeReviews(ctx, campaign._id);
+  await ctx.db.patch(campaign._id, {
+    creativeStorageId: undefined,
+    creativeContentType: YOUTUBE_CONTENT_TYPE,
+    creativeStatus: "pending_review",
+    creativeSubmittedAt: now,
+    creativeReviewReason: undefined,
+  });
+  await recordAudit(ctx, {
+    traceId: `campaign:${campaign._id}`,
+    actor,
+    type: "creative.attached",
+    subjectId: campaign._id,
+    reason: `YouTube creative ${parsed.url} submitted for review`,
+    data: { provider: "youtube", videoId: parsed.videoId, url: parsed.url },
+  });
+  // Title, channel and description first (in parallel); the review and the knowledge card follow once they are in.
+  await ctx.scheduler.runAfter(0, internal.creatives.fetchYouTubeDetails, { campaignId: campaign._id, videoId: parsed.videoId });
+}
+
 /** Public oEmbed lookup (title, channel, thumbnail), 5 s timeout, validated. Never fails the creative. */
+async function lookupOEmbed(videoId: string): Promise<{ details: ReturnType<typeof parseOEmbed>; error?: string }> {
+  let error: string | undefined;
+  // One retry for network errors and timeouts (a cold first connection can be slow); HTTP answers are final.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(oembedUrl(videoId), {
+        signal: AbortSignal.timeout(OEMBED_TIMEOUT_MS),
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) {
+        error = res.status === 401 || res.status === 403 ? "embedding is disabled for this video" : res.status === 404 ? "video not found or private" : `oEmbed HTTP ${res.status}`;
+        return { details: null, error };
+      }
+      const details = parseOEmbed(await res.json());
+      return details ? { details } : { details: null, error: "oEmbed returned an unexpected shape" };
+    } catch (e) {
+      error = `oEmbed failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  return { details: null, error };
+}
+
+/** The public watch page's description and keywords (best effort: a consent wall or an error yields nothing). */
+async function lookupWatchPage(videoId: string): Promise<{ description: string | null; keywords: string[] }> {
+  try {
+    const res = await fetch(`${watchUrl(videoId)}&hl=en`, {
+      signal: AbortSignal.timeout(WATCH_PAGE_TIMEOUT_MS),
+      headers: { Accept: "text/html", "Accept-Language": "en-US,en;q=0.8", Cookie: "CONSENT=YES+1" },
+    });
+    if (!res.ok) return { description: null, keywords: [] };
+    return parseWatchPage((await res.text()).slice(0, MAX_WATCH_PAGE_CHARS));
+  } catch (e) {
+    console.warn(`YouTube watch page for ${videoId}: ${e instanceof Error ? e.message : String(e)}`);
+    return { description: null, keywords: [] };
+  }
+}
+
+/**
+ * Read the video: oEmbed (title, channel, thumbnail) and the watch page
+ * (description, keywords) at the same time. Saving it starts the review and
+ * the knowledge card (the ICP) in parallel.
+ */
 export const fetchYouTubeDetails = internalAction({
   args: { campaignId: v.id("campaigns"), videoId: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
-    let details: ReturnType<typeof parseOEmbed> = null;
-    let error: string | undefined;
-    // One retry for network errors and timeouts (a cold first connection can be slow); HTTP answers are final.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetch(oembedUrl(args.videoId), {
-          signal: AbortSignal.timeout(OEMBED_TIMEOUT_MS),
-          headers: { Accept: "application/json" },
-        });
-        if (!res.ok) {
-          error = res.status === 401 || res.status === 403 ? "embedding is disabled for this video" : res.status === 404 ? "video not found or private" : `oEmbed HTTP ${res.status}`;
-        } else {
-          details = parseOEmbed(await res.json());
-          error = details ? undefined : "oEmbed returned an unexpected shape";
-        }
-        break;
-      } catch (e) {
-        error = `oEmbed failed: ${e instanceof Error ? e.message : String(e)}`;
-      }
-    }
+    const [oembed, page] = await Promise.all([lookupOEmbed(args.videoId), lookupWatchPage(args.videoId)]);
+    const { details, error } = oembed;
     if (error) console.warn(`YouTube oEmbed for ${args.videoId}: ${error}`);
-    else console.log(`YouTube oEmbed for ${args.videoId}: "${details?.title}" by ${details?.author}`);
+    else console.log(`YouTube oEmbed for ${args.videoId}: "${details?.title}" by ${details?.author}; description ${page.description ? "read" : "not found"}`);
     await ctx.runMutation(internal.creatives.saveYouTubeDetails, {
       campaignId: args.campaignId,
       videoId: args.videoId,
       details: details ?? undefined,
+      description: page.description ?? undefined,
+      keywords: page.keywords,
       error: error?.slice(0, 200),
     });
     return null;
@@ -217,6 +258,8 @@ export const saveYouTubeDetails = internalMutation({
     details: v.optional(
       v.object({ title: v.string(), author: v.string(), authorUrl: v.union(v.string(), v.null()), thumbnailUrl: v.string() }),
     ),
+    description: v.optional(v.string()),
+    keywords: v.optional(v.array(v.string())),
     error: v.optional(v.string()),
   },
   returns: v.null(),
@@ -225,24 +268,62 @@ export const saveYouTubeDetails = internalMutation({
     // A newer link replaced this one: drop the stale lookup.
     if (!row || row.videoId !== args.videoId) return null;
     const now = Date.now();
+    const content = { description: args.description, keywords: args.keywords && args.keywords.length > 0 ? args.keywords : undefined };
     if (args.details) {
       await ctx.db.patch(row._id, {
         title: args.details.title,
         author: args.details.author,
         authorUrl: args.details.authorUrl ?? undefined,
         thumbnailUrl: args.details.thumbnailUrl,
+        ...content,
         oembedStatus: "ok",
         oembedError: undefined,
         fetchedAt: now,
       });
+      await adoptVideoIdentity(ctx, row.advertiserId, args.campaignId, args.details);
     } else {
-      await ctx.db.patch(row._id, { oembedStatus: "failed", oembedError: args.error ?? "unknown error", fetchedAt: now });
+      await ctx.db.patch(row._id, { ...content, oembedStatus: "failed", oembedError: args.error ?? "unknown error", fetchedAt: now });
     }
+    // Both run in parallel: the review agent and the knowledge card (which sets a video-led campaign's audience).
     await scheduleCreativeReview(ctx, args.campaignId);
-    await requestKnowledgeBuild(ctx, row.advertiserId, "YouTube creative attached");
+    await requestKnowledgeBuild(ctx, row.advertiserId, "YouTube creative attached", { force: true });
     return null;
   },
 });
+
+/**
+ * Once the video is known: a company named automatically at sign-up takes its
+ * channel's name (if free), and a video-led campaign's brief names the video.
+ */
+async function adoptVideoIdentity(
+  ctx: MutationCtx,
+  advertiserId: Id<"advertisers">,
+  campaignId: Id<"campaigns">,
+  details: { title: string; author: string },
+): Promise<void> {
+  const advertiser = await ctx.db.get(advertiserId);
+  const name = details.author.trim().slice(0, 80);
+  if (advertiser?.autoNamed && name.length > 0 && name !== advertiser.displayName) {
+    const taken = await ctx.db
+      .query("advertisers")
+      .withIndex("by_displayName", (q) => q.eq("displayName", name))
+      .first();
+    if (!taken) {
+      await ctx.db.patch(advertiserId, { displayName: name, autoNamed: false });
+      await recordAudit(ctx, {
+        traceId: `company:${advertiserId}`,
+        actor: "system:youtube",
+        type: "company.renamed",
+        subjectId: advertiserId,
+        reason: `Company named after its ad video's channel: ${advertiser.displayName} -> ${name}`,
+      });
+    }
+  }
+  const campaign = await ctx.db.get(campaignId);
+  if (campaign?.audienceSource === "video") {
+    await ctx.db.patch(campaignId, { brief: `YouTube ad "${details.title}" by ${details.author}`.slice(0, 500) });
+  }
+}
 
 /** Preview fields for a campaign's creative: a fresh file URL, or the YouTube thumbnail. */
 async function creativePreview(ctx: QueryCtx, c: Doc<"campaigns">) {

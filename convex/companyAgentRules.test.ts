@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { agentCap, bidDelayMs, onAnnounce, onCounter, onUpdate } from "./lib/companyAgent";
+import { BUDGET_MAX_MINOR, BUDGET_MIN_MINOR, agentCap, bidDelayMs, budgetProblem, limitsFromBudget, onAnnounce, onCounter, onUpdate } from "./lib/companyAgent";
 
 describe("agentCap", () => {
   const i = { valueMinor: 120, matchScore: 0.5, maxPerSpotMinor: 1000, budgetLeftMinor: 1000, balanceMinor: 1000 };
@@ -48,5 +48,19 @@ describe("bidDelayMs", () => {
   test("300 to 1000 ms", () => {
     expect(bidDelayMs(0)).toBe(300);
     expect(bidDelayMs(1)).toBe(1000);
+  });
+});
+
+describe("limitsFromBudget", () => {
+  test("a spot may take 30% of the day, at least $0.50, never more than the day", () => {
+    expect(limitsFromBudget(500)).toEqual({ maxPerSpotMinor: 150, minRelevantViewers: 1 });
+    expect(limitsFromBudget(100)).toEqual({ maxPerSpotMinor: 50, minRelevantViewers: 1 });
+    expect(limitsFromBudget(2000).maxPerSpotMinor).toBe(600);
+  });
+  test("rejects budgets outside the slider's range or off its step", () => {
+    expect(budgetProblem(BUDGET_MIN_MINOR - 50)).toMatch(/between/);
+    expect(budgetProblem(BUDGET_MAX_MINOR + 50)).toMatch(/between/);
+    expect(budgetProblem(525)).toMatch(/steps/);
+    expect(budgetProblem(500)).toBeNull();
   });
 });

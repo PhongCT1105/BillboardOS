@@ -19,6 +19,28 @@ export function agentCap(i: {
   return Math.max(0, Math.min(Math.round(i.valueMinor * (0.5 + i.matchScore)), i.maxPerSpotMinor, i.budgetLeftMinor, i.balanceMinor));
 }
 
+/** The one spending control an advertiser sets (a slider): a daily budget in these bounds and steps. */
+export const BUDGET_MIN_MINOR = 100;
+export const BUDGET_MAX_MINOR = 2000;
+export const BUDGET_STEP_MINOR = 50;
+export const BUDGET_DEFAULT_MINOR = 500;
+const SPOT_SHARE = 0.3;
+const SPOT_MIN_MINOR = 50;
+
+export function budgetProblem(dailyBudgetMinor: number): string | null {
+  if (!Number.isSafeInteger(dailyBudgetMinor) || dailyBudgetMinor < BUDGET_MIN_MINOR || dailyBudgetMinor > BUDGET_MAX_MINOR) {
+    return `Daily budget must be between $${BUDGET_MIN_MINOR / 100} and $${BUDGET_MAX_MINOR / 100}`;
+  }
+  if (dailyBudgetMinor % BUDGET_STEP_MINOR !== 0) return `Daily budget moves in steps of $${(BUDGET_STEP_MINOR / 100).toFixed(2)}`;
+  return null;
+}
+
+/** Everything else follows from the budget: a spot may take 30% of the day (at least $0.50); one matching person is enough. */
+export function limitsFromBudget(dailyBudgetMinor: number): { maxPerSpotMinor: number; minRelevantViewers: number } {
+  const maxPerSpotMinor = Math.min(dailyBudgetMinor, Math.max(SPOT_MIN_MINOR, Math.round(dailyBudgetMinor * SPOT_SHARE)));
+  return { maxPerSpotMinor, minRelevantViewers: 1 };
+}
+
 /** Said when the wallet hasn't been read yet: the cap can't be trusted, so the agent sits out. */
 export const BALANCE_UNKNOWN = "Wallet balance unknown (not read yet), so I can't commit to a price";
 

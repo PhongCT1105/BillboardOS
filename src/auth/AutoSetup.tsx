@@ -108,7 +108,7 @@ function AutoSetupRun({ me, role, onDone }: { me: Me; role: AccountType; onDone:
           for (let attempt = 0; attempt < 4 && !advertiserId; attempt++) {
             name = randomCompanyName();
             try {
-              advertiserId = await createCompany({ name });
+              advertiserId = await createCompany({ name, autoNamed: true });
             } catch (err) {
               if (codeOf(err) !== "NAME_TAKEN") throw err;
             }

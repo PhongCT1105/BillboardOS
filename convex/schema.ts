@@ -232,6 +232,7 @@ export const auditEventType = v.union(
   v.literal("workspace.member_added"),
   v.literal("workspace.payout_changed"),
   v.literal("company.created"),
+  v.literal("company.renamed"),
   v.literal("agent_key.created"),
   v.literal("watch_rule.changed"),
   v.literal("agent_key.revoked"),
@@ -384,6 +385,8 @@ export const advertiserFields = {
   valuationRequestedAt: v.optional(v.number()),
   /** Names this advertiser appears under on bank statements (matching evidence). */
   payerAliases: v.optional(v.array(v.string())),
+  /** Named automatically at sign-up: renamed to its ad video's channel once that is known. */
+  autoNamed: v.optional(v.boolean()),
 };
 
 export const campaignFields = {
@@ -402,6 +405,8 @@ export const campaignFields = {
   creativeReviewReason: v.optional(v.string()),
   /** Who the campaign wants to reach (weights). Used for screen matching and bidding. */
   targetAudience: v.optional(audienceTags),
+  /** "video": the audience is worked out from the ad video (knowledge card) and kept up to date. Missing = chosen by the advertiser. */
+  audienceSource: v.optional(v.union(v.literal("advertiser"), v.literal("video"))),
 };
 
 export const quoteFields = {

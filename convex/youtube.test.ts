@@ -5,8 +5,9 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { joinCompanies, modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
-import { embedUrl, hasCreative, parseOEmbed, parseYouTubeUrl, oembedUrl } from "./lib/youtube";
+import { embedUrl, hasCreative, parseOEmbed, parseWatchPage, parseYouTubeUrl, oembedUrl } from "./lib/youtube";
 import { REVIEW_ACTOR } from "./lib/creativeReview";
+import { creativeReady } from "./lib/momentHooks";
 
 const START = Date.UTC(2026, 9, 25, 16, 7);
 const MIN = 60_000;
@@ -122,6 +123,21 @@ describe("parseYouTubeUrl", () => {
     expect(parseOEmbed({ ...good, author_url: "https://evil.test/@x" })?.authorUrl).toBeNull();
   });
 
+  test("parseWatchPage reads the full description and keywords, untrusted and bounded", () => {
+    const html = `<html><head><meta name="description" content="Short &amp; cut off"><meta name="keywords" content="api, Developer Tools, , launch">
+      <script>var ytInitialPlayerResponse = {"videoDetails":{"videoId":"${ID}","shortDescription":"Ship APIs in minutes.\\nBuilt for founders \\u0026 devs.","keywords":["api","devtools"]}};</script></head></html>`;
+    expect(parseWatchPage(html)).toEqual({
+      description: "Ship APIs in minutes. Built for founders & devs.",
+      keywords: ["api", "devtools"],
+    });
+    // Falls back to the meta tags when the player JSON is missing.
+    const meta = `<meta name="description" content="Short &amp; cut off"><meta name="keywords" content="api, Developer Tools, , launch">`;
+    expect(parseWatchPage(meta)).toEqual({ description: "Short & cut off", keywords: ["api", "developer tools", "launch"] });
+    expect(parseWatchPage("<html>consent wall</html>")).toEqual({ description: null, keywords: [] });
+    const long = parseWatchPage(`"shortDescription":"${"a".repeat(5000)}"`);
+    expect(long.description?.length).toBe(1500);
+  });
+
   test("hasCreative: a file or a YouTube link", () => {
     expect(hasCreative({})).toBe(false);
     expect(hasCreative({ creativeContentType: "youtube" })).toBe(true);
@@ -187,6 +203,14 @@ describe("creatives.attachYouTube", () => {
     const card = await customer.query(api.knowledge.forCompany, { advertiserId });
     expect(card?.videoTitles).toEqual(["LaunchKit in 30 seconds"]);
     expect(card?.sources).toContain(`https://www.youtube.com/watch?v=${ID}`);
+  });
+
+  test("an approved YouTube ad is ready to sell (live auction, autopilot, scheduling): it has no storage file", async () => {
+    const { t, workspaceId, customer, campaignId } = await world();
+    await customer.mutation(api.creatives.attachYouTube, { campaignId, url: `https://youtu.be/${ID}` });
+    await flush(t);
+    const ready = await t.run(async (ctx) => creativeReady(ctx, (await ctx.db.get(campaignId))!, workspaceId));
+    expect(ready).toBe(true);
   });
 
   test("invalid links, other companies and approved creatives are refused", async () => {

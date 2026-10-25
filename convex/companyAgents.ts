@@ -14,6 +14,11 @@ import { validateStanding, type Standing } from "./lib/moment";
 import { requireCampaignAccess, requireCustomer, resolveWorkspace } from "./lib/tenancy";
 import { signWebhook } from "./lib/webhook";
 import { explorerTxUrl } from "./lib/x402/money";
+import { budgetProblem, limitsFromBudget } from "./lib/companyAgent";
+import { isYouTubeCreative, parseYouTubeUrl } from "./lib/youtube";
+import { attachYouTubeCreative } from "./creatives";
+import { youtubeOf } from "./creativeReview";
+import { companyStage, knowledgeMethod, oembedStatus } from "./schemaParts/knowledge";
 
 /**
  * Company agents (spec "Accounts, wallets and agents"): each advertiser sets
@@ -36,6 +41,10 @@ const TOP_UP_MINOR = 200;
 const FEED_OFFERS = 10;
 const MAX_BIDS_SCANNED = 100;
 const FAUCET_EVERY_MS = 24 * 60 * 60_000;
+const MAX_CAMPAIGNS_SCANNED = 20;
+const VIDEO_CAMPAIGN_BUDGET_MINOR = 5000;
+/** Placeholder audience for the seconds before the video's card exists (same as a new screen's). */
+const STARTER_AUDIENCE: Record<string, number> = { startups: 0.5, software: 0.5 };
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 
@@ -105,40 +114,113 @@ export const setup = mutation({
   returns: v.object({ agentId: v.id("companyAgents") }),
   handler: async (ctx, args) => {
     const { campaign, customer } = await requireCampaignAccess(ctx, args.campaignId);
-    const tagProblem = validateTags(args.targetAudience);
-    if (tagProblem) fail("INVALID_INPUT", tagProblem);
-    const standing: Standing = {
-      maxPricePerSpotMinor: args.maxPerSpotMinor,
-      minRelevantViewers: args.minRelevantViewers,
-      dailyBudgetMinor: args.dailyBudgetMinor,
-    };
-    const problem = validateStanding(standing);
-    if (problem) fail("INVALID_INPUT", problem);
-    const advertiserId = campaign.advertiserId;
-    await ctx.db.patch(campaign._id, { targetAudience: args.targetAudience });
-
-    const existing = await agentOf(ctx, advertiserId);
-    if (existing) await revokeKey(ctx, existing.agentKeyId, customer.actor, "company agent reconfigured");
-    const sealed = await issueSealedKey(ctx, { advertiserId, campaignId: campaign._id, standing, actor: customer.actor });
-    let agentId: Id<"companyAgents">;
-    if (existing) {
-      await ctx.db.patch(existing._id, { campaignId: campaign._id, ...sealed, enabled: true });
-      agentId = existing._id;
-    } else {
-      agentId = await ctx.db.insert("companyAgents", {
-        advertiserId,
-        campaignId: campaign._id,
-        ...sealed,
-        walletName: `co-${advertiserId}`,
-        enabled: true,
-      });
-    }
-    await ctx.scheduler.runAfter(0, internal.companyAgentsNode.ensureWallet, { advertiserId });
-    return { agentId };
+    return await configureAgent(ctx, {
+      campaign,
+      actor: customer.actor,
+      targetAudience: args.targetAudience,
+      standing: { maxPricePerSpotMinor: args.maxPerSpotMinor, minRelevantViewers: args.minRelevantViewers, dailyBudgetMinor: args.dailyBudgetMinor },
+    });
   },
 });
 
-/** Turn the agent off (its key is revoked at once) or back on (a fresh key, same limits). */
+/**
+ * The marketer's whole setup: paste the ad video and pick a daily limit.
+ * The video becomes the campaign's ad; reading it builds the company's card,
+ * whose audience is the campaign's ICP from then on (audienceSource "video").
+ * Per-spot max and reach target follow from the budget.
+ */
+export const quickSetup = mutation({
+  args: { videoUrl: v.string(), dailyBudgetMinor: v.number() },
+  returns: v.object({ agentId: v.id("companyAgents"), campaignId: v.id("campaigns") }),
+  handler: async (ctx, args) => {
+    const parsed = parseYouTubeUrl(args.videoUrl);
+    if (!parsed.ok) fail("INVALID_INPUT", parsed.error);
+    const budget = budgetProblem(args.dailyBudgetMinor);
+    if (budget) fail("INVALID_INPUT", budget);
+    const customer = await requireCustomer(ctx);
+    const campaign = await campaignForVideo(ctx, customer.advertiserId);
+    const current = await youtubeOf(ctx, campaign._id);
+    // The same video again (e.g. only the budget moved) keeps its review and approvals.
+    if (!isYouTubeCreative(campaign) || current?.videoId !== parsed.videoId) {
+      await attachYouTubeCreative(ctx, campaign, customer.actor, parsed);
+    }
+    await ctx.db.patch(campaign._id, { audienceSource: "video" });
+    // Until the video's card is in, start from the company's current card (or the campaign's guess).
+    const card = await ctx.db
+      .query("knowledgeCards")
+      .withIndex("by_advertiser", (q) => q.eq("advertiserId", customer.advertiserId))
+      .unique();
+    const fromCard = card && Object.keys(card.audienceTags).length > 0 && !validateTags(card.audienceTags) ? card.audienceTags : null;
+    const targetAudience = fromCard ?? campaign.targetAudience ?? STARTER_AUDIENCE;
+    const { maxPerSpotMinor, minRelevantViewers } = limitsFromBudget(args.dailyBudgetMinor);
+    const { agentId } = await configureAgent(ctx, {
+      campaign: (await ctx.db.get(campaign._id))!,
+      actor: customer.actor,
+      targetAudience,
+      standing: { maxPricePerSpotMinor: maxPerSpotMinor, minRelevantViewers, dailyBudgetMinor: args.dailyBudgetMinor },
+    });
+    return { agentId, campaignId: campaign._id };
+  },
+});
+
+/** The campaign the video goes on: the agent's, else the newest open one, else a new one. Never a locked (operator-approved) one. */
+async function campaignForVideo(ctx: MutationCtx, advertiserId: Id<"advertisers">): Promise<Doc<"campaigns">> {
+  const usable = (c: Doc<"campaigns"> | null): c is Doc<"campaigns"> =>
+    c !== null && c.advertiserId === advertiserId && c.status === "active" && c.creativeStatus !== "approved";
+  const agent = await agentOf(ctx, advertiserId);
+  const mine = agent ? await ctx.db.get(agent.campaignId) : null;
+  if (usable(mine)) return mine;
+  const recent = await ctx.db
+    .query("campaigns")
+    .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+    .order("desc")
+    .take(MAX_CAMPAIGNS_SCANNED);
+  const found = recent.find(usable);
+  if (found) return found;
+  const campaignId = await ctx.db.insert("campaigns", {
+    advertiserId,
+    brief: "YouTube ad",
+    budgetMinor: VIDEO_CAMPAIGN_BUDGET_MINOR,
+    currency: "USD",
+    status: "active",
+    creativeStatus: "none",
+    audienceSource: "video",
+  });
+  return (await ctx.db.get(campaignId))!;
+}
+
+async function configureAgent(
+  ctx: MutationCtx,
+  input: { campaign: Doc<"campaigns">; actor: string; targetAudience: Record<string, number>; standing: Standing },
+): Promise<{ agentId: Id<"companyAgents"> }> {
+  const { campaign, actor, standing } = input;
+  const tagProblem = validateTags(input.targetAudience);
+  if (tagProblem) fail("INVALID_INPUT", tagProblem);
+  const problem = validateStanding(standing);
+  if (problem) fail("INVALID_INPUT", problem);
+  const advertiserId = campaign.advertiserId;
+  await ctx.db.patch(campaign._id, { targetAudience: input.targetAudience });
+
+  const existing = await agentOf(ctx, advertiserId);
+  if (existing) await revokeKey(ctx, existing.agentKeyId, actor, "company agent reconfigured");
+  const sealed = await issueSealedKey(ctx, { advertiserId, campaignId: campaign._id, standing, actor });
+  let agentId: Id<"companyAgents">;
+  if (existing) {
+    await ctx.db.patch(existing._id, { campaignId: campaign._id, ...sealed, enabled: true });
+    agentId = existing._id;
+  } else {
+    agentId = await ctx.db.insert("companyAgents", {
+      advertiserId,
+      campaignId: campaign._id,
+      ...sealed,
+      walletName: `co-${advertiserId}`,
+      enabled: true,
+    });
+  }
+  await ctx.scheduler.runAfter(0, internal.companyAgentsNode.ensureWallet, { advertiserId });
+  return { agentId };
+}
+
 export const setEnabled = mutation({
   args: { enabled: v.boolean() },
   returns: v.null(),
@@ -181,6 +263,34 @@ export const mine = query({
       balanceMinor: v.union(v.number(), v.null()),
       spentTodayMinor: v.number(),
       lastAction: v.union(v.string(), v.null()),
+      advertiserId: v.id("advertisers"),
+      /** The ad video and what we read from it. */
+      video: v.union(
+        v.null(),
+        v.object({
+          videoId: v.string(),
+          url: v.string(),
+          title: v.union(v.string(), v.null()),
+          author: v.union(v.string(), v.null()),
+          thumbnailUrl: v.string(),
+          description: v.union(v.string(), v.null()),
+          status: oembedStatus,
+        }),
+      ),
+      /** The company's knowledge card: what we worked out (its audience is the ICP). */
+      profile: v.union(
+        v.null(),
+        v.object({
+          summary: v.string(),
+          category: v.string(),
+          stage: companyStage,
+          audienceTags: v.record(v.string(), v.number()),
+          method: knowledgeMethod,
+          /** A quick guess on screen while Claude writes the real card. */
+          building: v.boolean(),
+          updatedAt: v.number(),
+        }),
+      ),
     }),
   ),
   handler: async (ctx) => {
@@ -189,7 +299,35 @@ export const mine = query({
     if (!agent) return null;
     const key = await ctx.db.get(agent.agentKeyId);
     const campaign = await ctx.db.get(agent.campaignId);
+    const yt = campaign && isYouTubeCreative(campaign) ? await youtubeOf(ctx, campaign._id) : null;
+    const card = await ctx.db
+      .query("knowledgeCards")
+      .withIndex("by_advertiser", (q) => q.eq("advertiserId", agent.advertiserId))
+      .unique();
     return {
+      advertiserId: agent.advertiserId,
+      video: yt
+        ? {
+            videoId: yt.videoId,
+            url: yt.url,
+            title: yt.title ?? null,
+            author: yt.author ?? null,
+            thumbnailUrl: yt.thumbnailUrl,
+            description: yt.description ?? null,
+            status: yt.oembedStatus,
+          }
+        : null,
+      profile: card
+        ? {
+            summary: card.summary,
+            category: card.category,
+            stage: card.stage,
+            audienceTags: card.audienceTags,
+            method: card.method,
+            building: card.refining === true,
+            updatedAt: card.updatedAt,
+          }
+        : null,
       enabled: agent.enabled,
       campaignId: agent.campaignId,
       targetAudience: campaign?.targetAudience ?? null,

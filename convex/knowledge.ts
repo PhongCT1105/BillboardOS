@@ -17,6 +17,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { companyStage, knowledgeMethod } from "./schemaParts/knowledge";
 import { requireUser } from "./lib/tenancy";
+import { validateTags } from "./lib/match";
 import { heuristicCard, knowledgeInputs, sourcesFrom, type KnowledgeInputs } from "./knowledgeRules";
 
 /** Don't schedule another build for the same company within this window. */
@@ -30,13 +31,19 @@ const MAX_QUERY_LENGTH = 100;
  * Schedule a (re)build of a company's knowledge card unless one was requested
  * in the last 30 s. Call from any mutation (company created, creative attached).
  */
-export async function requestKnowledgeBuild(ctx: MutationCtx, advertiserId: Id<"advertisers">, reason: string): Promise<boolean> {
+export async function requestKnowledgeBuild(
+  ctx: MutationCtx,
+  advertiserId: Id<"advertisers">,
+  reason: string,
+  opts: { force?: boolean } = {},
+): Promise<boolean> {
   const card = await ctx.db
     .query("knowledgeCards")
     .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
     .unique();
   const now = Date.now();
-  if (card?.buildRequestedAt !== undefined && now - card.buildRequestedAt < BUILD_DEBOUNCE_MS) return false;
+  // `force`: new input (an ad video was just read) must not wait out the debounce.
+  if (!opts.force && card?.buildRequestedAt !== undefined && now - card.buildRequestedAt < BUILD_DEBOUNCE_MS) return false;
   if (card) await ctx.db.patch(card._id, { buildRequestedAt: now });
   await ctx.scheduler.runAfter(0, internal.knowledge.buildForCompany, { advertiserId, reason: reason.slice(0, 200) });
   return true;
@@ -44,9 +51,9 @@ export async function requestKnowledgeBuild(ctx: MutationCtx, advertiserId: Id<"
 
 /** Internal entry for other modules (e.g. company creation): schedules a card build. */
 export const requestBuild = internalMutation({
-  args: { advertiserId: v.id("advertisers"), reason: v.string() },
+  args: { advertiserId: v.id("advertisers"), reason: v.string(), force: v.optional(v.boolean()) },
   returns: v.boolean(),
-  handler: async (ctx, args) => await requestKnowledgeBuild(ctx, args.advertiserId, args.reason),
+  handler: async (ctx, args) => await requestKnowledgeBuild(ctx, args.advertiserId, args.reason, { force: args.force }),
 });
 
 async function gather(ctx: QueryCtx, advertiserId: Id<"advertisers">): Promise<KnowledgeInputs | null> {
@@ -58,6 +65,8 @@ async function gather(ctx: QueryCtx, advertiserId: Id<"advertisers">): Promise<K
     .order("desc")
     .take(MAX_CAMPAIGNS);
   const kept = campaigns.filter((c) => c.status !== "cancelled");
+  // A video-led campaign's brief and audience come from the card itself: feeding them back in would be circular.
+  const picked = kept.filter((c) => c.audienceSource !== "video");
   const videos = await ctx.db
     .query("youtubeCreatives")
     .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
@@ -74,11 +83,11 @@ async function gather(ctx: QueryCtx, advertiserId: Id<"advertisers">): Promise<K
     displayName: advertiser.displayName,
     website: advertiser.website ?? null,
     size: advertiser.size ?? null,
-    briefs: kept.map((c) => c.brief.slice(0, 500)),
-    targetAudiences: kept.flatMap((c) => (c.targetAudience ? [c.targetAudience] : [])),
+    briefs: picked.map((c) => c.brief.slice(0, 500)),
+    targetAudiences: picked.flatMap((c) => (c.targetAudience ? [c.targetAudience] : [])),
     videos: videos
       .filter((y) => y.title !== undefined)
-      .map((y) => ({ title: y.title!, author: y.author ?? null, url: y.url })),
+      .map((y) => ({ title: y.title!, author: y.author ?? null, url: y.url, description: y.description ?? null, keywords: y.keywords ?? [] })),
     research: research
       ? { brandTier: research.brandTier, reasoning: research.reasoning, sources: research.sources, method: research.method }
       : null,
@@ -90,6 +99,33 @@ export const gatherInputs = internalQuery({
   returns: v.union(knowledgeInputs, v.null()),
   handler: async (ctx, args) => await gather(ctx, args.advertiserId),
 });
+
+/** No card yet, or the card predates the company's current videos: show a quick guess while Claude works. */
+export const needsQuickGuess = internalQuery({
+  args: { advertiserId: v.id("advertisers"), videoTitles: v.array(v.string()) },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const card = await ctx.db
+      .query("knowledgeCards")
+      .withIndex("by_advertiser", (q) => q.eq("advertiserId", args.advertiserId))
+      .unique();
+    if (!card || card.method === "heuristic") return true;
+    return args.videoTitles.some((t) => !card.videoTitles.includes(t.slice(0, 200)));
+  },
+});
+
+/** A video-led campaign's audience is the card's: keep it in step (ADR 0007: the advertiser doesn't pick an ICP). */
+async function applyAudience(ctx: MutationCtx, advertiserId: Id<"advertisers">, audienceTags: Record<string, number>): Promise<void> {
+  if (Object.keys(audienceTags).length === 0 || validateTags(audienceTags)) return;
+  const campaigns = await ctx.db
+    .query("campaigns")
+    .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+    .order("desc")
+    .take(MAX_CAMPAIGNS);
+  for (const c of campaigns) {
+    if (c.audienceSource === "video" && c.status !== "cancelled") await ctx.db.patch(c._id, { targetAudience: audienceTags });
+  }
+}
 
 /** Upsert the company's card. */
 export const saveCard = internalMutation({
@@ -103,9 +139,12 @@ export const saveCard = internalMutation({
     videoTitles: v.array(v.string()),
     method: knowledgeMethod,
     model: v.optional(v.string()),
+    /** A quick guess saved while Claude is still writing the real card. */
+    refining: v.optional(v.boolean()),
   },
   returns: v.id("knowledgeCards"),
   handler: async (ctx, args) => {
+    await applyAudience(ctx, args.advertiserId, args.audienceTags);
     const fields = {
       advertiserId: args.advertiserId,
       summary: args.summary.slice(0, 1000),
@@ -116,6 +155,7 @@ export const saveCard = internalMutation({
       videoTitles: args.videoTitles.slice(0, MAX_VIDEOS).map((t) => t.slice(0, 200)),
       method: args.method,
       model: args.model,
+      refining: args.refining,
       updatedAt: Date.now(),
     };
     const existing = await ctx.db
@@ -143,6 +183,17 @@ export const buildForCompany = internalAction({
     const heuristic = heuristicCard(inputs);
     const videoTitles = inputs.videos.map((v) => v.title);
     if (process.env.ANTHROPIC_API_KEY) {
+      // The quick guess first, so the profile (and the agent's audience) is there in seconds; Claude refines it.
+      if (await ctx.runQuery(internal.knowledge.needsQuickGuess, { advertiserId: args.advertiserId, videoTitles })) {
+        await ctx.runMutation(internal.knowledge.saveCard, {
+          advertiserId: args.advertiserId,
+          ...heuristic,
+          sources: sourcesFrom(inputs),
+          videoTitles,
+          method: "heuristic",
+          refining: true,
+        });
+      }
       try {
         const result = await ctx.runAction(internal.knowledgeNode.generateCard, { inputs });
         if (result) {

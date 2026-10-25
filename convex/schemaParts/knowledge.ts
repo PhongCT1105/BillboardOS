@@ -34,6 +34,8 @@ export const knowledgeCardFields = {
   updatedAt: v.number(),
   /** Last time a rebuild was scheduled (debounce). */
   buildRequestedAt: v.optional(v.number()),
+  /** Set while this is the quick guess and Claude is still writing the real card. */
+  refining: v.optional(v.boolean()),
 };
 
 export const oembedStatus = v.union(v.literal("pending"), v.literal("ok"), v.literal("failed"));
@@ -48,6 +50,9 @@ export const youtubeCreativeFields = {
   title: v.optional(v.string()),
   author: v.optional(v.string()),
   authorUrl: v.optional(v.string()),
+  /** From the public watch page (best effort): what the video says about itself. */
+  description: v.optional(v.string()),
+  keywords: v.optional(v.array(v.string())),
   thumbnailUrl: v.string(),
   oembedStatus,
   oembedError: v.optional(v.string()),

@@ -130,6 +130,62 @@ export function parseOEmbed(raw: unknown): OEmbed | null {
   return { title, author, authorUrl, thumbnailUrl };
 }
 
+const MAX_DESCRIPTION = 1500;
+const MAX_KEYWORDS = 15;
+
+const decodeEntities = (s: string) =>
+  s
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+
+/** A JSON string literal's body (as found in the page) decoded; null if malformed. */
+function jsonString(body: string): string | null {
+  try {
+    const out: unknown = JSON.parse(`"${body}"`);
+    return typeof out === "string" ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the public watch page says about the video (untrusted HTML): the full
+ * description and the uploader's keywords from the embedded player JSON,
+ * else the meta tags. Bounded and whitespace-collapsed; a consent wall or an
+ * unexpected page yields nothing, never an error.
+ */
+export function parseWatchPage(html: string): { description: string | null; keywords: string[] } {
+  const short = /"shortDescription":"((?:[^"\\]|\\.)*)"/.exec(html);
+  const meta = /<meta\s+name="description"\s+content="([^"]*)"/i.exec(html);
+  const rawDescription = (short && jsonString(short[1])) ?? (meta ? decodeEntities(meta[1]) : null);
+  const description = rawDescription ? clean(rawDescription.replace(/\s+/g, " "), MAX_DESCRIPTION) || null : null;
+
+  let keywords: string[] = [];
+  const jsonKeywords = /"keywords":\[((?:"(?:[^"\\]|\\.)*",?)*)\]/.exec(html);
+  if (jsonKeywords) {
+    try {
+      const list: unknown = JSON.parse(`[${jsonKeywords[1]}]`);
+      if (Array.isArray(list)) keywords = list.filter((k): k is string => typeof k === "string");
+    } catch {
+      keywords = [];
+    }
+  }
+  if (keywords.length === 0) {
+    const metaKeywords = /<meta\s+name="keywords"\s+content="([^"]*)"/i.exec(html);
+    if (metaKeywords) keywords = decodeEntities(metaKeywords[1]).split(",");
+  }
+  const seen = new Set<string>();
+  for (const k of keywords) {
+    const tag = clean(k, 40).toLowerCase();
+    if (tag.length > 0) seen.add(tag);
+    if (seen.size >= MAX_KEYWORDS) break;
+  }
+  return { description, keywords: [...seen] };
+}
+
 /** A campaign has a creative: an uploaded file or a YouTube link. */
 export function hasCreative(campaign: { creativeStorageId?: unknown; creativeContentType?: string }): boolean {
   return Boolean(campaign.creativeStorageId) || campaign.creativeContentType === YOUTUBE_CONTENT_TYPE;

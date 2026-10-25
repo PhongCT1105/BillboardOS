@@ -182,3 +182,58 @@ describe("knowledge.buildForCompany + search", () => {
     expect(await t.action(internal.knowledge.buildForCompany, { advertiserId: rivet as Id<"advertisers"> })).toMatchObject({ method: "heuristic" });
   });
 });
+
+describe("the ad video drives the profile (ICP)", () => {
+  test("heuristic: the video's description and keywords set the category; a placeholder brief doesn't", () => {
+    const card = heuristicCard({
+      ...base,
+      displayName: "Bean There",
+      website: null,
+      briefs: [],
+      targetAudiences: [],
+      videos: [
+        {
+          title: "Our new spring menu",
+          author: "Bean There",
+          url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          description: "Fresh coffee, pastries and brunch at our three cafes.",
+          keywords: ["coffee", "cafe"],
+        },
+      ],
+    });
+    expect(card.category).toBe("food & beverage");
+    expect(Object.keys(card.audienceTags).length).toBeGreaterThan(0);
+  });
+
+  test("a video-led campaign takes the card's audience; an advertiser-picked one keeps its own", async () => {
+    const { t, launchKit } = await world();
+    const [videoLed, picked] = await t.run(async (ctx) => {
+      const common = { advertiserId: launchKit, budgetMinor: 5000, currency: "USD" as const, status: "active" as const, creativeStatus: "none" as const };
+      return [
+        await ctx.db.insert("campaigns", { ...common, brief: "YouTube ad", targetAudience: { tourists: 1 }, audienceSource: "video" as const }),
+        await ctx.db.insert("campaigns", { ...common, brief: "Picked", targetAudience: { families: 1 } }),
+      ];
+    });
+    await t.mutation(internal.knowledge.saveCard, {
+      advertiserId: launchKit,
+      summary: "LaunchKit is a developer tools startup.",
+      category: "developer tools",
+      stage: "startup",
+      audienceTags: { software: 0.6, startups: 0.4 },
+      sources: [],
+      videoTitles: [],
+      method: "claude",
+    });
+    const after = await t.run(async (ctx) => [await ctx.db.get(videoLed), await ctx.db.get(picked)]);
+    expect(after[0]?.targetAudience).toEqual({ software: 0.6, startups: 0.4 });
+    expect(after[1]?.targetAudience).toEqual({ families: 1 });
+  });
+
+  test("a forced request skips the debounce (a new video must not wait 30 s)", async () => {
+    const { t, launchKit } = await world();
+    expect(await t.mutation(internal.knowledge.requestBuild, { advertiserId: launchKit, reason: "company created" })).toBe(true);
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(await t.mutation(internal.knowledge.requestBuild, { advertiserId: launchKit, reason: "again" })).toBe(true);
+    expect(await t.mutation(internal.knowledge.requestBuild, { advertiserId: launchKit, reason: "video", force: true })).toBe(true);
+  });
+});

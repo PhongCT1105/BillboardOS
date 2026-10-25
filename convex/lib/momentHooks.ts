@@ -3,6 +3,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
 import { recordAudit } from "./audit";
 import { NEXT_SPOT_LEAD_MS } from "./liveAuction";
+import { hasCreative } from "./youtube";
 
 /**
  * Small hooks the payment and player code call so the live-moment timeline
@@ -30,7 +31,8 @@ export async function creativeReady(
   campaign: Doc<"campaigns">,
   workspaceId: Id<"workspaces"> | undefined,
 ): Promise<boolean> {
-  if (!campaign.creativeStorageId) return false;
+  // An uploaded file or a YouTube link (which has no storage file).
+  if (!hasCreative(campaign)) return false;
   if (campaign.creativeStatus === "approved") return true;
   if (!workspaceId) return false;
   const approval = await ctx.db

@@ -26,7 +26,8 @@ export type KnowledgeInputs = {
   size: string | null;
   briefs: string[];
   targetAudiences: Record<string, number>[];
-  videos: { title: string; author: string | null; url: string }[];
+  /** The company's ad videos: the strongest signal for who the ads are for. */
+  videos: { title: string; author: string | null; url: string; description?: string | null; keywords?: string[] }[];
   /** Latest platform assessment (company analyst, ADR 0003), if any. */
   research: { brandTier: string; reasoning: string; sources: string[]; method: string } | null;
 };
@@ -38,7 +39,15 @@ export const knowledgeInputs = v.object({
   size: v.union(v.string(), v.null()),
   briefs: v.array(v.string()),
   targetAudiences: v.array(v.record(v.string(), v.number())),
-  videos: v.array(v.object({ title: v.string(), author: v.union(v.string(), v.null()), url: v.string() })),
+  videos: v.array(
+    v.object({
+      title: v.string(),
+      author: v.union(v.string(), v.null()),
+      url: v.string(),
+      description: v.optional(v.union(v.string(), v.null())),
+      keywords: v.optional(v.array(v.string())),
+    }),
+  ),
   research: v.union(
     v.null(),
     v.object({ brandTier: v.string(), reasoning: v.string(), sources: v.array(v.string()), method: v.string() }),
@@ -111,11 +120,16 @@ export function cleanAudienceTags(raw: unknown): Record<string, number> {
   );
 }
 
+/** Everything the videos say about themselves: title, description, keywords. */
+function videoTexts(inputs: KnowledgeInputs): string[] {
+  return inputs.videos.flatMap((v) => [v.title, v.description ?? "", (v.keywords ?? []).join(" ")]);
+}
+
 export function stageFrom(inputs: KnowledgeInputs): Stage {
   const tier = inputs.research?.brandTier;
   if (tier === "startup" || tier === "growth" || tier === "established" || tier === "enterprise") return tier;
   if (inputs.size && SIZE_STAGE[inputs.size]) return SIZE_STAGE[inputs.size];
-  const text = [...inputs.briefs, ...inputs.videos.map((v) => v.title)].join(" ").toLowerCase();
+  const text = [...inputs.briefs, ...videoTexts(inputs)].join(" ").toLowerCase();
   if (/\b(startup|seed|pre-seed|launch|launching|yc|founders?)\b/.test(text)) return "startup";
   return "unknown";
 }
@@ -126,7 +140,7 @@ export function categoryFrom(inputs: KnowledgeInputs): string {
     inputs.displayName,
     inputs.website,
     ...inputs.briefs,
-    ...inputs.videos.map((v) => v.title),
+    ...videoTexts(inputs),
     inputs.research?.reasoning,
   ]);
   let best = "general";

@@ -100,7 +100,13 @@ export const setActiveWorkspace = mutation({
  * companies can't be claimed by name; they'll be attached by invite code later.
  */
 export const createCompany = mutation({
-  args: { name: v.string(), website: v.optional(v.string()), size: v.optional(companySize) },
+  args: {
+    name: v.string(),
+    website: v.optional(v.string()),
+    size: v.optional(companySize),
+    /** Named automatically at sign-up: it takes its ad video's channel name later. */
+    autoNamed: v.optional(v.boolean()),
+  },
   returns: v.id("advertisers"),
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -129,6 +135,7 @@ export const createCompany = mutation({
       ownerUserId: user.userId,
       website,
       size: args.size,
+      autoNamed: args.autoNamed || undefined,
     });
     await ctx.db.insert("advertiserMembers", { advertiserId, userId: user.userId, email: user.email, role: "owner" });
     await requestKnowledgeBuild(ctx, advertiserId, "company created");
