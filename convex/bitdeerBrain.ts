@@ -4,7 +4,7 @@ import { env, internalAction } from "./_generated/server";
 
 const ENDPOINT = "https://api-inference.bitdeer.ai/v1/chat/completions";
 const DEFAULT_MODEL = "zai-org/GLM-5.3-Flash";
-const TIMEOUT_MS = 3_000;
+const TIMEOUT_MS = 5_000;
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 
 export const decide = internalAction({
@@ -44,7 +44,7 @@ An offer equal to the host price accepts. A lower offer at or above the floor co
           messages: [{ role: "system", content: system }, { role: "user", content: user }],
           response_format: { type: "json_object" },
           temperature: 0.2,
-          max_tokens: 384,
+          max_tokens: 1024,
           stream: false,
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
