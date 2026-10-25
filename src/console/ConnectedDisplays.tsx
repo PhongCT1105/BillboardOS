@@ -5,6 +5,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { countdown, money } from "../lib/format";
 import { useNow } from "../lib/hooks";
+import { LiveAudienceButton, audienceText, windowTime } from "../audience/LiveAudience";
 
 export type ConnectedDisplay = {
   id: string;
@@ -50,7 +51,7 @@ export function ConnectedDisplays({ displays, autoSell, renderPreview, sample = 
               <div className="connected-name"><i className={`status-dot ${display.online ? "online" : "attention"}`} /><h3>{display.name}</h3>{display.resolution && <span className="resolution-chip">{display.resolution}</span>}</div>
               <div className="connected-state"><span className={display.online ? "status-online" : "status-attention"}>{display.online ? "Online" : "Attention"}</span><span className="state-divider" />{display.online ? <span className="text-accent">{autoSell === undefined ? "Connected" : autoSell ? "Auto-sell Active" : "Auto-sell Off"}</span> : <span>Offline</span>}</div>
             </div>
-            {display.online ? (renderPreview ? renderPreview(display) : <LiveDisplayCreative display={display} />) : (
+            {display.online ? (renderPreview ? renderPreview(display) : <><LiveDisplayCreative display={display} /><DisplayAudience display={display} /></>) : (
               <div className="offline-panel">
                 <WarningCircle size={25} />
                 <div><strong>Display offline</strong><p>{display.city} · Check the device connection</p></div>
@@ -95,6 +96,20 @@ export function DisplayCreative({ display, title, imageUrl, videoUrl, note, ends
     </div>
     {inspect && <div className="sample-inspector"><strong>{display.name}</strong><span>{display.city} · {display.resolution ?? "Display preview"} · Sample data</span><button onClick={() => setInspect(false)}>Close preview</button></div>}
   </>;
+}
+
+/** Who the screen's camera saw in its last window, and the live view (boxes only). */
+function DisplayAudience({ display }: { display: ConnectedDisplay }) {
+  const billboardId = display.id as Id<"billboards">;
+  const last = useQuery(api.liveAudience.hostWindows, { billboardId, limit: 1 })?.[0];
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-line pt-3 text-[13px]">
+      <span className="min-w-0 text-muted">
+        {last ? `Last window (${windowTime(last.spotStartAt)}, ${last.company ?? "house ad"}): ${audienceText(last.audience)}` : "No audience counted yet"}
+      </span>
+      <LiveAudienceButton billboardId={billboardId} screenName={display.name} showWindows />
+    </div>
+  );
 }
 
 function LiveDisplayCreative({ display }: { display: ConnectedDisplay }) {

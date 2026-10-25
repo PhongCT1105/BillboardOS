@@ -67,3 +67,94 @@ describe("person tracker", () => {
     expect(a.arrivals + b.arrivals).toBe(2);
   });
 });
+
+/** A face box in the top of a person box from `person(x)`. */
+function face(x: number, y = 100): Box {
+  return { originX: x + 20, originY: y + 10, width: 40, height: 40 };
+}
+
+/** Feed frames for `ms` from `start`, marking the faces from `faces(t)` every 8th frame (about 4 face checks a second). */
+function play(tracker: ReturnType<typeof createPersonTracker>, start: number, ms: number, boxes: () => Box[], faces: () => Box[] = () => []) {
+  let i = 0;
+  for (let now = start; now < start + ms; now += FRAME_MS, i++) {
+    tracker.update(boxes(), now);
+    if (i % 8 === 0) tracker.markLooking(faces(), now);
+  }
+  return start + ms;
+}
+
+describe("window audience", () => {
+  test("one person in view for the whole window: one person, about 30 s in view", () => {
+    const t = createPersonTracker();
+    t.startWindow(0);
+    play(t, 0, 30_000, () => [person(100)]);
+    const s = t.windowStats();
+    expect(s.people).toBe(1);
+    expect(s.avgInViewMs).toBeGreaterThan(29_000);
+    expect(s.avgInViewMs).toBeLessThanOrEqual(30_000);
+    expect(s.lookers).toBe(0);
+  });
+
+  test("averages time in view across people, including someone who left mid-window", () => {
+    const t = createPersonTracker();
+    t.startWindow(0);
+    let now = play(t, 0, 10_000, () => [person(100), person(400)]);
+    now = play(t, now, 10_000, () => [person(400)]);
+    play(t, now, 10_000, () => []);
+    const s = t.windowStats();
+    expect(s.people).toBe(2);
+    // About 10 s and 20 s in view.
+    expect(s.avgInViewMs).toBeGreaterThan(14_000);
+    expect(s.avgInViewMs).toBeLessThan(16_000);
+  });
+
+  test("a new window forgets earlier time; someone still in view counts from its start", () => {
+    const t = createPersonTracker();
+    let now = play(t, 0, 20_000, () => [person(100)]);
+    t.startWindow(now);
+    now = play(t, now, 5_000, () => [person(100)]);
+    play(t, now, 25_000, () => []);
+    const s = t.windowStats();
+    expect(s.people).toBe(1);
+    expect(s.avgInViewMs).toBeGreaterThan(4_500);
+    expect(s.avgInViewMs).toBeLessThan(6_000);
+  });
+
+  test("counts who looked at the screen, and for how long", () => {
+    const t = createPersonTracker();
+    t.startWindow(0);
+    // Both in view for 10 s; only the person at x=100 faces the screen, for the first 6 s.
+    let now = play(t, 0, 6_000, () => [person(100), person(400)], () => [face(100)]);
+    now = play(t, now, 4_000, () => [person(100), person(400)]);
+    const s = t.windowStats();
+    expect(s.people).toBe(2);
+    expect(s.lookers).toBe(1);
+    expect(s.avgLookingMs).toBeGreaterThan(5_500);
+    expect(s.avgLookingMs).toBeLessThan(7_000);
+  });
+
+  test("a glance (one face check) doesn't count as looking", () => {
+    const t = createPersonTracker();
+    t.startWindow(0);
+    let now = play(t, 0, 1_000, () => [person(100)]);
+    t.markLooking([face(100)], now);
+    now = play(t, now, 200, () => [person(100)]);
+    play(t, now, 5_000, () => [person(100)]);
+    expect(t.windowStats().lookers).toBe(0);
+  });
+
+  test("a face that isn't inside anyone's box is ignored", () => {
+    const t = createPersonTracker();
+    t.startWindow(0);
+    play(t, 0, 5_000, () => [person(100)], () => [face(600)]);
+    expect(t.windowStats().lookers).toBe(0);
+  });
+
+  test("the live view lists people in view, marking who is looking", () => {
+    const t = createPersonTracker();
+    const now = play(t, 0, 2_000, () => [person(100), person(400)], () => [face(400)]);
+    const boxes = t.liveBoxes(now - FRAME_MS);
+    expect(boxes).toHaveLength(2);
+    expect(boxes.filter((b) => b.looking).map((b) => b.originX)).toEqual([400]);
+  });
+});

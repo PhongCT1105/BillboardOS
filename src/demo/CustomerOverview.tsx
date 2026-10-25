@@ -4,6 +4,7 @@ import { api } from "../../convex/_generated/api";
 import { money, words } from "../lib/format";
 import { DisplayBrowser } from "./Displays";
 import { DashboardSkeleton, Metrics } from "./ui";
+import { AdAudience } from "../audience/AdAudience";
 
 export function CustomerOverview() {
   const campaigns = useQuery(api.campaigns.list, {});
@@ -39,6 +40,7 @@ export function CustomerOverview() {
           },
         ]}
       />
+      <AdAudience />
       <DisplayBrowser />
       <section aria-labelledby="campaigns-heading">
         <div className="demo-section-heading">

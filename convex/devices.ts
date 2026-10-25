@@ -36,7 +36,8 @@ function newCode(): string {
 
 const normalizeCode = (code: string) => code.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-async function deviceFor(ctx: QueryCtx, deviceId: Id<"screenDevices">, deviceKey: string) {
+/** The device behind `deviceId`, proven by its key (the random key only that browser holds), or throws. */
+export async function deviceFor(ctx: QueryCtx, deviceId: Id<"screenDevices">, deviceKey: string) {
   const device = await ctx.db.get(deviceId);
   if (!device || device.deviceKeyHash !== (await hashKey(deviceKey))) fail("NOT_FOUND", "Unknown device; register again");
   return device;
