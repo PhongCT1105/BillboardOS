@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 124 28" fill="#CFCFCF" role="img">
+  <title>LaunchKit</title>
+  <path d="M4.5 22.2V6.5h2.9v13.2h7.2v2.5H4.5z"/>
+  <circle cx="21.8" cy="14.5" r="5.2" fill="none" stroke="#CFCFCF" stroke-width="2"/>
+  <path d="M21.8 7.2 23.6 4.4h-3.6l1.8 2.8z"/>
+  <text x="32" y="19.2" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="-0.3">LaunchKit</text>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 158 28" fill="#CFCFCF" role="img">
+  <title>Golden Gate Coffee</title>
+  <circle cx="11" cy="14" r="8.2" fill="none" stroke="#CFCFCF" stroke-width="1.7"/>
+  <path d="M11 8.2c-2 1.8-3.2 3.8-3.2 5.6 0 1.8 1.4 3.3 3.2 3.3s3.2-1.5 3.2-3.3c0-1.8-1.2-3.8-3.2-5.6z"/>
+  <path d="M19 11.2h1.9c1.1 0 2 .9 2 2s-.9 2-2 2H19" fill="none" stroke="#CFCFCF" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="28" y="18.6" font-family="Arial, Helvetica, sans-serif" font-size="11.5" font-weight="700" letter-spacing="0.8">GOLDEN GATE</text>
+</svg>
