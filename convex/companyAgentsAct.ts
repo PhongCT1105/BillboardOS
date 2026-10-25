@@ -7,6 +7,8 @@
  *   auction_* events    -> onUpdate   -> POST /api/agent/offers/{id}/bid
  *   negotiation_counter -> onCounter  -> POST /api/agent/offers/{id}/reply
  *   flash_won           -> companyAgentsNode.pay (Node: the CDP wallet signs the x402 payment)
+ *   round_offer         -> ruleBasedStrategy -> POST /api/agent/rounds/{id}/bid
+ *   round_won           -> companyAgentsNode.pay
  * Its cap never exceeds its max per spot, what is left of its daily budget, or
  * its wallet balance; with the balance not read yet it sits out and says so.
  */
@@ -16,6 +18,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { decryptSecret } from "./lib/demoCrypto";
 import { agentCap, agentSiteUrl, bidDelayMs, onAnnounce, onCounter, onUpdate, type AgentPayload } from "./lib/companyAgent";
+import { ruleBasedStrategy } from "./lib/rounds";
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 const errText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 150);
@@ -31,7 +34,7 @@ export const act = internalAction({
   handler: async (ctx, args): Promise<null> => {
     const payload = (args.payload ?? {}) as AgentPayload;
     const type = payload.type ?? "unknown";
-    if (type === "flash_won") {
+    if (type === "flash_won" || type === "round_won") {
       // Paying needs the CDP SDK (Node); it re-checks everything itself.
       await ctx.scheduler.runAfter(0, internal.companyAgentsNode.pay, { advertiserId: args.advertiserId, payload: args.payload });
       return null;
@@ -47,8 +50,8 @@ export const act = internalAction({
       await log(`${type}: agent is off`);
       return null;
     }
-    if (type === "flash_lost") {
-      await log("flash_lost: another company won the spot");
+    if (type === "flash_lost" || type === "round_lost") {
+      await log(`${type}: another company won the spot`);
       return null;
     }
     const secret = process.env.INTERNAL_API_SECRET;
@@ -90,6 +93,22 @@ export const act = internalAction({
             balanceMinor: me.balanceMinor ?? 0,
           })
         : 0;
+
+    if (type === "round_offer") {
+      if (!payload.links?.bid || payload.floorMinor === undefined) return null;
+      const decision = ruleBasedStrategy({
+        floorMinor: payload.floorMinor,
+        askingMinor: payload.askingMinor ?? payload.floorMinor,
+        match: typeof payload.audienceMatch === "number" ? payload.audienceMatch : null,
+        crowd: payload.crowd ?? null,
+        maxPerSpotMinor: standing?.maxPricePerSpotMinor ?? 0,
+        budgetLeftMinor: standing ? standing.dailyBudgetMinor - me.spentTodayMinor : 0,
+        balanceMinor: me.balanceMinor,
+      });
+      const result = await post(payload.links.bid, { amountMinor: decision.amountMinor, reasoning: decision.reasoning });
+      await log(`round_offer: ${decision.amountMinor === null ? "pass" : `bid ${usd(decision.amountMinor)}`} (${decision.reasoning}) -> ${result}`);
+      return null;
+    }
 
     if (type === "flash_offer") {
       if (!payload.links?.reply) return null;

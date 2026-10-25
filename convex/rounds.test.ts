@@ -8,6 +8,7 @@ import schema from "./schema";
 import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { ensureUpcomingSlots } from "./lib/inventory";
 import { closeRoundCore, startRoundCore } from "./rounds";
+import { ruleBasedStrategy } from "./lib/rounds";
 
 // Sunday 2026-10-25, 09:07 PDT: the 09:00-09:15 slot is on air with 8 minutes left.
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -228,5 +229,64 @@ describe("rounds: start, invite, bid, close", () => {
     await w.bid(w.companies[0], id, 200);
     await w.bid(w.companies[1], id, null);
     expect(await errorCode(w.bid(w.companies[1], id, 300))).toBe("ROUND_CLOSED");
+  });
+});
+
+/** Run everything scheduled "now", step by step, without jumping the clock. */
+async function flush(t: TestClient, rounds = 10) {
+  for (let i = 0; i < rounds; i++) {
+    vi.advanceTimersByTime(1);
+    await t.finishInProgressScheduledFunctions();
+  }
+}
+
+describe("rounds: agents talk over webhooks and the agent API", () => {
+  test("S9: each invited agent gets a signed round_offer and bids over HTTP", async () => {
+    const w = await world();
+    const [lk, rivet] = w.companies;
+    const id = (await w.start())!;
+    await flush(w.t);
+    const offers = webhooks.filter((h) => h.event === "round_offer");
+    expect(offers.map((h) => h.url).sort()).toEqual(["https://agent.test/launchkit", "https://agent.test/rivet"]);
+    expect(offers[0].body).toMatchObject({
+      type: "round_offer",
+      roundId: id,
+      floorMinor: 100,
+      askingMinor: 100,
+      links: { bid: `/api/agent/rounds/${id}/bid` },
+    });
+    const post = (key: string, body: unknown) =>
+      w.t.fetch(`/api/agent/rounds/${id}/bid`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const first = await post(lk.key, { amountMinor: 200, reasoning: "Fits our launch" });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ status: "bid" });
+    expect(await (await post(rivet.key, { amountMinor: null, reasoning: "Not today" })).json()).toEqual({ status: "passed" });
+    expect((await w.round(id)).status).toBe("awarded");
+  });
+
+  test("the built-in company agent answers its round_offer with the rule-based bid", async () => {
+    const w = await world({ companies: ["LaunchKit"] });
+    const lk = w.companies[0];
+    await lk.customer.mutation(api.companyAgents.setup, {
+      campaignId: lk.campaignId,
+      targetAudience: { startups: 1 },
+      minRelevantViewers: 1,
+      maxPerSpotMinor: 500,
+      dailyBudgetMinor: 1000,
+    });
+    await w.t.run(async (ctx) => {
+      const agent = (await ctx.db.query("companyAgents").first())!;
+      await ctx.db.patch(agent._id, { balanceMinor: 1000 });
+    });
+    const id = (await w.start())!;
+    await flush(w.t, 20);
+    const [row] = await w.bids(id);
+    const expected = ruleBasedStrategy({ floorMinor: 100, askingMinor: 100, match: row.match, crowd: null, maxPerSpotMinor: 500, budgetLeftMinor: 1000, balanceMinor: 1000 });
+    expect(row).toMatchObject({ status: "won", amountMinor: expected.amountMinor, reasoning: expected.reasoning });
+    expect((await w.round(id)).status).toBe("awarded");
   });
 });

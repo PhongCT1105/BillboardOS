@@ -319,6 +319,16 @@ const agentPost = httpAction(async (ctx, request) => {
         await ctx.runMutation(internal.liveAuction.placeBid, { token, offerId: offerBid[1], amountMinor, reasoning: str(body.reasoning) }),
       );
     }
+    const roundBid = /^rounds\/([^/]+)\/bid$/.exec(path);
+    if (roundBid) {
+      // One sealed answer per round: whole cents, or null (or nothing) to pass.
+      const amountMinor = body.amountMinor === null || body.amountMinor === undefined ? null : num(body.amountMinor);
+      if (amountMinor === undefined) return missing(["amountMinor (number, or null to pass)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.rounds.submitBid, { token, roundId: roundBid[1], amountMinor, reasoning: str(body.reasoning) }),
+      );
+    }
     const action = /^auctions\/([^/]+)\/(join|bid|auto-bid)$/.exec(path);
     if (action) {
       const [, auctionId, verb] = action;

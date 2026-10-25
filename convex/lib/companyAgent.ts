@@ -111,7 +111,12 @@ export type AgentPayload = {
   sellerMinor?: number;
   yourLastOfferMinor?: number | null;
   roundsLeft?: number;
-  // flash_won
+  // round_offer (bidding rounds)
+  roundId?: string;
+  floorMinor?: number;
+  askingMinor?: number;
+  crowd?: number | null;
+  // flash_won / round_won
   holdId?: string;
   amountMinor?: number;
   purchaseUrl?: string;

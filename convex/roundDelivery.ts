@@ -1,11 +1,108 @@
 import { v } from "convex/values";
-import { internalAction } from "./_generated/server";
+import { internalAction, internalQuery } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { keyStatus } from "./lib/agentKeys";
+import { SIGNATURE_HEADER, TIMESTAMP_HEADER, signWebhook } from "./lib/webhook";
+
+/**
+ * Signed webhooks for bidding rounds: `round_offer` (the invitation),
+ * `round_won` (pay this hold over x402), `round_lost`. Same signing as every
+ * other BillboardOS webhook: HMAC-SHA256 over "<timestamp>.<raw body>" with
+ * the agent key's webhook secret. Rounds close in seconds: 5 s timeout, one
+ * quick retry.
+ */
 
 export const roundEvent = v.union(v.literal("round_offer"), v.literal("round_won"), v.literal("round_lost"));
+const TIMEOUT_MS = 5_000;
 
-/** Signed webhook for one invited company (filled in by the agent-delivery task). */
+function siteUrl(): string {
+  return (process.env.CONVEX_SITE_URL ?? "https://billboardos.invalid").replace(/\/$/, "");
+}
+
+export const loadForDelivery = internalQuery({
+  args: { bidId: v.id("roundBids"), event: roundEvent },
+  returns: v.union(v.object({ ok: v.literal(true), url: v.string(), secret: v.string(), payload: v.any() }), v.object({ ok: v.literal(false), reason: v.string() })),
+  handler: async (ctx, args) => {
+    const bid = await ctx.db.get(args.bidId);
+    const round = bid ? await ctx.db.get(bid.roundId) : null;
+    if (!bid || !round) return { ok: false as const, reason: "round missing" };
+    if (args.event === "round_offer" && round.status !== "bidding") return { ok: false as const, reason: "round already closed" };
+    const key = await ctx.db.get(bid.agentKeyId);
+    if (!key?.webhookUrl || keyStatus(key, Date.now()) !== "active") return { ok: false as const, reason: "agent key inactive or without webhook" };
+    const billboard = await ctx.db.get(round.billboardId);
+    const base = siteUrl();
+    const common = { roundId: round._id, advertiserId: bid.advertiserId, campaignId: bid.campaignId };
+    let payload: Record<string, unknown>;
+    if (args.event === "round_offer") {
+      payload = {
+        type: "round_offer",
+        ...common,
+        screen: { billboardId: round.billboardId, name: billboard?.name ?? "", locationLabel: billboard?.locationLabel ?? "" },
+        spotEndAt: round.spotEndAt,
+        floorMinor: round.floorMinor,
+        askingMinor: round.askingMinor,
+        signals: round.signals,
+        crowd: round.crowd,
+        audienceMatch: bid.match,
+        closesAt: round.closesAt,
+        standingInstructions: key.standing ?? null,
+        links: { base, bid: `/api/agent/rounds/${round._id}/bid` },
+        bidFormat: { amountMinor: "whole cents at or above floorMinor, or null to pass", reasoning: "one sentence (optional)" },
+      };
+    } else if (args.event === "round_won") {
+      const hold = round.holdId ? await ctx.db.get(round.holdId) : null;
+      if (!hold || round.winnerBidId !== bid._id) return { ok: false as const, reason: "no hold for this bid" };
+      payload = {
+        type: "round_won",
+        ...common,
+        holdId: hold._id,
+        amountMinor: hold.amountMinor,
+        payBy: Math.min(hold.expiresAt, Date.now() + 60_000),
+        purchaseUrl: `${base}/a2a/hosts/${round.workspaceId}/purchases/${hold._id}`,
+        notes: "POST purchaseUrl with Authorization: Bearer <agent key with pay scope>; expect HTTP 402, then pay over x402.",
+      };
+    } else {
+      payload = { type: "round_lost", ...common, yourAmountMinor: bid.amountMinor, outcome: round.outcome ?? null };
+    }
+    return { ok: true as const, url: key.webhookUrl, secret: key.webhookSecret, payload };
+  },
+});
+
 export const deliver = internalAction({
   args: { bidId: v.id("roundBids"), event: roundEvent },
   returns: v.null(),
-  handler: async () => null,
+  handler: async (ctx, args) => {
+    const job = await ctx.runQuery(internal.roundDelivery.loadForDelivery, args);
+    if (!job.ok) return null;
+    const body = JSON.stringify(job.payload);
+    let lastError = "";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const timestamp = String(Date.now());
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      try {
+        const res = await fetch(job.url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "BillboardOS-Webhooks/1",
+            "X-BillboardOS-Event": args.event,
+            [SIGNATURE_HEADER]: await signWebhook(job.secret, timestamp, body),
+            [TIMESTAMP_HEADER]: timestamp,
+          },
+          body,
+          signal: controller.signal,
+        });
+        if (res.ok) return null;
+        lastError = `HTTP ${res.status}`;
+      } catch (error) {
+        lastError = controller.signal.aborted ? "timed out" : error instanceof Error ? error.message : String(error);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (attempt === 1) await new Promise((r) => setTimeout(r, 750));
+    }
+    console.warn(`round webhook ${args.event} for bid ${args.bidId} failed: ${lastError}`);
+    return null;
+  },
 });
