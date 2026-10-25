@@ -3,19 +3,18 @@ import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { ago, money, timeOfDay } from "../lib/format";
+import { ago, money } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { SEGMENTS } from "../lib/segments";
-import { txUrl } from "../a2a/NegotiationTimeline";
 import { Card, ErrorLine, Field, Pill, inputCls, primaryBtn, secondaryBtn, useAction } from "../customer/ui";
+import { RoundsPanel } from "./RoundsPanel";
 
 type Live = FunctionReturnType<typeof api.moments.live>;
-type Moment = NonNullable<Live["latest"]>;
 type Device = Live["devices"][number];
 
 const MINUTE = 60_000;
 
-/** Host "Live moment" view (ADR 0006): stage-friendly, everything on one screen. */
+/** Host presenter view: devices, the bidding round on this screen (Sell now, bids with reasons), pricing, event and top-ups. */
 export function MomentPage() {
   const screens = useQuery(api.billboards.mine, {});
   const [picked, setPicked] = useState<Id<"billboards"> | null>(null);
@@ -62,12 +61,11 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
   const live = useSticky(useQuery(api.moments.live, { billboardId, atMinute }));
 
   if (live === undefined) return <div className="h-96 animate-pulse rounded-lg bg-panel" />;
-  const m = live.latest;
 
   return (
     <div className="flex flex-col gap-6">
       <header>
-        <p className="text-xs font-medium tracking-widest text-accent uppercase">Live moment</p>
+        <p className="text-xs font-medium tracking-widest text-accent uppercase">Bidding rounds</p>
         <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">{live.screen.name}</h1>
         <p className="mt-1 text-sm text-muted">
           {live.screen.locationLabel}
@@ -77,12 +75,9 @@ function MomentStage({ billboardId }: { billboardId: Id<"billboards"> }) {
 
       <Devices devices={live.devices} queue={live.queue} now={now} active={billboardId} />
 
-      {m ? <MomentDetail m={m} now={now} /> : <Waiting />}
-
-      <History rows={live.history} />
+      <RoundsPanel billboardId={billboardId} />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <SettingsPanel />
         <PricingPanel billboardId={billboardId} />
         <EventPanel billboardId={billboardId} />
         <TopUpPanel />
@@ -153,267 +148,6 @@ function Devices({ devices, queue, now, active }: { devices: Live["devices"]; qu
         </Card>
       </div>
     </section>
-  );
-}
-
-function Waiting() {
-  return (
-    <div className="rounded-xl border border-dashed border-line px-6 py-16 text-center">
-      <p className="text-lg">Waiting for a crowd.</p>
-      <p className="mt-1 text-sm text-muted">The pricing agent announces a spot when the camera sees enough people in view.</p>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------- the moment
-
-const STATUS_LABEL: Record<string, string> = {
-  offering: "Joining open",
-  bidding: "Live auction",
-  negotiating: "Negotiating",
-  awarded: "Waiting for payment",
-  paid: "Paid, scheduled",
-  playing: "On screen",
-  no_takers: "No takers",
-  failed: "Failed",
-};
-
-function Stopwatch({ m, now }: { m: Moment; now: number }) {
-  const ended = m.status === "failed" || m.status === "no_takers";
-  const end = m.firstFrameAt ?? (ended ? (m.steps.at(-1)?.at ?? now) : now);
-  const ms = Math.max(0, end - m.startedAt);
-  const stopped = m.firstFrameAt !== null || ended;
-  const under = m.firstFrameAt !== null && ms < 30_000;
-  return (
-    <div className="flex flex-col items-start">
-      <p className="text-sm tracking-widest text-muted uppercase">{m.firstFrameAt ? "Crowd detected to first frame" : stopped ? "Stopped" : "Crowd detected, running"}</p>
-      <p className={`tabular font-mono text-7xl font-semibold md:text-8xl ${under ? "text-emerald-300" : stopped ? "text-muted" : "text-fg"}`}>
-        {(ms / 1000).toFixed(1)}
-        <span className="text-4xl">s</span>
-      </p>
-      {under && <p className="text-lg text-emerald-300">Under 30 seconds</p>}
-    </div>
-  );
-}
-
-/** Shown only once a moment is past its bound (its close never ran): end it so the host's queue moves. */
-function EndStuck({ momentId }: { momentId: Id<"moments"> }) {
-  const endStuck = useMutation(api.moments.endStuck);
-  const end = useAction();
-  return (
-    <div className="mt-2 flex flex-col items-end gap-1">
-      <button type="button" className={secondaryBtn} disabled={end.busy} onClick={() => void end.run(() => endStuck({ momentId }))}>
-        {end.busy ? "Ending…" : "End stuck moment"}
-      </button>
-      <ErrorLine error={end.error} />
-    </div>
-  );
-}
-
-function MomentDetail({ m, now }: { m: Moment; now: number }) {
-  const closesLeft = m.status === "bidding" && m.biddingClosesAt !== null ? Math.max(0, m.biddingClosesAt - now) : m.status === "offering" ? Math.max(0, m.offerClosesAt - now) : null;
-  const price = m.winner ? money(m.winner.amountMinor) : money(m.priceMinor);
-  return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
-      <div className="flex flex-col gap-6">
-        <section className="flex flex-wrap items-end justify-between gap-6 rounded-xl border border-line bg-panel p-6">
-          <Stopwatch m={m} now={now} />
-          <div className="text-right">
-            <p className="text-sm text-muted">{STATUS_LABEL[m.status] ?? m.status}</p>
-            <p className="tabular font-mono text-4xl">{price}</p>
-            <p className="text-sm text-faint">
-              {Math.round((m.spotEndAt - m.spotStartAt) / MINUTE)} min, {timeOfDay(m.spotStartAt)} to {timeOfDay(m.spotEndAt)} · opened at {money(m.priceMinor)}, minimum {money(m.floorMinor)}
-            </p>
-            {closesLeft !== null && (
-              <p className="tabular mt-1 font-mono text-xl text-accent">
-                {m.status === "bidding" ? "Bidding closes" : "Joining closes"} in {(closesLeft / 1000).toFixed(1)} s
-                {m.extensions > 0 && <span className="ml-2 text-sm text-faint">extended {m.extensions}x</span>}
-              </p>
-            )}
-            {m.stuckAfter !== null && now > m.stuckAfter && <EndStuck momentId={m.momentId} />}
-          </div>
-        </section>
-
-        <section className="rounded-xl border border-line bg-panel p-5">
-          <p className="text-xs tracking-widest text-muted uppercase">Pricing agent reasoning</p>
-          {m.valueMinor !== null && (
-            <p className="mt-2 text-sm text-muted">
-              Worth about <span className="tabular font-mono text-fg">{money(m.valueMinor)}</span> to the audience in view
-            </p>
-          )}
-          <p className="mt-2 text-xl leading-snug">{m.priceWhy ?? m.reasoning}</p>
-        </section>
-
-        <Timeline m={m} />
-      </div>
-
-      <aside className="flex flex-col gap-6 lg:sticky lg:top-6 lg:self-start">
-        <Payment m={m} />
-        <Ladder m={m} />
-      </aside>
-    </div>
-  );
-}
-
-function Timeline({ m }: { m: Moment }) {
-  return (
-    <section className="rounded-xl border border-line bg-panel p-5">
-      <p className="text-xs tracking-widest text-muted uppercase">Timeline: joins, bids, counters, award, payment</p>
-      <ol className="mt-3 flex flex-col gap-2.5">
-        {m.steps.map((s, i) => (
-          <li key={i} className="grid grid-cols-[76px_minmax(0,1fr)] gap-3">
-            <span className="tabular text-right font-mono text-base text-muted">+{((s.at - m.startedAt) / 1000).toFixed(1)}s</span>
-            <span>
-              <span className="text-lg text-fg">{s.label}</span>
-              {s.detail && <span className="block text-sm text-faint">{s.detail}</span>}
-            </span>
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-function Ladder({ m }: { m: Moment }) {
-  if (m.bids.length === 0) return null;
-  const kind = { bid: "bid", buyer_offer: "buyer offer", seller_counter: "host counter" } as const;
-  return (
-    <section className="rounded-xl border border-line bg-panel p-5">
-      <p className="text-xs tracking-widest text-muted uppercase">Bids</p>
-      <ul className="mt-3 flex flex-col gap-2">
-        {m.bids.map((b, i) => (
-          <li key={i} className="flex items-baseline justify-between gap-3">
-            <span className="min-w-0 truncate">
-              <span className="text-base">{b.company}</span>
-              <span className="ml-2 text-xs text-faint">{kind[b.kind]} · +{((b.at - m.startedAt) / 1000).toFixed(1)}s</span>
-            </span>
-            <span className="tabular font-mono text-lg">{money(b.amountMinor)}</span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function Payment({ m }: { m: Moment }) {
-  const url = m.paymentTx && m.paymentNetwork ? txUrl(m.paymentNetwork, m.paymentTx) : null;
-  return (
-    <section className="rounded-xl border border-line bg-panel p-5">
-      <p className="text-xs tracking-widest text-muted uppercase">Payment</p>
-      {m.paymentTx ? (
-        <>
-          <p className="mt-2 text-2xl font-semibold text-emerald-300">Paid {m.paidMinor !== null ? money(m.paidMinor) : ""} USDC</p>
-          {url ? (
-            <a href={url} target="_blank" rel="noreferrer" className="mt-1 block truncate font-mono text-sm text-accent underline-offset-4 hover:underline">
-              View on Basescan: {m.paymentTx}
-            </a>
-          ) : (
-            <p className="mt-1 truncate font-mono text-sm text-muted">{m.paymentTx}</p>
-          )}
-        </>
-      ) : m.paymentBlocked ? (
-        <p className="mt-2 text-xl font-semibold text-danger">Payment blocked: {m.paymentBlocked}</p>
-      ) : (
-        <p className="mt-2 text-sm text-muted">{m.status === "awarded" && m.winner ? `Waiting for ${m.winner.company} to pay over x402` : "No payment yet"}</p>
-      )}
-    </section>
-  );
-}
-
-function History({ rows }: { rows: Live["history"] }) {
-  const now = useNow(30_000);
-  if (rows.length === 0) return null;
-  return (
-    <section>
-      <h2 className="text-lg font-semibold">Recent moments</h2>
-      <div className="mt-3 overflow-x-auto rounded-lg border border-line">
-        <table className="w-full min-w-[640px] text-left text-sm">
-          <thead className="bg-panel text-xs text-muted">
-            <tr>
-              <th className="px-4 py-2 font-medium">When</th>
-              <th className="px-4 py-2 font-medium">Relevant viewers</th>
-              <th className="px-4 py-2 font-medium">Winner</th>
-              <th className="px-4 py-2 text-right font-medium">Price</th>
-              <th className="px-4 py-2 font-medium">Payment</th>
-              <th className="px-4 py-2 text-right font-medium">Crowd to screen</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.momentId} className="border-t border-line">
-                <td className="px-4 py-2 text-muted">{ago(r.startedAt, now)}</td>
-                <td className="px-4 py-2">{r.relevantViewers}</td>
-                <td className="px-4 py-2">{r.winner ?? <span className="text-faint">{STATUS_LABEL[r.status] ?? r.status}</span>}</td>
-                <td className="tabular px-4 py-2 text-right font-mono">{r.paidMinor !== null ? money(r.paidMinor) : "-"}</td>
-                <td className="px-4 py-2">{r.paymentMode === "x402" ? "x402" : "-"}</td>
-                <td className="tabular px-4 py-2 text-right font-mono">{r.durationMs !== null ? `${(r.durationMs / 1000).toFixed(1)} s` : "-"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------- host controls
-
-function SettingsPanel() {
-  const me = useQuery(api.workspaces.get, {});
-  const settings = useQuery(api.moments.settings, {});
-  const save = useMutation(api.moments.updateSettings);
-  const { busy, error, run } = useAction();
-  const [saved, setSaved] = useState(false);
-  if (!me || !settings) return null;
-  const owner = me.myRole === "owner";
-  async function onSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const f = new FormData(e.currentTarget);
-    setSaved(false);
-    const ok = await run(async () => {
-      await save({
-        workspaceId: me!.workspaceId,
-        enabled: f.get("enabled") === "on",
-        minPeopleInView: Number(f.get("min")),
-        joinWindowSeconds: Number(f.get("window")),
-        minMatch: Number(f.get("match")) / 100,
-      });
-      return true;
-    });
-    if (ok) setSaved(true);
-  }
-  return (
-    <Card>
-      <h2 className="font-semibold">Moment settings</h2>
-      <p className="mt-1 text-sm text-muted">When the pricing agent announces a spot and how long companies have to join.{!owner && " Only the owner can change these."}</p>
-      <form key={`${settings.enabled}${settings.minPeopleInView}${settings.joinWindowSeconds}${settings.minMatch}`} className="mt-4 grid grid-cols-2 gap-4" onSubmit={onSubmit}>
-        <label className="col-span-2 flex items-center gap-2 text-sm">
-          <input type="checkbox" name="enabled" defaultChecked={settings.enabled} disabled={!owner} /> Detector on
-        </label>
-        <Num name="min" label="Min people in view" value={settings.minPeopleInView} disabled={!owner} />
-        <Num name="window" label="Join window (s)" value={settings.joinWindowSeconds} disabled={!owner} />
-        <Num name="match" label="Min audience match (%)" value={Math.round(settings.minMatch * 100)} disabled={!owner} />
-        {owner && (
-          <div className="col-span-2 flex items-center gap-3">
-            <button type="submit" disabled={busy} className={primaryBtn}>
-              Save settings
-            </button>
-            {saved && <span className="text-sm text-emerald-300">Saved</span>}
-          </div>
-        )}
-        <div className="col-span-2">
-          <ErrorLine error={error} />
-        </div>
-      </form>
-    </Card>
-  );
-}
-
-function Num(props: { name: string; label: string; value: number; disabled: boolean }) {
-  return (
-    <Field label={props.label}>
-      <input name={props.name} defaultValue={props.value} disabled={props.disabled} inputMode="numeric" className={`${inputCls} font-mono`} />
-    </Field>
   );
 }
 

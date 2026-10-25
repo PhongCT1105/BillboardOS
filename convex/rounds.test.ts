@@ -440,3 +440,68 @@ describe("rounds: triggers", () => {
     expect(await roundsOn(w)).toHaveLength(1);
   });
 });
+
+describe("rounds: screens and pages", () => {
+  test("the screen shows the bids while bidding, then plays the winner's YouTube ad once paid with a tx hash", async () => {
+    const w = await world({ companies: ["LaunchKit", "Rivet", "Quiet"] });
+    const [lk, rivet] = w.companies;
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(lk.campaignId, { creativeStorageId: undefined, creativeContentType: "youtube" });
+      await ctx.db.insert("youtubeCreatives", {
+        campaignId: lk.campaignId,
+        advertiserId: lk.advertiserId,
+        videoId: "dQw4w9WgXcQ",
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "LaunchKit in 30 seconds",
+        thumbnailUrl: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+        oembedStatus: "ok",
+        attachedAt: Date.now(),
+      });
+    });
+    const id = (await w.start())!;
+    await w.bid(lk, id, 300);
+    await w.bid(rivet, id, 180);
+    const bidding = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(bidding).toMatchObject({ mode: "auction", openingMinor: 100, minimumMinor: 100 });
+    expect(bidding.ladder.map((l) => [l.company, l.amountMinor, l.leading])).toEqual([
+      ["LaunchKit", 300, true],
+      ["Rivet", 180, false],
+    ]);
+
+    await w.bid(w.companies[2], id, null);
+    expect((await w.t.query(api.player.screenState, { billboardId: w.led })).mode).toBe("settling");
+    const r = await w.round(id);
+    await w.t.mutation(internal.payments.recordVerified, {
+      holdId: r.holdId!,
+      provider: "x402",
+      externalRef: `0x${"cd".repeat(32)}`,
+      amountMinor: r.priceMinor!,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "pay-yt",
+    });
+    const playing = await w.t.query(api.player.screenState, { billboardId: w.led });
+    expect(playing).toMatchObject({
+      mode: "playing",
+      nowPlaying: { company: "LaunchKit", wonAtMinor: 181, creative: { provider: "youtube", youtubeVideoId: "dQw4w9WgXcQ" } },
+    });
+    expect(playing.nowPlaying?.txShort).not.toBeNull();
+  });
+
+  test("the presenter sees every bid with its reasoning; the advertiser sees only its own", async () => {
+    const w = await world();
+    const [lk, rivet] = w.companies;
+    const id = (await w.start())!;
+    await w.bid(lk, id, 200, "Founders in view");
+    await w.bid(rivet, id, null, "Out of budget");
+    const live = await w.host.query(api.rounds.live, {});
+    expect(live.autoSell).toBe(false);
+    expect(live.screens[0].round?.bids.map((b) => [b.company, b.amountMinor, b.reasoning]).sort()).toEqual([
+      ["LaunchKit", 200, "Founders in view"],
+      ["Rivet", null, "Out of budget"],
+    ]);
+    const mine = await lk.customer.query(api.rounds.myRounds, {});
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ screen: "LED", amountMinor: 200, bidStatus: "won", roundStatus: "awarded" });
+  });
+});

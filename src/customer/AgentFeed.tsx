@@ -16,6 +16,15 @@ const KIND_STYLE: Record<Kind, string> = {
   blocked: "border-danger bg-danger/10",
 };
 
+const ROUND_STYLE: Record<"invited" | "bid" | "passed" | "won" | "lost" | "defaulted", string> = {
+  invited: "border-line",
+  bid: "border-blue-400",
+  passed: "border-line",
+  won: "border-emerald-400 bg-emerald-400/10",
+  lost: "border-amber-400",
+  defaulted: "border-danger bg-danger/10",
+};
+
 /** 14:02:05.6, local time, to a tenth of a second. */
 function clock(ms: number): string {
   const d = new Date(ms);
@@ -27,6 +36,7 @@ function clock(ms: number): string {
 export function AgentFeed() {
   const agent = useQuery(api.companyAgents.mine, {});
   const feed = useQuery(api.companyAgents.feed, { limit: 50 });
+  const rounds = useQuery(api.rounds.myRounds, { limit: 10 });
   const budget = agent?.standing?.dailyBudgetMinor ?? 0;
   const spent = agent?.spentTodayMinor ?? 0;
   const pct = budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
@@ -55,6 +65,26 @@ export function AgentFeed() {
           <div className="h-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
         </div>
       </div>
+
+      {rounds && rounds.length > 0 && (
+        <section aria-label="Bidding rounds" className="flex flex-col gap-2">
+          <h3 className="text-xs font-semibold tracking-wider text-muted uppercase">Rounds</h3>
+          <ol className="flex flex-col gap-2 text-sm">
+            {rounds.map((r) => (
+              <li key={r.roundId} className={`border-l-[3px] py-1 pr-2 pl-3 ${ROUND_STYLE[r.bidStatus]}`}>
+                <div className="flex justify-between gap-3">
+                  <span className="text-fg">
+                    {r.screen}: {r.amountMinor === null ? (r.bidStatus === "invited" ? "deciding…" : "passed") : `bid ${money(r.amountMinor)}`}
+                  </span>
+                  <span className="tabular font-mono text-[11px] text-faint">{clock(r.createdAt)}</span>
+                </div>
+                {r.reasoning && <div className="text-xs text-muted">{r.reasoning}</div>}
+                {r.outcome && <div className="text-xs text-faint">{r.outcome}</div>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
       {feed === undefined ? (
         <Skeleton h="h-48" />

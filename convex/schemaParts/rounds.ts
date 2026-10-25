@@ -69,5 +69,6 @@ export const roundTables = {
     .index("by_hold", ["holdId"]),
   roundBids: defineTable(roundBidFields)
     .index("by_round", ["roundId"])
-    .index("by_advertiser_and_round", ["advertiserId", "roundId"]),
+    .index("by_advertiser_and_round", ["advertiserId", "roundId"])
+    .index("by_advertiser", ["advertiserId"]),
 };

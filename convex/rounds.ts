@@ -1,8 +1,8 @@
 import { ConvexError, v, type Infer } from "convex/values";
-import { internalMutation, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { roundTrigger } from "./schemaParts/rounds";
+import { priceSignal, roundBidStatus, roundStatus, roundTrigger } from "./schemaParts/rounds";
 import { recordAudit } from "./lib/audit";
 import { assertWithinBudget, authenticateAgent, keyStatus } from "./lib/agentKeys";
 import { matchScore } from "./lib/match";
@@ -13,7 +13,8 @@ import { endHold, takeHold } from "./holds";
 import { creativeReady } from "./lib/momentHooks";
 import { AUTO_SELL_GAP_MS, CAMERA_COOLDOWN_MS, MAX_INVITES, ROUND_CLOSE_MS, askingPrice, closeOutcome, priceSignals } from "./lib/rounds";
 import { activeEvent, spentTodayForAdvertiserMinor } from "./moments";
-import { requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
+import { requireCustomer, requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
+import { explorerTxUrl } from "./lib/x402/money";
 
 /**
  * Simple bidding rounds (spec 2026-10-24-simple-bidding-rounds-design):
@@ -538,5 +539,126 @@ export const autoSellTick = internalMutation({
       }
     }
     return null;
+  },
+});
+
+// ---------------------------------------------------------------- what people see
+
+const roundView = v.object({
+  roundId: v.id("rounds"),
+  status: roundStatus,
+  trigger: roundTrigger,
+  floorMinor: v.number(),
+  askingMinor: v.number(),
+  signals: v.array(priceSignal),
+  crowd: v.union(v.number(), v.null()),
+  closesAt: v.number(),
+  spotEndAt: v.number(),
+  createdAt: v.number(),
+  priceMinor: v.union(v.number(), v.null()),
+  outcome: v.union(v.string(), v.null()),
+  txUrl: v.union(v.string(), v.null()),
+  bids: v.array(
+    v.object({
+      company: v.string(),
+      amountMinor: v.union(v.number(), v.null()),
+      reasoning: v.union(v.string(), v.null()),
+      match: v.union(v.number(), v.null()),
+      status: roundBidStatus,
+    }),
+  ),
+});
+
+async function toView(ctx: QueryCtx, round: Doc<"rounds">) {
+  const bids = [];
+  for (const b of await bidsOf(ctx, round._id)) {
+    bids.push({
+      company: await companyName(ctx, b.advertiserId),
+      amountMinor: b.amountMinor,
+      reasoning: b.reasoning ?? null,
+      match: b.match,
+      status: b.status,
+    });
+  }
+  return {
+    roundId: round._id,
+    status: round.status,
+    trigger: round.trigger,
+    floorMinor: round.floorMinor,
+    askingMinor: round.askingMinor,
+    signals: round.signals,
+    crowd: round.crowd,
+    closesAt: round.closesAt,
+    spotEndAt: round.spotEndAt,
+    createdAt: round.createdAt,
+    priceMinor: round.priceMinor ?? null,
+    outcome: round.outcome ?? null,
+    txUrl: round.paymentTx && round.paymentNetwork ? (explorerTxUrl(round.paymentNetwork, round.paymentTx) ?? null) : null,
+    bids,
+  };
+}
+
+/** Presenter page: every screen of the workspace with its latest round, and the auto-sell switch. */
+export const live = query({
+  args: { workspaceId: v.optional(v.id("workspaces")) },
+  returns: v.object({
+    autoSell: v.boolean(),
+    screens: v.array(v.object({ billboardId: v.id("billboards"), name: v.string(), online: v.boolean(), round: v.union(roundView, v.null()) })),
+  }),
+  handler: async (ctx, args) => {
+    const me = await resolveWorkspace(ctx, args.workspaceId);
+    await requireWorkspaceMember(ctx, me.workspaceId);
+    const workspace = await ctx.db.get(me.workspaceId);
+    const screens = await ctx.db
+      .query("billboards")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", me.workspaceId))
+      .take(MAX_AUTO_SCREENS);
+    const out = [];
+    for (const s of screens) {
+      const round = await latestRound(ctx, s._id);
+      out.push({ billboardId: s._id, name: s.name, online: s.deviceStatus === "online", round: round ? await toView(ctx, round) : null });
+    }
+    return { autoSell: workspace?.autoSellRounds === true, screens: out };
+  },
+});
+
+/** Advertiser feed: the rounds this company was invited to, newest first. */
+export const myRounds = query({
+  args: { limit: v.optional(v.number()) },
+  returns: v.array(
+    v.object({
+      roundId: v.id("rounds"),
+      screen: v.string(),
+      roundStatus: roundStatus,
+      outcome: v.union(v.string(), v.null()),
+      amountMinor: v.union(v.number(), v.null()),
+      reasoning: v.union(v.string(), v.null()),
+      bidStatus: roundBidStatus,
+      createdAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const customer = await requireCustomer(ctx);
+    const rows = await ctx.db
+      .query("roundBids")
+      .withIndex("by_advertiser", (q) => q.eq("advertiserId", customer.advertiserId))
+      .order("desc")
+      .take(Math.min(Math.max(1, Math.floor(args.limit ?? 10)), 10));
+    const out = [];
+    for (const b of rows) {
+      const round = await ctx.db.get(b.roundId);
+      if (!round) continue;
+      out.push({
+        roundId: round._id,
+        screen: (await ctx.db.get(round.billboardId))?.name ?? "Screen",
+        roundStatus: round.status,
+        outcome: round.outcome ?? null,
+        amountMinor: b.amountMinor,
+        reasoning: b.reasoning ?? null,
+        bidStatus: b.status,
+        createdAt: round.createdAt,
+      });
+    }
+    return out;
   },
 });

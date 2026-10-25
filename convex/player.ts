@@ -344,6 +344,71 @@ export const readyCreatives = query({
  * reads the clock: it returns `spotEndAt` and the client decides when a paid
  * spot has expired, so the subscription never changes.
  */
+type Ladder = { company: string; amountMinor: number; at: number; leading: boolean }[];
+type NowPlaying = {
+  company: string;
+  wonAtMinor: number;
+  txShort: string | null;
+  txUrl: string | null;
+  creative?: { provider: "file" | "youtube"; youtubeVideoId: string | null; title: string | null };
+};
+
+/** The screen during a bidding round: bidding -> the bids; awarded -> settling; paid -> playing; unsold -> your ad here. */
+async function roundScreen(ctx: QueryCtx, billboard: Doc<"billboards">, round: Doc<"rounds">) {
+  const base = {
+    screenName: billboard.name,
+    minutesLeft: Math.max(1, Math.round((round.spotEndAt - round.spotStartAt) / 60_000)),
+    peopleInView: round.crowd,
+    eventName: round.eventName,
+    openingMinor: round.askingMinor as number | null,
+    minimumMinor: round.floorMinor as number | null,
+    why: round.signals.map((s) => s.reason).join(" · ") as string | null,
+    closesAt: null as number | null,
+    spotEndAt: round.spotEndAt as number | null,
+    ladder: [] as Ladder,
+    nowPlaying: null as NowPlaying | null,
+  };
+  const bids = await ctx.db
+    .query("roundBids")
+    .withIndex("by_round", (q) => q.eq("roundId", round._id))
+    .take(20);
+  const name = async (id: Id<"advertisers">) => (await ctx.db.get(id))?.displayName ?? "A company";
+  if (round.status === "bidding") {
+    const shown = bids
+      .filter((b) => b.status === "bid" && b.amountMinor !== null)
+      .sort((a, b) => b.amountMinor! - a.amountMinor! || (a.answeredAt ?? 0) - (b.answeredAt ?? 0))
+      .slice(0, 6);
+    const ladder: Ladder = [];
+    for (const [i, b] of shown.entries()) {
+      ladder.push({ company: await name(b.advertiserId), amountMinor: b.amountMinor!, at: b.answeredAt ?? round.createdAt, leading: i === 0 });
+    }
+    return { mode: "auction" as const, ...base, closesAt: round.closesAt, ladder };
+  }
+  if (round.status === "awarded") return { mode: "settling" as const, ...base };
+  if (round.status === "paid") {
+    const winner = bids.find((b) => b._id === round.winnerBidId);
+    const campaign = winner ? await ctx.db.get(winner.campaignId) : null;
+    let creative: NowPlaying["creative"];
+    if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
+      const yt = await youtubeOf(ctx, campaign._id);
+      if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
+    } else if (campaign?.creativeStorageId) {
+      creative = { provider: "file", youtubeVideoId: null, title: null };
+    }
+    // Only a settlement transaction hash counts as proof of payment.
+    const tx = round.paymentTx ?? null;
+    const nowPlaying: NowPlaying = {
+      company: winner ? await name(winner.advertiserId) : "A company",
+      wonAtMinor: round.priceMinor ?? round.askingMinor,
+      txShort: tx ? `${tx.slice(0, 6)}…${tx.slice(-4)}` : null,
+      txUrl: tx && round.paymentNetwork ? (explorerTxUrl(round.paymentNetwork, tx) ?? null) : null,
+      ...(creative ? { creative } : {}),
+    };
+    return { mode: "playing" as const, ...base, nowPlaying };
+  }
+  return { mode: "your_ad_here" as const, ...base };
+}
+
 export const screenState = query({
   args: { billboardId: v.id("billboards") },
   returns: v.object({
@@ -408,6 +473,13 @@ export const screenState = query({
       ladder: [],
       nowPlaying: null,
     };
+    // Bidding rounds replaced the live moment: the newer of the two drives the screen.
+    const round = await ctx.db
+      .query("rounds")
+      .withIndex("by_billboard_and_createdAt", (q) => q.eq("billboardId", billboard._id))
+      .order("desc")
+      .first();
+    if (round && (!moment || round.createdAt >= moment.startedAt)) return await roundScreen(ctx, billboard, round);
     if (!moment) return { mode: "your_ad_here" as const, ...empty };
 
     const spotMinutes = Math.max(1, Math.round((moment.spotEndAt - moment.spotStartAt) / 60_000));
