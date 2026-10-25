@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { useAction } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import rehearsalRequest from "../../agents/creao/rehearsal-sales.json";
+import { ago } from "../lib/format";
+import { useNow } from "../lib/hooks";
 
 type JsonObject = Record<string, unknown>;
 type Role = "sales" | "revenue";
@@ -23,6 +25,10 @@ function wait(ms: number) {
 export function CreaoRehearsalPanel() {
   const startRun = useAction(api.creao.startRun);
   const getRun = useAction(api.creao.getRun);
+  const record = useMutation(api.creaoHandoff.record);
+  const roster = useQuery(api.creaoHandoff.roster, {});
+  const latest = useQuery(api.creaoHandoff.latest, {});
+  const now = useNow(15_000);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
@@ -130,6 +136,17 @@ export function CreaoRehearsalPanel() {
       const selected = Array.isArray(sales.selected)
         ? sales.selected.filter(isObject).map((item) => item.campaignId).filter((id): id is string => typeof id === "string")
         : [];
+      const snapshot = requireObject(request.snapshot, "Rehearsal");
+      if (typeof request.traceId !== "string" || typeof snapshot.id !== "string") {
+        throw new Error("Rehearsal request is missing traceId or snapshot.id.");
+      }
+      await record({
+        traceId: request.traceId,
+        snapshotId: snapshot.id,
+        selectedCampaigns: selected,
+        pricingPlans: (revenue.plans as unknown[]).length,
+        preparedOffers: Array.isArray(outreach.offers) ? outreach.offers.length : 0,
+      });
       setReport({
         mode: "SIMULATED rehearsal",
         traceId: request.traceId,
@@ -150,15 +167,16 @@ export function CreaoRehearsalPanel() {
   }
 
   return (
-    <section aria-labelledby="creao-rehearsal-heading" className="rounded-xl border border-line bg-panel p-5">
+    <section aria-labelledby="creao-rehearsal-heading" className="border-y border-line py-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <h2 id="creao-rehearsal-heading" className="text-lg font-semibold">CREAO agent rehearsal</h2>
-            <span className="rounded-full border border-line px-2 py-0.5 text-[10px] font-medium tracking-wide text-muted">SIMULATED</span>
+            <h2 id="creao-rehearsal-heading" className="text-lg font-semibold">One operator, CREAO does the desk work</h2>
+            <span className="rounded-full border border-line px-2 py-0.5 text-[10px] font-medium tracking-wide text-muted">SALES SNAPSHOT IS FICTIONAL</span>
           </div>
           <p className="mt-1 max-w-[75ch] text-sm text-muted">
-            Sample data only. No buyers contacted or payments made.
+            Sales qualifies campaigns and Revenue prices them. The result is saved in Convex and delivered to nobody.
+            Company research, screen audience, and creative safety run on live records when their keys are set.
           </p>
         </div>
         <button
@@ -167,20 +185,45 @@ export function CreaoRehearsalPanel() {
           onClick={() => void runRehearsal()}
           className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
         >
-          {busy ? "Running agents…" : "Run CREAO rehearsal"}
+          {busy ? "Running agents…" : "Run Sales and Revenue"}
         </button>
       </div>
 
+      <ul className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {(roster ?? []).map((role) => (
+          <li key={role.id} className="text-sm">
+            <span className="font-medium">{role.label}</span>
+            <span className="mt-0.5 block text-xs text-muted">
+              {!role.wired
+                ? role.configured
+                  ? "Key is set. No job calls this role yet."
+                  : "Not connected, and no job calls it yet."
+                : role.configured
+                  ? "Connected on this deployment."
+                  : "Not connected on this deployment."}
+            </span>
+          </li>
+        ))}
+      </ul>
+
       <p className="mt-3 text-xs text-muted" role="status">Status: {stage}</p>
-      {error && <p className="mt-3 rounded-md border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-300">{error}</p>}
+      {latest && (
+        <p className="mt-3 text-sm">
+          Last handoff {ago(latest._creationTime, now)}: {latest.summary}
+        </p>
+      )}
+      {error && <p className="mt-3 text-sm text-danger">{error}</p>}
       {report && (
-        <details className="mt-4 rounded-lg border border-line bg-canvas p-3">
-          <summary className="cursor-pointer text-sm font-medium">View run summary and agent outputs</summary>
+        <details className="mt-4">
+          <summary className="cursor-pointer text-sm font-medium">Agent outputs from this run</summary>
           <pre className="mt-3 max-h-[32rem] overflow-auto whitespace-pre-wrap break-words text-xs text-muted">
             {JSON.stringify(report, null, 2)}
           </pre>
         </details>
       )}
+      <p className="mt-4 text-xs text-faint">
+        The handoff above is a Convex query. Another signed-in operator sees it on this page without refreshing.
+      </p>
     </section>
   );
 }

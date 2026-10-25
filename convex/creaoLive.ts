@@ -1,5 +1,7 @@
 import { v } from "convex/values";
-import { env, internalAction } from "./_generated/server";
+import { env, internalAction, internalMutation } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { creaoRateLimiter } from "./creaoLimits";
 
 const ORIGIN = "https://agent.creao.ai";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -10,9 +12,17 @@ const roleValidator = v.union(
   v.literal("company_research"),
   v.literal("screen_audience"),
   v.literal("creative_safety"),
+  v.literal("price_refine"),
+  v.literal("invite_rotate"),
   v.literal("opportunity_strategy"),
 );
-type Role = "company_research" | "screen_audience" | "creative_safety" | "opportunity_strategy";
+type Role =
+  | "company_research"
+  | "screen_audience"
+  | "creative_safety"
+  | "price_refine"
+  | "invite_rotate"
+  | "opportunity_strategy";
 type JsonObject = Record<string, unknown>;
 
 function object(value: unknown): value is JsonObject {
@@ -24,6 +34,8 @@ function configuration(role: Role): { agentId: string; key: string } | null {
     company_research: [env.CREAO_COMPANY_RESEARCH_AGENT_ID, env.CREAO_COMPANY_RESEARCH_API_KEY],
     screen_audience: [env.CREAO_SCREEN_AUDIENCE_AGENT_ID, env.CREAO_SCREEN_AUDIENCE_API_KEY],
     creative_safety: [env.CREAO_CREATIVE_SAFETY_AGENT_ID, env.CREAO_CREATIVE_SAFETY_API_KEY],
+    price_refine: [env.CREAO_PRICE_REFINE_AGENT_ID, env.CREAO_PRICE_REFINE_API_KEY],
+    invite_rotate: [env.CREAO_INVITE_ROTATE_AGENT_ID, env.CREAO_INVITE_ROTATE_API_KEY],
     opportunity_strategy: [env.CREAO_OPPORTUNITY_STRATEGY_AGENT_ID, env.CREAO_OPPORTUNITY_STRATEGY_API_KEY],
   }[role];
   const [agentId, key] = values;
@@ -85,13 +97,25 @@ async function resultOf(run: JsonObject, role: Role, runId: string, key: string)
   throw new Error(`CREAO completed without ${title}`);
 }
 
+/** Consume one CREAO start credit (mutations only — transactional with rate limiter). */
+export const consumeStart = internalMutation({
+  args: {},
+  returns: v.object({ ok: v.boolean(), retryAfter: v.optional(v.number()) }),
+  handler: async (ctx) => {
+    const status = await creaoRateLimiter.limit(ctx, "creaoStart", { throws: false });
+    return status.ok ? { ok: true } : { ok: false, retryAfter: status.retryAfter };
+  },
+});
+
 /** One background job. A missing role configuration leaves the existing provider in place. */
 export const run = internalAction({
   args: { role: roleValidator, requestJson: v.string() },
   returns: v.union(v.null(), v.any()),
-  handler: async (_ctx, { role, requestJson }): Promise<JsonObject | null> => {
+  handler: async (ctx, { role, requestJson }): Promise<JsonObject | null> => {
     const config = configuration(role);
     if (!config) return null;
+    const budget = await ctx.runMutation(internal.creaoLive.consumeStart, {});
+    if (!budget.ok) throw new Error(`CREAO rate-limited${budget.retryAfter ? ` for ${budget.retryAfter}ms` : ""}`);
     if (new TextEncoder().encode(requestJson).byteLength > MAX_INPUT_BYTES) throw new Error("CREAO input exceeds 200 KB");
     const request: unknown = JSON.parse(requestJson);
     if (!object(request) || request.schemaVersion !== 1 || typeof request.traceId !== "string") throw new Error("Invalid CREAO request");

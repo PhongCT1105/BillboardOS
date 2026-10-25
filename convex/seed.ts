@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, type MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { issueAgentKey } from "./agentKeys";
 import type { Doc, Id } from "./_generated/dataModel";
 import { recordAudit } from "./lib/audit";
@@ -32,7 +33,8 @@ const MOSCONE_AUDIENCE = { software: 0.6, startups: 0.2, tourists: 0.2 };
 /**
  * Idempotent demo seed (`npm run seed`). Creates, only if missing:
  * one San Francisco billboard, 15-minute slots for the next 12 hours (topped
- * up on every run), two advertisers, and one active campaign.
+ * up on every run), two advertisers, and one active campaign. Also seeds the
+ * Cal Hacks sponsor **network** (campaigns + agents) and curated knowledge.
  */
 export const demo = internalMutation({
   args: {},
@@ -42,6 +44,8 @@ export const demo = internalMutation({
     advertiserIds: v.array(v.id("advertisers")),
     campaignId: v.id("campaigns"),
     slotsCreated: v.number(),
+    networkCreated: v.number(),
+    knowledgeProfiles: v.number(),
   }),
   handler: async (ctx) => {
     let created = false;
@@ -114,6 +118,11 @@ export const demo = internalMutation({
       campaign = (await ctx.db.get(campaignId))!;
     }
 
+    // Full sponsor network + knowledge for top-10 vibe invites on this screen.
+    const network = await ctx.runMutation(internal.sponsors.seed, {});
+    const knowledge = await ctx.runMutation(internal.companyKnowledge.seedSponsors, {});
+    if (network.created.length > 0 || knowledge.changed > 0) created = true;
+
     if (created) {
       await recordAudit(ctx, {
         workspaceId: await ensureDemoWorkspace(ctx),
@@ -121,8 +130,8 @@ export const demo = internalMutation({
         actor: "system",
         type: "seed.completed",
         subjectId: billboard._id,
-        reason: `Seeded demo inventory (${slotsCreated} new slots)`,
-        data: { campaignId: campaign._id, slotsCreated },
+        reason: `Seeded demo inventory (${slotsCreated} new slots) and sponsor network (${network.created.length} new, ${knowledge.profiles} knowledge profiles)`,
+        data: { campaignId: campaign._id, slotsCreated, networkCreated: network.created.length, knowledgeProfiles: knowledge.profiles },
       });
     }
 
@@ -132,6 +141,8 @@ export const demo = internalMutation({
       advertiserIds,
       campaignId: campaign._id,
       slotsCreated,
+      networkCreated: network.created.length,
+      knowledgeProfiles: knowledge.profiles,
     };
   },
 });

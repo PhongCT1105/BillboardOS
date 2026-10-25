@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "traceId": "example-price-1",
+  "advertiserId": "example-advertiser-1",
+  "companyName": "Example Developer Tools",
+  "current": {
+    "summary": "Fictional developer tools company selling an editor to software teams.",
+    "category": "developer tools",
+    "audienceTags": { "software": 0.7, "startups": 0.3 },
+    "priceFactor": 1.05,
+    "reasoning": "Growth brand with moderate outdoor willingness."
+  },
+  "recentOutcomes": {
+    "agreed": 1,
+    "rejectedPrice": 3,
+    "lostAfterAgree": 0,
+    "note": "Rejected three host counters near the floor."
+  },
+  "knowledge": {
+    "citations": [],
+    "retrievalStatus": "empty_index"
+  }
+}

@@ -187,8 +187,16 @@ export function parseWatchPage(html: string): { description: string | null; keyw
 }
 
 /** A campaign has a creative: an uploaded file or a YouTube link. */
-export function hasCreative(campaign: { creativeStorageId?: unknown; creativeContentType?: string }): boolean {
-  return Boolean(campaign.creativeStorageId) || campaign.creativeContentType === YOUTUBE_CONTENT_TYPE;
+export function hasCreative(campaign: {
+  creativeStorageId?: unknown;
+  creativeExternalUrl?: string;
+  creativeContentType?: string;
+}): boolean {
+  return (
+    Boolean(campaign.creativeStorageId) ||
+    Boolean(campaign.creativeExternalUrl) ||
+    campaign.creativeContentType === YOUTUBE_CONTENT_TYPE
+  );
 }
 
 export function isYouTubeCreative(campaign: { creativeContentType?: string }): boolean {

@@ -24,4 +24,7 @@ crons.interval("screen heartbeats", { minutes: 1 }, internal.devices.markOffline
 // Audience agent: re-read who is in front of each online screen every hour.
 crons.interval("audience read", { minutes: 15 }, internal.research.audienceSweep, {});
 
+// Price CREAO harness: refresh stale company price factors in the background.
+crons.interval("price harness", { hours: 1 }, internal.priceHarness.tick, {});
+
 export default crons;

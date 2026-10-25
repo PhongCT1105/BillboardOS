@@ -90,6 +90,9 @@ async function toSlotView(ctx: QueryCtx, slot: Doc<"slots">) {
         view.creativeUrl = url;
         view.contentType = campaign.creativeContentType;
       }
+    } else if (campaign.creativeExternalUrl) {
+      view.creativeUrl = campaign.creativeExternalUrl;
+      view.contentType = campaign.creativeContentType;
     }
   }
   return view;
@@ -298,9 +301,18 @@ export const readyCreatives = query({
         if (yt) out.push({ campaignId: campaign._id, url: yt.thumbnailUrl, contentType: YOUTUBE_CONTENT_TYPE, youtubeVideoId: yt.videoId });
         continue;
       }
-      if (!campaign.creativeStorageId) continue;
-      const url = await ctx.storage.getUrl(campaign.creativeStorageId);
-      if (url) out.push({ campaignId: campaign._id, url, contentType: campaign.creativeContentType ?? null });
+      if (campaign.creativeStorageId) {
+        const url = await ctx.storage.getUrl(campaign.creativeStorageId);
+        if (url) out.push({ campaignId: campaign._id, url, contentType: campaign.creativeContentType ?? null });
+        continue;
+      }
+      if (campaign.creativeExternalUrl) {
+        out.push({
+          campaignId: campaign._id,
+          url: campaign.creativeExternalUrl,
+          contentType: campaign.creativeContentType ?? null,
+        });
+      }
     }
     return out;
   },
@@ -338,7 +350,7 @@ async function windowOf(ctx: QueryCtx, round: Doc<"rounds">): Promise<Infer<type
   if (campaign?.creativeContentType === YOUTUBE_CONTENT_TYPE) {
     const yt = await youtubeOf(ctx, campaign._id);
     if (yt) creative = { provider: "youtube", youtubeVideoId: yt.videoId, title: yt.title ?? null };
-  } else if (campaign?.creativeStorageId) {
+  } else if (campaign?.creativeStorageId || campaign?.creativeExternalUrl) {
     creative = { provider: "file", youtubeVideoId: null, title: null };
   }
   // Only a settlement transaction hash counts as proof of payment.

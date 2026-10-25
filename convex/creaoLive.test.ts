@@ -2,7 +2,7 @@ import { convexTest } from "convex-test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { internal } from "./_generated/api";
 import schema from "./schema";
-import { modules } from "./test.setup";
+import { modules, registerBackendComponents } from "./test.setup";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
@@ -25,6 +25,7 @@ describe("CREAO live runner", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const t = convexTest(schema, modules);
+    registerBackendComponents(t);
     const result = await t.action(internal.creaoLive.run, {
       role: "screen_audience", requestJson: JSON.stringify({ schemaVersion: 1, traceId: "trace-1" }),
     });
@@ -41,6 +42,7 @@ describe("CREAO live runner", () => {
       : { status: "completed", result: { text: JSON.stringify({ schemaVersion: 1, role: "screen_audience", traceId: "another-trace" }) } }),
     { status: 200, headers: { "content-type": "application/json" } })));
     const t = convexTest(schema, modules);
+    registerBackendComponents(t);
     await expect(t.action(internal.creaoLive.run, {
       role: "screen_audience", requestJson: JSON.stringify({ schemaVersion: 1, traceId: "trace-1" }),
     })).rejects.toThrow("identity does not match");

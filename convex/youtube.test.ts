@@ -19,6 +19,8 @@ let oembedResponse: () => Response = () => new Response("{}", { status: 500 });
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(START);
+  process.env.INTERNAL_API_SECRET = "test-internal-secret-0123456789";
+  process.env.CONVEX_SITE_URL = "https://site.test";
   oembedCalls = [];
   oembedResponse = () =>
     Response.json({
@@ -44,6 +46,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  delete process.env.INTERNAL_API_SECRET;
+  delete process.env.CONVEX_SITE_URL;
 });
 
 async function errorCode(promise: Promise<unknown>): Promise<string> {
@@ -142,6 +146,7 @@ describe("parseYouTubeUrl", () => {
     expect(hasCreative({})).toBe(false);
     expect(hasCreative({ creativeContentType: "youtube" })).toBe(true);
     expect(hasCreative({ creativeStorageId: "x", creativeContentType: "image/png" })).toBe(true);
+    expect(hasCreative({ creativeExternalUrl: "data:image/svg+xml,x", creativeContentType: "image/svg+xml" })).toBe(true);
   });
 });
 

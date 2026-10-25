@@ -1,0 +1,68 @@
+flowchart TB
+  subgraph Network["1. Sponsor network seed"]
+    OP["Operator"]
+    SP["sponsors:seed<br/>full Cal Hacks company pool"]
+    KS["companyKnowledge.seedSponsors"]
+    EMB["Bitdeer BAAI/bge-m3<br/>indexMissing"]
+    KC["knowledgeCards"]
+    KP["companyKnowledgePassages<br/>+ vector index"]
+    OP --> SP --> KS
+    KS --> KC
+    KS --> KP
+    KP --> EMB --> KP
+  end
+
+  subgraph Triggers["2. What wakes each agent"]
+    T1["Advertiser / campaign / creative change"]
+    T2["Device claim / online + cron every 15m"]
+    T3["Creative attached"]
+    T4["Price harness cron hourly"]
+    T5["Cool-down / thin roster"]
+  end
+
+  subgraph Agents["3. Background CREAO harness"]
+    CTX["agentContext<br/>card + citations"]
+    CR["Company Research / Price<br/>company_research"]
+    SA["Screen Audience<br/>screen_audience"]
+    CS["Creative Safety<br/>creative_safety"]
+    INV["Invite CREAO<br/>opportunity_strategy"]
+    KC --> CTX
+    KP --> CTX
+    CTX --> CR
+    T1 --> CR
+    T4 --> CR
+    T2 --> SA
+    T3 --> CS
+    T5 --> INV
+    KC -.category.-> CS
+  end
+
+  subgraph Stores["4. What they write"]
+    CORP["companyResearch<br/>tags · summary · priceFactor"]
+    BB["billboards<br/>audienceTags · summary"]
+    REV["creativeReviews<br/>→ host policy / approvals"]
+    PREF["billboardInvitePrefs<br/>boost / demote"]
+    STAT["inviteStats<br/>reject streak · cool-down"]
+    CR --> CORP
+    SA --> BB
+    CS --> REV
+    INV --> PREF
+  end
+
+  subgraph Fast["5. Fast sale path seconds"]
+    RANK["Rank network by vibe match<br/>exclude cooled · apply prefs"]
+    TOP10["Invite top 10"]
+    PRICE["windowPrice<br/>model + people + brand"]
+    ROUND["30s offer / counter / settle"]
+    CORP --> RANK
+    BB --> RANK
+    PREF --> RANK
+    STAT --> RANK
+    RANK --> TOP10 --> ROUND
+    CORP --> PRICE --> ROUND
+    ROUND --> STAT
+  end
+
+  subgraph Parallel["Separate rehearsal — not on this path"]
+    SR["Sales → Revenue<br/>creaoHandoffs"]
+  end

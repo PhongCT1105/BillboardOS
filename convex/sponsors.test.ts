@@ -2,7 +2,7 @@ import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { modules, signedInOperator } from "./test.setup";
+import { modules, registerBackendComponents, signedInOperator } from "./test.setup";
 import { ensureUpcomingSlots } from "./lib/inventory";
 import { startRoundCore } from "./rounds";
 import { creativeReady } from "./lib/sale";
@@ -20,27 +20,29 @@ afterEach(() => {
 });
 
 describe("sponsors.seed", () => {
-  test("10 sponsors, each with its YouTube ad ready on any host and an agent that is on; running it again changes nothing", async () => {
+  test("network sponsors each get a YouTube or poster creative ready on any host and an agent that is on; running seed again changes nothing", async () => {
     const t = convexTest(schema, modules);
+    registerBackendComponents(t);
     const first = await t.mutation(internal.sponsors.seed, {});
     expect(first.created).toHaveLength(SPONSORS.length);
     const rows = await t.run(async (ctx) => {
-      const agents = await ctx.db.query("companyAgents").take(20);
-      const campaigns = await ctx.db.query("campaigns").take(20);
+      const agents = await ctx.db.query("companyAgents").take(SPONSORS.length + 5);
+      const campaigns = await ctx.db.query("campaigns").take(SPONSORS.length + 5);
       const ready = [];
       for (const c of campaigns) ready.push(await creativeReady(ctx, c, undefined));
-      const keys = await ctx.db.query("agentKeys").take(20);
+      const keys = await ctx.db.query("agentKeys").take(SPONSORS.length + 5);
       return { agents, ready, keys };
     });
-    expect(rows.agents).toHaveLength(10);
+    expect(rows.agents).toHaveLength(SPONSORS.length);
     expect(rows.agents.every((a) => a.enabled)).toBe(true);
     expect(rows.ready.every(Boolean)).toBe(true);
     expect(rows.keys.every((k) => k.webhookUrl?.startsWith("https://site.test/company-agents/") && k.standing)).toBe(true);
-    expect((await t.mutation(internal.sponsors.seed, {})).existing).toHaveLength(10);
+    expect((await t.mutation(internal.sponsors.seed, {})).existing).toHaveLength(SPONSORS.length);
   });
 
   test("a host's sale invites the sponsors (their ads are approved for every host), and they show up in its top-up list", async () => {
     const t = convexTest(schema, modules);
+    registerBackendComponents(t);
     vi.setSystemTime(Date.UTC(2026, 9, 25, 16, 7));
     await t.mutation(internal.sponsors.seed, {});
     const host = await signedInOperator(t, "host@venue.test");
