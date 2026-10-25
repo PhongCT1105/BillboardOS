@@ -16,6 +16,9 @@ const app = defineApp({
     CREAO_SALES_API_KEY: v.optional(v.string()),
     CREAO_REVENUE_AGENT_ID: v.optional(v.string()),
     CREAO_REVENUE_API_KEY: v.optional(v.string()),
+    /** Server-only Model Studio credentials for the fast buyer negotiation turns. */
+    BITDEER_API_KEY: v.optional(v.string()),
+    BITDEER_MODEL: v.optional(v.string()),
   },
 });
 

@@ -64,12 +64,13 @@ export const seed = internalMutation({
         attachedAt: now,
       });
       const { maxPerSpotMinor, minRelevantViewers } = limitsFromBudget(s.dailyBudgetMinor);
-      await configureAgent(ctx, {
+      const { agentId } = await configureAgent(ctx, {
         campaign: (await ctx.db.get(campaignId))!,
         actor: "seed:sponsors",
         targetAudience: s.targetAudience,
         standing: { maxPricePerSpotMinor: maxPerSpotMinor, minRelevantViewers, dailyBudgetMinor: s.dailyBudgetMinor },
       });
+      await ctx.db.patch(agentId, { autoTopUp: true });
       await requestResearch(ctx, advertiserId);
       await recordAudit(ctx, {
         traceId: `company:${advertiserId}`,
@@ -81,5 +82,31 @@ export const seed = internalMutation({
       created.push(s.name);
     }
     return { created, existing };
+  },
+});
+
+/** Sponsors seeded before auto top-up existed: turn it on. npx convex run sponsors:enableAutoTopUp */
+export const enableAutoTopUp = internalMutation({
+  args: {},
+  returns: v.number(),
+  handler: async (ctx) => {
+    let n = 0;
+    for (const s of SPONSORS) {
+      const a = await ctx.db
+        .query("advertisers")
+        .withIndex("by_displayName", (q) => q.eq("displayName", s.name))
+        .first();
+      const agent = a
+        ? await ctx.db
+            .query("companyAgents")
+            .withIndex("by_advertiser", (q) => q.eq("advertiserId", a._id))
+            .first()
+        : null;
+      if (agent && !agent.autoTopUp) {
+        await ctx.db.patch(agent._id, { autoTopUp: true });
+        n++;
+      }
+    }
+    return n;
   },
 });

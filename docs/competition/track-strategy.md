@@ -8,6 +8,7 @@ This page is **our proposal**, not an official sponsor assessment. Maximize a **
 | P0 | Coinbase x402 | Machine buyer pays x402-protected inventory booking endpoint | Real payment-required response, supported buyer payment, verified proof, idempotent booking | Network/wallet setup; separate sponsor track eligibility not yet confirmed |
 | P1 | CRS | Advertiser risk verification informs permitted terms/review | Actual sandbox request using supplied identities; meaningful downstream decision | Available endpoint may not fit business-verification scenario |
 | P1 | CREAO One-Person Company | Owner monitors AI-led quotes, sales, booking and billing | One operator controls complete multi-agent loop | Must meet sponsor's separate eligibility |
+| P1 | Bitdeer Model Studio | Fast buyer agent chooses an offer, counter or pass on each live auction turn | Show a real Model Studio call, bounded bid and fallback within the auction deadline | Key, latency and a live call still need verification |
 | P1 | Microsoft | Production-minded end-to-end agent product | Useful measurable task, explicit safety gates and working demo | Scope creep |
 | P2 | Convex | Live inventory availability, holds, transaction events and dashboard | Demonstrably real-time shared state, not ordinary CRUD | Backend rework |
 | P2 | Visa | Advertiser campaign shopping flow | Complete useful checkout with trust controls | May not match consumer-shopping intent |

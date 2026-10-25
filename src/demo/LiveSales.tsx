@@ -14,7 +14,7 @@ const STATUS = {
 
 /**
  * Host dashboard: each screen's latest live sale with Sell now, and the
- * auto-sell switch (on by default: an unsold spot on air starts a round).
+ * auto-sell switch (on by default: the 30-second selling loop runs on every online screen).
  */
 export function LiveSales() {
   const live = useQuery(api.rounds.live, {});
@@ -37,7 +37,7 @@ export function LiveSales() {
       <div className="demo-section-heading">
         <div>
           <h2 id="live-sales-heading">Live sales</h2>
-          <p>Every company agent gets the same offer for the spot on air. The first to agree takes it. Unsold spots are offered on their own.</p>
+          <p>Back-to-back 30-second windows. While one plays, company agents negotiate the next; the highest agreed price wins. Nobody buys, our house ad plays.</p>
         </div>
         <label className="flex items-center gap-2 text-sm text-muted" title="Starts a round when an online screen's spot on air is unsold. Each company's daily budget caps what it spends.">
           <input
@@ -64,7 +64,7 @@ export function LiveSales() {
                 {!s.online && <span className="text-xs text-faint">offline</span>}
               </div>
               <p className="text-sm text-muted">
-                {round ? (round.outcome ?? `Offered at ${money(round.askingMinor)} to ${round.bids.length} ${round.bids.length === 1 ? "company" : "companies"}`) : "A round starts when the spot on air is unsold, or press Sell now."}
+                {round ? (round.outcome ?? `Next 30 s offered to ${round.bids.length} ${round.bids.length === 1 ? "company" : "companies"} from ${money(round.askingMinor)}`) : "Selling starts when the screen comes online, or press Sell now."}
               </p>
             </div>
             <div className="flex items-center gap-3">

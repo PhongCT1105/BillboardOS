@@ -17,7 +17,7 @@ export function PairScreenForm({ onDone }: { onDone?: () => void }) {
   const [place, setPlace] = useState("");
   const [floor, setFloor] = useState("0.05");
   const action = useAction();
-  const screenUrl = `${window.location.origin}${window.location.pathname}#/screen`;
+  const screenUrl = `${window.location.origin}${window.location.pathname}#/screen?camera=1`;
   const floorMinor = Math.round(Number.parseFloat(floor) * 100);
 
   async function submit(e: React.FormEvent) {
@@ -35,7 +35,8 @@ export function PairScreenForm({ onDone }: { onDone?: () => void }) {
       <div>
         <h2 className="text-lg font-semibold">Add a screen</h2>
         <p className="mt-1 text-sm text-muted">
-          Each screen is one real device. On the device, open <span className="font-mono text-fg break-all">{screenUrl}</span>, then type the code it shows.
+          Each screen is one real device: the ad machine facing people, not this computer. On the ad machine, open{" "}
+          <span className="font-mono text-fg break-all">{screenUrl}</span>, allow the camera, then type the code it shows here.
         </p>
       </div>
       <label className="flex flex-col gap-2 text-sm">

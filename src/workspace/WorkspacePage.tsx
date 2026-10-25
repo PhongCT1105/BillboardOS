@@ -44,7 +44,7 @@ function Screens() {
   return (
     <Section
       title="Screens"
-      lead={`Each screen is one real device: open ${urlFor("/screen")} on it and pair it with the code it shows. The sensor URL runs the people counter on a laptop or phone facing the street.`}
+      lead={`Each screen is one real device, the ad machine facing people. Open ${urlFor("/screen?camera=1")} on that machine and pair it with the code it shows; it then plays ads and counts people. "Preview" only shows the screen on this computer.`}
       action={
         !adding && (
           <button type="button" className={primaryBtn} onClick={() => setAdding(true)}>

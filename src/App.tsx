@@ -194,9 +194,10 @@ function HostNav({ route }: { route: string }) {
           href={`#/player/${first._id}`}
           target="_blank"
           rel="noreferrer"
+          title="A preview on this computer. The real screen runs on the ad machine: open #/screen there."
           className="rounded-md px-3 py-1.5 text-muted transition-colors hover:text-fg"
         >
-          Open screen
+          Preview screen
         </a>
       )}
     </nav>

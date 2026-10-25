@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -8,12 +8,13 @@ import { errorMessage } from "../lib/format";
 /**
  * #/screen: this device becomes one screen. It keeps a random key in this
  * browser, shows a pairing code until a host claims it in "Add a screen",
- * then plays its screen and sends a heartbeat every 20 s (that is what
- * "online" means). `?camera=1` also counts people with this device's camera.
+ * then plays its screen and sends a heartbeat every 10 s (that is what
+ * "online" means). `?camera=1` also runs the person detector in a small
+ * window and sends how many people are in view with each heartbeat.
  */
 
 const STORE = "billboardos.device";
-const HEARTBEAT_MS = 20_000;
+const HEARTBEAT_MS = 10_000;
 
 type Saved = { deviceId: Id<"screenDevices">; deviceKey: string };
 
@@ -49,6 +50,10 @@ export function ScreenPage({ camera }: { camera: boolean }) {
   const [device, setDevice] = useState<Saved | null>(null);
   const [error, setError] = useState<string | null>(null);
   const status = useQuery(api.devices.status, device ? { deviceId: device.deviceId } : "skip");
+  const people = useRef<number | null>(null);
+  const onPeople = useCallback((n: number) => {
+    people.current = n;
+  }, []);
 
   // Register (or refresh the code of) this device once.
   useEffect(() => {
@@ -89,13 +94,13 @@ export function ScreenPage({ camera }: { camera: boolean }) {
   // Heartbeat while this page is open.
   useEffect(() => {
     if (!device) return;
-    const beat = () => void heartbeat(device).catch(() => undefined);
+    const beat = () => void heartbeat({ ...device, ...(people.current !== null ? { peopleInView: people.current } : {}) }).catch(() => undefined);
     beat();
     const timer = setInterval(beat, HEARTBEAT_MS);
     return () => clearInterval(timer);
   }, [device, heartbeat]);
 
-  if (status?.billboardId) return <PlayerPage billboardId={status.billboardId} camera={camera} />;
+  if (status?.billboardId) return <PlayerPage billboardId={status.billboardId} camera={camera} onPeople={onPeople} />;
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center gap-8 bg-ink px-4 text-center text-fg">

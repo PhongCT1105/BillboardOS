@@ -12,8 +12,11 @@ crons.interval("plan collections", { hours: 1 }, internal.collections.plan, {});
 // Finance autopilot: the AR clerk reconciles new bank lines and chases what is still open.
 crons.interval("finance autopilot", { minutes: 5 }, internal.financeAutopilot.tick, {});
 
-// Rounds: offer the spot on air on every paired, online screen whose spot is unsold (unless the host turned it off).
+// Rounds: the 30-second selling loop restarts itself; this watchdog starts it on any online screen where it stopped.
 crons.interval("auto-sell rounds", { minutes: 1 }, internal.rounds.autoSellTick, {});
+
+// Price model: retrain on every closed window (live and simulated).
+crons.interval("train price model", { hours: 1 }, internal.pricing.train, {});
 
 // Screens: a device that stopped sending heartbeats goes offline.
 crons.interval("screen heartbeats", { minutes: 1 }, internal.devices.markOffline, {});

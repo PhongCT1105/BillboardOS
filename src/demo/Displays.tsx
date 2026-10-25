@@ -206,24 +206,20 @@ function LivePreview({ billboardId }: { billboardId: Id<"billboards"> }) {
         <span>Open the display to view the current ad.</span>
       </div>
     );
-  if (["announce", "auction", "negotiation", "settling"].includes(live.mode))
+  const livePlaying =
+    live.windows.find((w) => w.status === "paid" && w.spotStartAt <= now && now < w.spotEndAt) ?? null;
+  if (!livePlaying && !playable)
     return (
       <div className="demo-preview-placeholder">
         <Monitor size={26} />
-        <strong>
-          {live.mode === "settling"
-            ? "Booking confirmed"
-            : "Finding the next ad."}
-        </strong>
+        <strong>{live.bidding ? "Finding the next ad." : "Your ad here."}</strong>
         <span>
-          {live.eventName ?? "A new campaign is on its way to this display."}
+          {live.bidding
+            ? `${live.bidding.offered} ${live.bidding.offered === 1 ? "company is" : "companies are"} bidding for the next 30 seconds.`
+            : "A new campaign is on its way to this display."}
         </span>
       </div>
     );
-  const livePlaying =
-    live.mode === "playing" && live.spotEndAt !== null && live.spotEndAt > now
-      ? live.nowPlaying
-      : null;
   const youtubeVideoId = playable
     ? current.youtubeVideoId
     : livePlaying?.creative?.youtubeVideoId;

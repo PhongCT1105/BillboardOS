@@ -31,6 +31,8 @@ Replace each generic infrastructure choice with a sponsor tool that does real wo
 
 **Anthropic needs a named community.** Proposal: "independent owners of 1–20 digital screens in San Francisco who can't afford a sales and billing team". Confirm with the team.
 
+**Implementation update (2026-10-24):** The repeated buyer offer and counter decisions now call Bitdeer Model Studio's `zai-org/GLM-5.3-Flash` when configured. Claude remains on deeper company research and creative review. Convex still enforces bid and wallet limits and uses local rules if the Bitdeer call fails. A live Model Studio run has not yet been verified.
+
 ## Revised component map
 
 ```mermaid

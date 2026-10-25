@@ -69,6 +69,10 @@ async function saveBalance(ctx: ActionCtx, advertiserId: Id<"advertisers">, cdp?
   return usdcMinor;
 }
 
+/** Simulated sponsors are refilled from the operator wallet below this balance (the money recycles). */
+const AUTO_TOP_UP_BELOW_MINOR = 20;
+const AUTO_TOP_UP_MINOR = 50;
+
 function logger(ctx: ActionCtx, advertiserId: Id<"advertisers">) {
   return (action: string) => ctx.runMutation(internal.companyAgents.logAction, { advertiserId, action });
 }
@@ -303,7 +307,11 @@ export const pay = internalAction({
       const settled = header ? decodePaymentResponseHeader(header) : null;
       if (res.status === 200 && settled?.success) {
         await log(`round_won: paid ${usd(payload.amountMinor)}, tx ${settled.transaction}`);
-        await saveBalance(ctx, args.advertiserId).catch(() => null);
+        const left = await saveBalance(ctx, args.advertiserId).catch(() => null);
+        // Simulated sponsors: the payment went to the operator wallet, so send some back when the wallet runs low.
+        if (me.autoTopUp && left !== null && left < AUTO_TOP_UP_BELOW_MINOR) {
+          await ctx.scheduler.runAfter(0, internal.companyAgentsNode.topUp, { advertiserId: args.advertiserId, amountMinor: AUTO_TOP_UP_MINOR, source: "operator" });
+        }
         // The transfer may not show in the balance yet: read it again once it lands.
         await ctx.scheduler.runAfter(BALANCE_RECHECK_MS, internal.companyAgentsNode.refreshBalance, { advertiserId: args.advertiserId });
       } else {

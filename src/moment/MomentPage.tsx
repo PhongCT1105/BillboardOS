@@ -97,35 +97,69 @@ function ScreenHeader({ screen }: { screen: Screen }) {
 }
 
 function FloorPanel({ screen }: { screen: Screen }) {
-  const set = useMutation(api.billboards.setFloor);
+  const setFloor = useMutation(api.billboards.setFloor);
+  const setWeights = useMutation(api.pricing.setWeights);
+  const trainNow = useMutation(api.pricing.trainNow);
+  const model = useQuery(api.pricing.modelInfo, {});
   const { busy, error, run } = useAction();
   const [saved, setSaved] = useState(false);
+  const w = screen.priceWeights ?? { a: 1, b: 0.5, c: 3, capMultiplier: 2 };
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     setSaved(false);
+    const num = (k: string) => Number(f.get(k));
     const ok = await run(async () => {
-      await set({ billboardId: screen._id, floorMinor: Math.round(Number(f.get("floor")) * 100) });
+      await setFloor({ billboardId: screen._id, floorMinor: Math.round(num("floor") * 100) });
+      await setWeights({ billboardId: screen._id, a: num("a"), b: num("b"), c: num("c"), capMultiplier: num("cap") });
       return true;
     });
     if (ok) setSaved(true);
   }
   return (
-    <Card>
-      <h2 className="font-semibold">Floor price</h2>
-      <p className="mt-1 text-sm text-muted">The least a spot sells for. Each offer is the floor × crowd × demand here × that company's research factor.</p>
-      <form key={screen.reserveFloorMinor} className="mt-4 flex flex-col gap-4" onSubmit={onSubmit}>
-        <Field label="Floor ($ per spot)" hint={`Now ${money(screen.reserveFloorMinor)}`}>
+    <Card className="lg:col-span-1">
+      <h2 className="font-semibold">Price formula</h2>
+      <p className="mt-1 text-sm text-muted">Each company's price = a × predicted + b × people in view + c × its brand value (0–1), never below the floor or above the cap.</p>
+      <form key={`${screen.reserveFloorMinor}:${w.a}:${w.b}:${w.c}:${w.capMultiplier}`} className="mt-4 grid grid-cols-2 gap-3" onSubmit={onSubmit}>
+        <Field label="Floor ($)">
           <input name="floor" defaultValue={(screen.reserveFloorMinor / 100).toFixed(2)} inputMode="decimal" className={`${inputCls} font-mono`} />
         </Field>
-        <div className="flex items-center gap-3">
+        <Field label="Cap (× predicted)">
+          <input name="cap" defaultValue={w.capMultiplier} inputMode="decimal" className={`${inputCls} font-mono`} />
+        </Field>
+        <Field label="a (× predicted)">
+          <input name="a" defaultValue={w.a} inputMode="decimal" className={`${inputCls} font-mono`} />
+        </Field>
+        <Field label="b (¢ per person)">
+          <input name="b" defaultValue={w.b} inputMode="decimal" className={`${inputCls} font-mono`} />
+        </Field>
+        <Field label="c (¢ per brand point)" className="col-span-2">
+          <input name="c" defaultValue={w.c} inputMode="decimal" className={`${inputCls} font-mono`} />
+        </Field>
+        <div className="col-span-2 flex items-center gap-3">
           <button type="submit" disabled={busy} className={primaryBtn}>
-            Save floor
+            Save
           </button>
           {saved && <span className="text-sm text-emerald-300">Saved</span>}
         </div>
-        <ErrorLine error={error} />
+        <div className="col-span-2">
+          <ErrorLine error={error} />
+        </div>
       </form>
+      <div className="mt-4 flex flex-col gap-2 border-t border-line pt-4 text-sm">
+        <p className="text-xs tracking-widest text-muted uppercase">Price model</p>
+        {model ? (
+          <p className="text-muted">
+            Trained on <span className="tabular font-mono text-fg">{model.samples}</span> windows (<span className="tabular font-mono text-fg">{model.liveSamples}</span> live), typical error{" "}
+            <span className="tabular font-mono text-fg">{model.rmseMinor.toFixed(2)}¢</span>, {new Date(model.trainedAt).toLocaleTimeString()}.
+          </p>
+        ) : (
+          <p className="text-muted">No model yet: prices start from the recent average. Run the simulator or let a few windows sell, then train.</p>
+        )}
+        <button type="button" disabled={busy} className={`${secondaryBtn} self-start`} onClick={() => run(() => trainNow({}))}>
+          Train now
+        </button>
+      </div>
     </Card>
   );
 }

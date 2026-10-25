@@ -23,6 +23,9 @@ export const screenDeviceFields = {
   utcOffsetMinutes: v.number(),
   lastSeenAt: v.number(),
   createdAt: v.number(),
+  /** The device's camera (CNN person detector): people in view now, and when it last counted. */
+  peopleNow: v.optional(v.number()),
+  peopleAt: v.optional(v.number()),
 };
 
 export const companyResearchFields = {
@@ -39,7 +42,29 @@ export const companyResearchFields = {
   researchedAt: v.number(),
 };
 
+/** One closed window: what it sold for (null: unsold). The price model trains on these. */
+export const priceWindowFields = {
+  billboardId: v.id("billboards"),
+  at: v.number(),
+  utcOffsetMinutes: v.number(),
+  people: v.union(v.number(), v.null()),
+  winnerMinor: v.union(v.number(), v.null()),
+  source: v.union(v.literal("live"), v.literal("sim")),
+};
+
+/** A trained price model (ridge regression over FEATURES in lib/priceModel.ts). */
+export const priceModelFields = {
+  features: v.array(v.string()),
+  coef: v.array(v.number()),
+  samples: v.number(),
+  liveSamples: v.number(),
+  rmseMinor: v.number(),
+  trainedAt: v.number(),
+};
+
 export const salesTables = {
+  priceWindows: defineTable(priceWindowFields).index("by_billboard_and_at", ["billboardId", "at"]),
+  priceModels: defineTable(priceModelFields).index("by_trainedAt", ["trainedAt"]),
   screenDevices: defineTable(screenDeviceFields)
     .index("by_pairingCode", ["pairingCode"])
     .index("by_billboard", ["billboardId"])

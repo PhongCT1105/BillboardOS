@@ -1,8 +1,8 @@
 /**
  * Company agents, the fast path. Each agent talks to BillboardOS only over its
- * public HTTP API, like a customer's own service (V8, so it answers within a
- * second):
- *   round_offer / round_counter -> ruleBasedStrategy -> POST /api/agent/rounds/{id}/bid
+ * public HTTP API, like a customer's own service. The model call has a short
+ * timeout so a slow response falls back to local rules during the auction:
+ *   round_offer / round_counter -> Bitdeer Model Studio or the rules -> POST /api/agent/rounds/{id}/bid
  *   round_won                   -> companyAgentsNode.pay (Node: the CDP wallet signs the x402 payment)
  *   round_lost                  -> logged
  * It never offers more than its max per spot, what is left of its daily
@@ -10,12 +10,12 @@
  * says so.
  */
 import { v } from "convex/values";
-import { internalAction, type ActionCtx } from "./_generated/server";
+import { env, internalAction, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { decryptSecret } from "./lib/demoCrypto";
 import { agentSiteUrl, type AgentPayload } from "./lib/companyAgent";
-import { ruleBasedStrategy } from "./lib/rounds";
+import { clampAnswer, ruleBasedStrategy } from "./lib/rounds";
 
 const usd = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 const errText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 150);
@@ -62,13 +62,23 @@ export const act = internalAction({
       return null;
     }
     const standing = me.standing;
-    const decision = ruleBasedStrategy({
+    const priceMinor = payload.priceMinor ?? payload.askingMinor ?? payload.floorMinor;
+    const limits = {
       floorMinor: payload.floorMinor,
-      priceMinor: payload.priceMinor ?? payload.askingMinor ?? payload.floorMinor,
+      priceMinor,
       maxPerSpotMinor: standing?.maxPricePerSpotMinor ?? 0,
       budgetLeftMinor: standing ? standing.dailyBudgetMinor - me.spentTodayMinor : 0,
       balanceMinor: me.balanceMinor,
-    });
+    };
+    let decision = ruleBasedStrategy(limits);
+    // Bitdeer handles repeated buyer decisions; the local rules still enforce every spending limit.
+    if (env.BITDEER_API_KEY && me.balanceMinor !== null) {
+      const capMinor = Math.max(0, Math.min(limits.maxPerSpotMinor, limits.budgetLeftMinor, me.balanceMinor));
+      const brain = await ctx
+        .runAction(internal.bitdeerBrain.decide, { company: me.company, research: me.research, capMinor, payload: args.payload })
+        .catch(() => null);
+      if (brain) decision = clampAnswer({ ...brain, priceMinor, floorMinor: payload.floorMinor, capMinor });
+    }
     let result: string;
     try {
       const res = await fetch(`${agentSiteUrl()}${payload.links.bid}`, {
