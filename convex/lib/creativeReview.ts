@@ -95,7 +95,7 @@ export type ContentVerdict = {
   safe: boolean;
   categories: string[];
   reason: string;
-  method: "claude" | "heuristic";
+  method: "claude" | "creao" | "heuristic";
   model?: string;
 };
 

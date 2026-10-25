@@ -6,13 +6,13 @@ import { researchMethod } from "./schemaParts/sales";
 import { cleanTags, clampFactor } from "./lib/research";
 
 /**
- * The two research agents (Claude; the calls are in researchNode.ts):
+ * The two research jobs (CREAO when configured, otherwise Claude; calls are in researchNode.ts):
  *   - company research: once per company (and when its ad changes), who it
  *     sells to (matching) and how much the right crowd is worth to it (its
  *     own price factor);
  *   - audience read: per screen, from where it is, the time and any event,
  *     who is likely in front of it. Refreshed every hour.
- * Both fall back to simple rules when Claude isn't configured or fails, and
+ * Both fall back to simple rules when the configured provider fails, and
  * say so (method "rules").
  */
 
@@ -80,11 +80,13 @@ export const saveResearch = internalMutation({
     reasoning: v.string(),
     sources: v.array(v.string()),
     method: researchMethod,
+    startedAt: v.optional(v.number()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const { startedAt, ...research } = args;
     const fields = {
-      ...args,
+      ...research,
       summary: args.summary.slice(0, 600),
       category: args.category.slice(0, 40),
       audienceTags: cleanTags(args.audienceTags) ?? { software: 0.5, startups: 0.5 },
@@ -94,6 +96,7 @@ export const saveResearch = internalMutation({
       researchedAt: Date.now(),
     };
     const row = await researchOf(ctx, args.advertiserId);
+    if (row && startedAt !== undefined && row.researchedAt > startedAt) return null;
     if (row) await ctx.db.patch(row._id, fields);
     else await ctx.db.insert("companyResearch", fields);
     return null;
@@ -143,9 +146,16 @@ export const audienceInputs = internalQuery({
 });
 
 export const saveAudience = internalMutation({
-  args: { billboardId: v.id("billboards"), audienceTags: v.record(v.string(), v.number()), summary: v.string() },
+  args: { billboardId: v.id("billboards"), audienceTags: v.record(v.string(), v.number()), summary: v.string(),
+    observedAt: v.optional(v.number()),
+    expectedLocation: v.optional(v.object({ name: v.string(), city: v.string(), locationLabel: v.string() })) },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const billboard = await ctx.db.get(args.billboardId);
+    if (!billboard || billboard.retiredAt !== undefined) return null;
+    if (args.observedAt !== undefined && billboard.audienceReadAt !== undefined && billboard.audienceReadAt > args.observedAt) return null;
+    if (args.expectedLocation && (billboard.name !== args.expectedLocation.name || billboard.city !== args.expectedLocation.city ||
+      billboard.locationLabel !== args.expectedLocation.locationLabel)) return null;
     const tags = cleanTags(args.audienceTags);
     if (!tags) return null;
     await ctx.db.patch(args.billboardId, { audienceTags: tags, audienceSummary: args.summary.slice(0, 300), audienceReadAt: Date.now() });
@@ -172,7 +182,7 @@ export const audienceSweep = internalMutation({
 /**
  * Run both agents again everywhere: research every company with a campaign
  * and re-read every paired screen's audience (e.g. after setting or fixing
- * ANTHROPIC_API_KEY). npx convex run research:rerunAll
+ * agent credentials). npx convex run research:rerunAll
  */
 export const rerunAll = internalMutation({
   args: {},

@@ -19,7 +19,7 @@ BillboardOS is a Cal Hacks 13.0 hackathon project: a network of AI-assisted digi
 | Product requirements | [Vision](docs/product/vision.md) · [MVP acceptance tests](docs/product/requirements.md) |
 | Engineering | [Overview](docs/architecture/overview.md) · [Agents](docs/architecture/agents.md) · [Payments & risk](docs/architecture/payments-and-risk.md) · [Data model](docs/architecture/data-model.md) |
 | Team execution | [Setup](docs/development/getting-started.md) · [Roadmap](docs/development/roadmap.md) · [Demo](docs/demo/judging.md) |
-| CREAO agents and API rehearsal | [Saved Sales + Revenue agents, IDs, setup and integration status](agents/creao/README.md) |
+| CREAO agents and API rehearsal | [Saved Sales + Revenue rehearsal](agents/creao/README.md); [four new pipeline agent prompts and setup](agents/creao/live/README.md) |
 
 ## How it works
 
@@ -85,7 +85,7 @@ The x402 payment endpoints, seller agents (`/a2a/hosts/<workspaceId>/...`) and t
 
 Convex reads its own environment, not `.env`: push server-side keys with `npx convex env set NAME value`.
 
-For buyer negotiation turns, set `BITDEER_API_KEY` on the Convex deployment to use Bitdeer Model Studio (`zai-org/GLM-5.3-Flash` by default). `BITDEER_MODEL` can select another Model Studio text model. A missing key, slow response, or invalid answer uses the built-in bidding rules. Claude remains available for company research and creative review through `ANTHROPIC_API_KEY`.
+For buyer negotiation turns, set `BITDEER_API_KEY` on the Convex deployment to use Bitdeer Model Studio (`zai-org/GLM-5.3-Flash` by default). `BITDEER_MODEL` can select another Model Studio text model. A missing key, slow response, or invalid answer uses the built-in bidding rules. The three background research/review jobs use CREAO when their new agent IDs and scoped keys are configured; otherwise the current Claude/rules path remains available. [Create and connect the agents](agents/creao/live/README.md).
 
 Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 
@@ -95,7 +95,7 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 |---|---|
 | Slot inventory, quotes, exclusive holds, hold expiry, bookings | **Real** (Convex transactions, 69 tests) |
 | Staged pricing (crowd, time, event, scarcity, market history) with floor and ceiling | **Real**; the conference event is **seeded** |
-| Company-specific pricing | **Real** guardrails; assessment by **Claude with web search** when `ANTHROPIC_API_KEY` is set on Convex, otherwise a labeled **heuristic** |
+| Company-specific pricing | **Real** guardrails; company assessment by **CREAO** when the new role is configured, otherwise Claude with web search or a labeled heuristic |
 | Ascending auctions, proxy bidding, soft close, winner default (booking auctions) | **Real** (Convex) |
 | Live auction: announce on real camera counts, 2 s join window, 12 s bidding (two 3 s extensions), negotiation, award, queue and re-offers | **Real** (Convex); the participants are real companies' agents |
 | Live price: audience x plays x CPM x match, host minimum and host-set CPM | **Real**; the host sets CPM and minimum, and enters the event. Only the dev-only `seed:liveVenue` adds a **seeded** event |
@@ -112,6 +112,7 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Audience counts | **Real** on-device person detection (MediaPipe) on the display with `?camera=1`, sending aggregate counts only. There is no simulated crowd |
 | Operator sign-in and approvals by identity | **Real** (Convex Auth, email + password) |
 | CREAO Sales + Revenue agents | **Saved on CREAO**; operator console has a simulated Sales → Revenue → Sales rehearsal through server-side Convex actions. Shared Convex CREAO credentials still need deployment configuration; [setup and status](agents/creao/README.md) |
+| CREAO live pipeline roles | **Three code paths ready for credentials**; four [creation prompts](agents/creao/live/README.md) are in the repo. The strategy role has no live trigger yet. |
 | CRS risk screening, Claude explanations | **Not built yet** |
 
 ## Key sponsor ambitions
@@ -124,6 +125,19 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 - **Microsoft / Convex / Visa** — production-minded agents, reactive shared state and commerce experience, as applicable.
 
 Sponsorship-track eligibility requires actual adherence to each sponsor's rules and proof during the demo. We do **not** claim existing integrations.
+
+## Company knowledge pipeline (development)
+
+The ten simulated sponsor advertisers have curated profiles and three dated, cited public-source passages each. Their campaign budgets, wallets, bids and payments remain simulated. The company context feeds the new CREAO Company Research role when configured. CREAO is not in the live buyer bidding window.
+
+After the sponsor advertisers exist on the **development** deployment:
+
+```sh
+npx convex run companyKnowledge:seedSponsors
+npx convex run companyKnowledgeEmbedding:indexMissing '{"limit":16}'
+```
+
+Set `BITDEER_API_KEY` on that deployment to index passages with `BAAI/bge-m3` (1024 dimensions). Run the indexer again until `remaining` is zero; a missing key returns `missing_key` while the cited profiles remain readable. `companyKnowledgeSearch:search` accepts `{"query":"voice agents","limit":5}` and optionally an `advertiserId`. `companyKnowledgeSearch:agentContext` accepts an advertiser ID and a question, returning a bounded profile and citations. These are internal Convex functions for operator use; no CREAO workspace credentials are needed yet.
 
 ## Provenance and privacy
 

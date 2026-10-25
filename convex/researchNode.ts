@@ -1,24 +1,37 @@
 "use node";
 
 /**
- * The research agents' Claude calls (research.ts has the data side).
+ * Background research provider calls (research.ts has the data side).
  *   researchCompany: Claude + web search reads public, company-level facts
  *     and returns who the company sells to and its price factor.
  *   readAudience: Claude reasons from a screen's place, time and events to
  *     who is likely in front of it (JSON schema output).
- * No ANTHROPIC_API_KEY, or any failure: the rules in lib/research.ts.
+ * A configured CREAO role runs first. Without it, Claude may run; provider
+ * failures use the rules in lib/research.ts.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
-import { internalAction } from "./_generated/server";
+import { env, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { PRICE_FACTOR_MAX, PRICE_FACTOR_MIN, SEGMENT_KEYS, lastJsonObject, rulesAudience, rulesCompany } from "./lib/research";
+import { PRICE_FACTOR_MAX, PRICE_FACTOR_MIN, SEGMENT_KEYS, cleanTags, lastJsonObject, rulesAudience, rulesCompany } from "./lib/research";
 
 const MODEL = "claude-opus-5-5";
 const MAX_CONTINUATIONS = 3;
 /** If Claude declines, the API re-runs the request on its recommended fallback model. */
 const FALLBACK: { betas: Anthropic.Beta.AnthropicBeta[]; fallbacks: "default" } = { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 200);
+
+function validWeights(value: unknown, everySegment: boolean): value is Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const weights = value as Record<string, unknown>;
+  const keys = Object.keys(weights);
+  if (everySegment ? keys.length !== SEGMENT_KEYS.length : keys.length < 2 || keys.length > 4) return false;
+  if (keys.some((key) => !(SEGMENT_KEYS as readonly string[]).includes(key) ||
+    typeof weights[key] !== "number" || !Number.isFinite(weights[key]) ||
+    (weights[key] as number) < (everySegment ? 0 : Number.EPSILON) || (weights[key] as number) > 1)) return false;
+  if (everySegment && SEGMENT_KEYS.some((key) => !(key in weights))) return false;
+  return Math.abs(keys.reduce((sum, key) => sum + (weights[key] as number), 0) - 1) <= 0.02;
+}
 
 function client(): Anthropic | null {
   return process.env.ANTHROPIC_API_KEY ? new Anthropic({ timeout: 120_000, maxRetries: 1 }) : null;
@@ -41,12 +54,46 @@ export const researchCompany = internalAction({
     const input = await ctx.runQuery(internal.research.companyInputs, args);
     if (!input) return null;
     const fallback = rulesCompany(input);
+    if (env.CREAO_COMPANY_RESEARCH_AGENT_ID || env.CREAO_COMPANY_RESEARCH_API_KEY) try {
+      const traceId = crypto.randomUUID();
+      const startedAt = Date.now();
+      const knowledge = await ctx.runAction(internal.companyKnowledgeSearch.agentContext, {
+        advertiserId: args.advertiserId,
+        question: `What does ${input.name} sell and who buys it?`,
+      });
+      const result: Record<string, unknown> | null = await ctx.runAction(internal.creaoLive.run, {
+        role: "company_research",
+        requestJson: JSON.stringify({ schemaVersion: 1, traceId, advertiserId: args.advertiserId,
+          companyName: input.name, knowledge, campaignBriefs: input.briefs, videoTitles: input.videos.map((v) => v.title).filter(Boolean) }),
+      });
+      if (result) {
+        const tags = validWeights(result.audienceTags, false) ? cleanTags(result.audienceTags) : null;
+        if (result.advertiserId !== args.advertiserId || result.status !== "researched" || !tags ||
+          typeof result.summary !== "string" || !result.summary.trim() || typeof result.category !== "string" ||
+          typeof result.reasoning !== "string" || typeof result.priceFactor !== "number" ||
+          !Number.isFinite(result.priceFactor) || result.priceFactor < PRICE_FACTOR_MIN || result.priceFactor > PRICE_FACTOR_MAX) {
+          throw new Error("CREAO company result failed validation");
+        }
+        await ctx.runMutation(internal.research.saveResearch, {
+          advertiserId: args.advertiserId, summary: result.summary, category: result.category,
+          audienceTags: tags, priceFactor: result.priceFactor, reasoning: result.reasoning,
+          sources: Array.isArray(result.sources) ? result.sources.filter((s): s is string => typeof s === "string" && /^https:\/\//.test(s)).slice(0, 5) : [],
+          method: "creao", startedAt,
+        });
+        return null;
+      }
+    } catch (error) {
+      console.warn(`Company research via CREAO failed for ${args.advertiserId}:`, errText(error));
+      await ctx.runMutation(internal.research.saveResearch, { advertiserId: args.advertiserId, ...fallback,
+        reasoning: `${fallback.reasoning} (CREAO unavailable)`, sources: [], method: "rules" });
+      return null;
+    }
     const anthropic = client();
     if (!anthropic) {
       await ctx.runMutation(internal.research.saveResearch, { advertiserId: args.advertiserId, ...fallback, sources: [], method: "rules" });
       return null;
     }
-    try {
+    if (env.CREAO_SCREEN_AUDIENCE_AGENT_ID || env.CREAO_SCREEN_AUDIENCE_API_KEY) try {
       const prompt = [
         `Company: ${input.name}`,
         input.briefs.length ? `Its campaign briefs: ${input.briefs.join(" | ")}` : null,
@@ -125,6 +172,29 @@ export const readAudience = internalAction({
     const input = await ctx.runQuery(internal.research.audienceInputs, { billboardId: args.billboardId, now: Date.now() });
     if (!input) return null;
     const fallback = rulesAudience(input);
+    try {
+      const observedAt = Date.now();
+      const result: Record<string, unknown> | null = await ctx.runAction(internal.creaoLive.run, {
+        role: "screen_audience",
+        requestJson: JSON.stringify({ schemaVersion: 1, traceId: crypto.randomUUID(), billboardId: args.billboardId,
+          observedAt, name: input.name, city: input.city, locationLabel: input.locationLabel,
+          localTime: input.localTime, events: input.events }),
+      });
+      if (result) {
+        const tags = validWeights(result.weights, true) ? cleanTags(result.weights) : null;
+        if (result.billboardId !== args.billboardId || result.observedAt !== observedAt || result.status !== "estimated" ||
+          typeof result.summary !== "string" || !result.summary.trim() || !tags)
+          throw new Error("CREAO audience result failed validation");
+        await ctx.runMutation(internal.research.saveAudience, { billboardId: args.billboardId, audienceTags: tags, summary: result.summary,
+          observedAt, expectedLocation: { name: input.name, city: input.city, locationLabel: input.locationLabel } });
+        return null;
+      }
+    } catch (error) {
+      console.warn(`Audience read via CREAO failed for ${args.billboardId}:`, errText(error));
+      await ctx.runMutation(internal.research.saveAudience, { billboardId: args.billboardId,
+        audienceTags: fallback.tags, summary: `${fallback.summary} (CREAO unavailable)` });
+      return null;
+    }
     const anthropic = client();
     let result = { tags: fallback.tags as Record<string, number>, summary: fallback.summary };
     if (anthropic) {

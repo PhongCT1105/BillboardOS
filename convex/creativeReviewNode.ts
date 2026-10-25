@@ -10,7 +10,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
-import { internalAction } from "./_generated/server";
+import { env, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import {
@@ -135,14 +135,52 @@ export const review = internalAction({
   args: { campaignId: v.id("campaigns") },
   returns: v.union(
     v.null(),
-    v.object({ method: v.union(v.literal("claude"), v.literal("heuristic")), approved: v.number(), flagged: v.number(), held: v.number(), stale: v.boolean() }),
+    v.object({ method: v.union(v.literal("claude"), v.literal("creao"), v.literal("heuristic")), approved: v.number(), flagged: v.number(), held: v.number(), stale: v.boolean() }),
   ),
-  handler: async (ctx, args): Promise<{ method: "claude" | "heuristic"; approved: number; flagged: number; held: number; stale: boolean } | null> => {
+  handler: async (ctx, args): Promise<{ method: "claude" | "creao" | "heuristic"; approved: number; flagged: number; held: number; stale: boolean } | null> => {
     const inputs: Inputs | null = await ctx.runQuery(internal.creativeReview.reviewInputs, { campaignId: args.campaignId });
     if (!inputs) return null;
     let content: ContentVerdict | null = null;
+    const creaoConfigured = !!(env.CREAO_CREATIVE_SAFETY_AGENT_ID || env.CREAO_CREATIVE_SAFETY_API_KEY);
+    if (creaoConfigured) {
+      try {
+        const result: Record<string, unknown> | null = await ctx.runAction(internal.creaoLive.run, {
+          role: "creative_safety",
+          requestJson: JSON.stringify({ schemaVersion: 1, traceId: crypto.randomUUID(), campaignId: args.campaignId,
+            creativeRef: inputs.creativeRef, contentType: inputs.contentType,
+            mediaUrl: inputs.youtube?.thumbnailUrl ?? inputs.storageUrl,
+            youtube: inputs.youtube ? { title: inputs.youtube.title, channel: inputs.youtube.author } : null,
+            brief: inputs.brief, advertiserName: inputs.advertiserName, knowledgeCategory: inputs.knowledgeCategory }),
+        });
+        if (!result || result.campaignId !== args.campaignId || result.creativeRef !== inputs.creativeRef ||
+          (result.status !== "reviewed" && result.status !== "needs_input")) throw new Error("CREAO creative result failed identity validation");
+        if (result.status === "needs_input") {
+          content = { safe: false, categories: [], reason: "CREAO needs visual evidence before this creative can be approved.", method: "creao" };
+        } else {
+          if (!(inputs.youtube?.thumbnailUrl ?? inputs.storageUrl) || !Array.isArray(result.evidenceSeen) || result.evidenceSeen.length === 0 ||
+            !result.evidenceSeen.every((item) => typeof item === "string") ||
+            !/image|thumbnail|svg|video|visual/i.test(result.evidenceSeen.join(" "))) {
+            throw new Error("CREAO did not confirm visual evidence");
+          }
+          const parsed = parseVerdict(result);
+          if (!parsed) throw new Error("CREAO creative verdict failed validation");
+          const textCheck = heuristicVerdict({
+            texts: [inputs.youtube?.title, inputs.youtube?.author, inputs.brief, inputs.advertiserName],
+            knowledgeCategory: inputs.knowledgeCategory,
+            describe: describe(inputs),
+          });
+          const categories = [...new Set([...parsed.categories, ...textCheck.categories])];
+          if (inputs.knowledgeCategory && !categories.includes(inputs.knowledgeCategory)) categories.push(inputs.knowledgeCategory);
+          content = { ...parsed, safe: parsed.safe && textCheck.safe, categories,
+            reason: `CREAO: ${parsed.reason} ${textCheck.reason}`, method: "creao" };
+        }
+      } catch (error) {
+        console.warn(`Creative review via CREAO failed for ${args.campaignId}:`, error instanceof Error ? error.message : "unknown error");
+        content = { safe: false, categories: [], reason: "CREAO review failed; a host must inspect this creative.", method: "creao" };
+      }
+    }
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (apiKey) {
+    if (!creaoConfigured && apiKey) {
       try {
         content = await reviewWithClaude(apiKey, process.env.ANTHROPIC_MODEL || DEFAULT_MODEL, inputs);
       } catch (error) {

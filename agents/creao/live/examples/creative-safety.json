@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "traceId": "example-creative-1",
+  "campaignId": "example-campaign-1",
+  "creativeRef": "storage:example-creative-1",
+  "contentType": "image/png",
+  "mediaUrl": null,
+  "youtube": null,
+  "brief": "Fictional ad for a code editor.",
+  "advertiserName": "Example Developer Tools",
+  "knowledgeCategory": "developer tools"
+}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "traceId": "example-screen-1",
+  "billboardId": "example-screen-1",
+  "observedAt": 1792886400000,
+  "name": "Fictional Downtown Screen",
+  "city": "San Francisco",
+  "locationLabel": "Conference lobby",
+  "localTime": "Saturday 13:00",
+  "events": ["Fictional developer conference"]
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "traceId": "example-company-1",
+  "advertiserId": "example-advertiser-1",
+  "companyName": "Example Developer Tools",
+  "knowledge": {
+    "card": { "summary": "Fictional developer tools company.", "category": "developer tools", "stage": "startup", "audienceTags": { "software": 0.7, "startups": 0.3 }, "sources": [], "videoTitles": [], "method": "curated" },
+    "citations": [],
+    "retrievalStatus": "empty_index"
+  },
+  "campaignBriefs": ["Fictional campaign: promote a code editor."],
+  "videoTitles": []
+}

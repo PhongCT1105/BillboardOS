@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "traceId": "example-strategy-1",
+  "snapshotId": "example-snapshot-1",
+  "validUntil": 1792886700000,
+  "screenAudience": { "software": 0.7, "startups": 0.3 },
+  "cameraCount": null,
+  "availableSlots": [{ "id": "example-slot-1", "screenPriceMinor": 500 }],
+  "eligibleCampaigns": [{ "id": "example-campaign-1", "budgetRemainingMinor": 2000 }],
+  "companyKnowledgeCitations": [],
+  "recentSaleSummaries": []
+}

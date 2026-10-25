@@ -1,8 +1,8 @@
 /**
  * Creative review agent (ADR 0007, AI-native: hosts don't have to click
  * approve). When a creative is attached, the agent (creativeReviewNode.ts)
- * classifies it once: Claude (vision for images, text for YouTube and
- * others) when ANTHROPIC_API_KEY is set, else a text heuristic. Then each
+ * classifies it once: CREAO when configured, otherwise Claude when
+ * ANTHROPIC_API_KEY is set, else a text heuristic. Then each
  * host workspace's policy decides:
  *
  * - safe and not in a blocked category, auto-approve on: the creative is made
@@ -18,7 +18,7 @@ import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { knowledgeMethod, reviewVerdict } from "./schemaParts/knowledge";
+import { reviewMethod, reviewVerdict } from "./schemaParts/knowledge";
 import { recordAudit } from "./lib/audit";
 import { scheduleBooking } from "./lib/scheduling";
 import { requireCampaignAccess, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
@@ -269,7 +269,7 @@ export const applyVerdict = internalMutation({
     safe: v.boolean(),
     categories: v.array(v.string()),
     reason: v.string(),
-    method: knowledgeMethod,
+    method: reviewMethod,
     model: v.optional(v.string()),
     workspaceIds: v.optional(v.array(v.id("workspaces"))),
   },
@@ -409,7 +409,7 @@ const reviewView = v.object({
   /** Ready-to-show line, e.g. "Approved by creative review agent: <reason>". */
   label: v.string(),
   categories: v.array(v.string()),
-  method: knowledgeMethod,
+  method: reviewMethod,
   reviewedAt: v.number(),
 });
 
