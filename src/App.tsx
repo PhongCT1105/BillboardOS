@@ -8,7 +8,6 @@ import { useHashParams, useHashRoute } from "./lib/hooks";
 import { ConsolePage } from "./console/ConsolePage";
 import { PlayerPage } from "./player/PlayerPage";
 import { ScreenPage } from "./screens/ScreenPage";
-import { FinancePage } from "./finance/FinancePage";
 import { SensorPage } from "./sensor/SensorPage";
 import { SignInPage } from "./auth/SignInPage";
 import { AutoSetup } from "./auth/AutoSetup";
@@ -25,7 +24,7 @@ import { DemoPage } from "./demo/DemoPage";
 import { Brand } from "./demo/ui";
 import "./dashboard.css";
 import "./stitch-dashboard.css";
-import { Bell, Plus, UserCircle } from "@phosphor-icons/react";
+import { Plus, UserCircle } from "@phosphor-icons/react";
 
 type Me = NonNullable<FunctionReturnType<typeof api.accounts.me>>;
 const DesignPreview = import.meta.env.DEV ? lazy(() => import("./dev/DesignPreview")) : null;
@@ -94,10 +93,9 @@ function Shell({ route }: { route: string }) {
               </nav>
             )}
           <div className="app-account ml-auto flex items-center gap-3">
-            {signedIn?.accountType === "host" && <>
+            {signedIn?.accountType === "host" && (
               <a className="demo-button demo-button-primary header-add" href="#/console?add=1"><Plus size={17} />Add Display</a>
-              <a className="header-icon" href="#/finance" aria-label="Finance alerts"><Bell size={20} /></a>
-            </>}
+            )}
             {signedIn?.accountType === "host" &&
               signedIn.workspaces.length > 1 && (
                 <WorkspaceSwitcher me={signedIn} />
@@ -137,7 +135,6 @@ function HostArea({ route }: { route: string }) {
   const sensorMatch = route.match(/^\/sensor\/([^/]+)$/);
   if (sensorMatch)
     return <SensorPage billboardId={sensorMatch[1] as Id<"billboards">} />;
-  if (route === "/finance") return <FinancePage />;
   if (route === "/workspace") return <WorkspacePage />;
   if (route === "/moment") return <MomentPage />;
   return <ConsolePage />;
@@ -192,7 +189,6 @@ export function HostNavigation({ route, firstId }: { route: string; firstId?: st
         Overview
       </NavLink>
       <NavLink href="#/displays" active={route === "/displays"}>Displays</NavLink>
-      <NavLink href="#/finance" active={route === "/finance"}>Finance</NavLink>
       <NavLink href="#/moment" active={route === "/moment"}>
         Live Sales
       </NavLink>
@@ -200,7 +196,6 @@ export function HostNavigation({ route, firstId }: { route: string; firstId?: st
       {firstId && <details className="demo-header-tools">
         <summary>Tools</summary>
         <div className="demo-advanced-menu">
-          <a href="#/finance">Finance</a>
           <a href="#/workspace">Workspace settings</a>
           {firstId && <a href={`#/sensor/${firstId}`}>Audience sensor</a>}
 
@@ -219,7 +214,7 @@ export function HostNavigation({ route, firstId }: { route: string; firstId?: st
   );
 }
 
-/** Hosts in several workspaces pick which one the console, finance desk and sensor show. */
+/** Hosts in several workspaces pick which one the console and sensor show. */
 function WorkspaceSwitcher({ me }: { me: Me }) {
   const setActive = useMutation(api.accounts.setActiveWorkspace);
   return (

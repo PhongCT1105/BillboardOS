@@ -40,7 +40,7 @@ export function HostOverview({ focusDisplays = false }: { focusDisplays?: boolea
       <aside className="host-side-rail"><LiveSales /><PlaybackSummary completed={summary.billboards.reduce((sum, b) => sum + b.slotCounts.played, 0)} /></aside>
       </div>
       {summary.billboards.some((b) => b.openExceptions > 0) && (
-        <a href="#/finance" className="demo-text-link text-danger">
+        <a href="#/console?tools=1" className="demo-text-link text-danger">
           {summary.totals.openExceptions} open finance{" "}
           {summary.totals.openExceptions === 1 ? "issue needs" : "issues need"}{" "}
           your attention →
