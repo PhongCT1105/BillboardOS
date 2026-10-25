@@ -1,11 +1,13 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
+import { ArrowSquareOut, SpinnerGap } from "@phosphor-icons/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { money } from "../lib/format";
+import { money, timeRange } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { ErrorLine, useAction } from "../customer/ui";
+import { CompanyMark } from "../lib/companyMark";
 
 type Live = FunctionReturnType<typeof api.rounds.live>;
 type Round = NonNullable<Live["screens"][number]["round"]>;
@@ -164,14 +166,79 @@ function Bidding({ round, now }: { round: Round; now: number }) {
 
 function Closed({ round }: { round: Round }) {
   const order = ranked(round.bids);
+  const sold = (round.status === "awarded" || round.status === "paid") && round.winner && round.priceMinor != null;
   return (
     <div className="mt-2">
+      {sold && <SaleReceipt key={round.status} round={round} />}
       {order.length > 0 ? (
         <Leaderboard order={order} />
       ) : (
         <p className="mt-5 text-[17px] text-faint">{round.outcome ?? "Unsold."}</p>
       )}
     </div>
+  );
+}
+
+/** Settlement slip after a company wins: awaiting payment, then confirmed. */
+function SaleReceipt({ round }: { round: Round }) {
+  const paid = round.status === "paid";
+  const price = round.priceMinor!;
+  const winner = round.winner!;
+
+  return (
+    <aside className={`live-receipt ${paid ? "is-paid" : "is-pending"}`} aria-live="polite">
+      <div className="live-receipt-shine" aria-hidden />
+      <header className="live-receipt-head">
+        <div className="live-receipt-brand">
+          <CompanyMark name={winner} />
+          <div className="live-receipt-brand-copy">
+            <p className="live-receipt-kicker">{paid ? "Payment successful" : "Winner locked in"}</p>
+            <p className="live-receipt-title">{winner}</p>
+          </div>
+        </div>
+        <div className="live-receipt-seal" aria-hidden>
+          {paid ? <SuccessSeal /> : <SpinnerGap size={28} className="live-receipt-spin" />}
+        </div>
+      </header>
+
+      <p className="live-receipt-amount tabular font-mono">{money(price)}</p>
+
+      <div className="live-receipt-rails" aria-label={paid ? "Settlement rail" : "Pending settlement"}>
+        <span className="live-receipt-rail">USDC</span>
+        <span className="live-receipt-rail">x402</span>
+        <span className="live-receipt-rail">Base</span>
+      </div>
+
+      <dl className="live-receipt-meta">
+        <div>
+          <dt>Window</dt>
+          <dd className="tabular">{timeRange(round.spotStartAt, round.spotEndAt)}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd>{paid ? "Settled on-chain" : "Collecting payment"}</dd>
+        </div>
+      </dl>
+
+      {paid && round.txUrl && (
+        <a className="live-receipt-tx" href={round.txUrl} target="_blank" rel="noreferrer">
+          View transaction
+          <ArrowSquareOut size={14} weight="bold" />
+        </a>
+      )}
+      {!paid && <p className="live-receipt-note">Buyer has a short window to settle before the spot plays.</p>}
+    </aside>
+  );
+}
+
+/** SVG check that draws in — reads more like a payment confirmation than a static icon. */
+function SuccessSeal() {
+  return (
+    <svg className="live-receipt-check" viewBox="0 0 52 52" width="44" height="44">
+      <circle className="live-receipt-check-pulse" cx="26" cy="26" r="24" />
+      <circle className="live-receipt-check-ring" cx="26" cy="26" r="24" />
+      <path className="live-receipt-check-mark" d="M15.2 26.8l7.1 7.2 14.5-15.4" fill="none" />
+    </svg>
   );
 }
 

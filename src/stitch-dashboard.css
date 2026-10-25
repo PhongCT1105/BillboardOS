@@ -297,6 +297,253 @@
 .live-sales .live-badge-won,
 .live-sales .live-badge-bid { background: #e8f6ee; color: #24743d; }
 .live-sales .live-badge-defaulted { background: #fdeceb; color: var(--color-danger); }
+
+/* Sale receipt — settlement confirmation after a company wins. */
+.company-mark {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.06);
+}
+.company-mark-logo img {
+  display: block;
+  object-fit: contain;
+}
+.live-sales .live-receipt {
+  position: relative;
+  overflow: hidden;
+  margin-top: 20px;
+  margin-bottom: 8px;
+  padding: 20px 22px 18px;
+  border-radius: 16px;
+  border: 1px solid #b7dfc6;
+  background:
+    radial-gradient(120% 80% at 100% 0%, #dff7e8 0%, transparent 55%),
+    linear-gradient(165deg, #f8fdf9 0%, #eef8f2 100%);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.7) inset,
+    0 10px 28px -18px rgb(36 116 61 / 0.35);
+  animation: live-receipt-in 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.live-sales .live-receipt.is-pending {
+  border-color: #d5dbe6;
+  background:
+    radial-gradient(120% 80% at 100% 0%, #e8eef8 0%, transparent 55%),
+    linear-gradient(165deg, #fbfcfe 0%, #f3f5f9 100%);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.7) inset,
+    0 10px 28px -18px rgb(40 60 100 / 0.22);
+}
+.live-sales .live-receipt-shine {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    rgb(255 255 255 / 0.55) 48%,
+    transparent 62%
+  );
+  transform: translateX(-120%);
+}
+.live-sales .live-receipt.is-paid .live-receipt-shine {
+  animation: live-receipt-shine 1100ms cubic-bezier(0.22, 1, 0.36, 1) 180ms both;
+}
+.live-sales .live-receipt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.live-sales .live-receipt-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.live-sales .live-receipt-brand-copy { min-width: 0; }
+.live-sales .live-receipt-seal {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+.live-sales .live-receipt.is-paid .live-receipt-seal { color: #1f7a3a; }
+.live-sales .live-receipt-spin {
+  animation: live-receipt-spin 900ms linear infinite;
+}
+.live-sales .live-receipt-check {
+  display: block;
+  overflow: visible;
+}
+.live-sales .live-receipt-check-pulse {
+  fill: none;
+  stroke: #34c759;
+  stroke-width: 1.5;
+  opacity: 0;
+  transform-origin: 26px 26px;
+}
+.live-sales .live-receipt.is-paid .live-receipt-check-pulse {
+  animation: live-receipt-pulse 900ms cubic-bezier(0.22, 1, 0.36, 1) 220ms both;
+}
+.live-sales .live-receipt-check-ring {
+  fill: #e7f7ed;
+  stroke: #2f9e57;
+  stroke-width: 2;
+  stroke-dasharray: 160;
+  stroke-dashoffset: 160;
+  transform-origin: 26px 26px;
+}
+.live-sales .live-receipt.is-paid .live-receipt-check-ring {
+  animation:
+    live-receipt-ring-draw 520ms cubic-bezier(0.22, 1, 0.36, 1) both,
+    live-receipt-ring-fill 420ms cubic-bezier(0.22, 1, 0.36, 1) 120ms both;
+}
+.live-sales .live-receipt-check-mark {
+  stroke: #1f7a3a;
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 48;
+  stroke-dashoffset: 48;
+}
+.live-sales .live-receipt.is-paid .live-receipt-check-mark {
+  animation: live-receipt-check-draw 420ms cubic-bezier(0.22, 1, 0.36, 1) 280ms both;
+}
+.live-sales .live-receipt-kicker {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #1f7a3a;
+}
+.live-sales .live-receipt.is-pending .live-receipt-kicker { color: var(--color-faint); }
+.live-sales .live-receipt-title {
+  margin-top: 2px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.37px;
+  line-height: 1.2;
+  color: var(--color-fg);
+  overflow-wrap: anywhere;
+}
+.live-sales .live-receipt-amount {
+  margin-top: 14px;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.7px;
+  line-height: 1.05;
+  color: #14532d;
+  animation: live-receipt-amount 640ms cubic-bezier(0.22, 1, 0.36, 1) 120ms both;
+}
+.live-sales .live-receipt.is-pending .live-receipt-amount { color: var(--color-fg); }
+.live-sales .live-receipt-rails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  animation: live-receipt-amount 640ms cubic-bezier(0.22, 1, 0.36, 1) 180ms both;
+}
+.live-sales .live-receipt-rail {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid #c6e6d2;
+  background: rgb(255 255 255 / 0.72);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #24743d;
+}
+.live-sales .live-receipt.is-pending .live-receipt-rail {
+  border-color: #d7dde8;
+  color: var(--color-muted);
+}
+.live-sales .live-receipt-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 20px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgb(36 116 61 / 0.14);
+}
+.live-sales .live-receipt.is-pending .live-receipt-meta {
+  border-top-color: rgb(0 0 0 / 0.08);
+}
+.live-sales .live-receipt-meta dt {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+  margin-bottom: 3px;
+}
+.live-sales .live-receipt-meta dd {
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--color-fg);
+}
+.live-sales .live-receipt-tx {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid #b7dfc6;
+  background: white;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f7a3a;
+  text-decoration: none;
+  transition: background 140ms ease, transform 140ms ease;
+}
+.live-sales .live-receipt-tx:hover { background: #eef9f2; }
+.live-sales .live-receipt-tx:active { transform: scale(0.98); }
+.live-sales .live-receipt-note {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--color-faint);
+}
+@keyframes live-receipt-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes live-receipt-shine {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(120%); }
+}
+@keyframes live-receipt-amount {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes live-receipt-ring-draw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes live-receipt-ring-fill {
+  from { fill: #e7f7ed; }
+  to { fill: #d8f5e3; }
+}
+@keyframes live-receipt-check-draw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes live-receipt-pulse {
+  0% { opacity: 0.55; transform: scale(0.92); }
+  100% { opacity: 0; transform: scale(1.45); }
+}
+@keyframes live-receipt-spin {
+  to { transform: rotate(360deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .live-sales .live-bid,
   .live-sales .live-badge,
@@ -306,6 +553,21 @@
     will-change: auto;
   }
   .live-sales .live-bid.is-moving { box-shadow: none; }
+  .live-sales .live-receipt,
+  .live-sales .live-receipt-shine,
+  .live-sales .live-receipt-amount,
+  .live-sales .live-receipt-rails,
+  .live-sales .live-receipt-spin,
+  .live-sales .live-receipt-check-pulse,
+  .live-sales .live-receipt-check-ring,
+  .live-sales .live-receipt-check-mark {
+    animation: none;
+  }
+  .live-sales .live-receipt-check-ring {
+    stroke-dashoffset: 0;
+    fill: #d8f5e3;
+  }
+  .live-sales .live-receipt-check-mark { stroke-dashoffset: 0; }
 }
 .live-sales .live-topup-row {
   display: flex;
@@ -320,4 +582,7 @@
   .live-sales .live-stats { grid-template-columns: 1fr; gap: 14px; }
   .live-sales .live-stats dd { font-size: 24px; }
   .live-sales .live-card { padding: 20px; }
+  .live-sales .live-receipt { padding: 16px; }
+  .live-sales .live-receipt-amount { font-size: 28px; }
+  .live-sales .live-receipt-meta { grid-template-columns: 1fr; }
 }
