@@ -89,6 +89,12 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
               )}
             </div>
           )}
+          {cameraOn && state.status === "running" && (
+            <div className="pointer-events-none absolute top-3 right-3 rounded-md border border-line bg-ink/80 px-3 py-1.5 text-sm text-muted">
+              <span className="tabular font-mono text-2xl text-fg">{state.inView}</span>{" "}
+              {state.inView === 1 ? "person" : "people"} in view
+            </div>
+          )}
           {!cameraOn && (
             <div className="absolute inset-0 grid place-items-center p-6 text-center">
               <div>
