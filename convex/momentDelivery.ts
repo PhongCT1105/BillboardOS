@@ -4,16 +4,27 @@ import { internal } from "./_generated/api";
 import { keyStatus } from "./lib/agentKeys";
 import { SIGNATURE_HEADER, TIMESTAMP_HEADER, signWebhook } from "./lib/webhook";
 import { addMomentStep } from "./lib/momentHooks";
+import { MAX_BIDS_PER_COMPANY, NEGOTIATION_MAX_ROUNDS, NEGOTIATION_TIME_CAP_MS, minNextLiveBid } from "./lib/liveAuction";
+import { MAX_OFFERS } from "./lib/moment";
 
 /**
- * Signed webhooks for live moments (ADR 0006): `flash_offer`, `flash_won`,
- * `flash_lost`. Same signing as watch alerts: HMAC-SHA256 over
+ * Signed webhooks for live moments (ADR 0006): `flash_offer` (the
+ * announcement), `auction_started`, `auction_update`, `negotiation_counter`,
+ * `flash_won`, `flash_lost`. Same signing as watch alerts: HMAC-SHA256 over
  * "<X-BillboardOS-Timestamp>.<raw body>" with the agent key's webhook secret.
  * The response window is seconds long, so: 5 s timeout, one quick retry.
  */
 
-const flashEvent = v.union(v.literal("flash_offer"), v.literal("flash_won"), v.literal("flash_lost"));
+const flashEvent = v.union(
+  v.literal("flash_offer"),
+  v.literal("auction_started"),
+  v.literal("auction_update"),
+  v.literal("negotiation_counter"),
+  v.literal("flash_won"),
+  v.literal("flash_lost"),
+);
 const TIMEOUT_MS = 5_000;
+const MAX_BIDS_SCANNED = 100;
 
 function siteUrl(): string {
   return (process.env.CONVEX_SITE_URL ?? "https://billboardos.invalid").replace(/\/$/, "");
@@ -51,6 +62,10 @@ export const loadForDelivery = internalQuery({
           minutes: Math.round((moment.spotEndAt - moment.spotStartAt) / 60_000),
         },
         priceMinor: offer.priceMinor,
+        valueMinor: moment.valueMinor ?? null,
+        openingMinor: moment.priceMinor,
+        minimumMinor: moment.floorMinor,
+        why: moment.priceWhy ?? moment.reasoning,
         crowd: moment.crowd,
         relevantViewers: offer.relevantViewers,
         audienceMatch: offer.matchScore,
@@ -60,6 +75,50 @@ export const loadForDelivery = internalQuery({
         standingInstructions: key.standing ?? null,
         links: { base, reply: `/api/agent/offers/${offer._id}/reply` },
         replyFormat: { decision: "accept | counter | pass", amountMinor: "required for counter (US cents)", reasoning: "optional" },
+      };
+    } else if (args.event === "auction_started" || args.event === "auction_update") {
+      const leaderMinor = moment.leaderOfferId ? (moment.currentMinor ?? null) : null;
+      const live = {
+        minNextMinor: minNextLiveBid({ leaderMinor, openingMinor: moment.priceMinor }),
+        closesAt: moment.biddingClosesAt ?? null,
+        bidsLeft: Math.max(0, MAX_BIDS_PER_COMPANY - (offer.bidCount ?? 0)),
+      };
+      if (args.event === "auction_started") {
+        const offers = await ctx.db
+          .query("flashOffers")
+          .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
+          .take(MAX_OFFERS + 1);
+        payload = {
+          type: "auction_started",
+          ...common,
+          openingMinor: moment.priceMinor,
+          ...live,
+          participants: offers.filter((o) => o.status === "accepted" || o.status === "countered").length,
+          links: { bid: `/api/agent/offers/${offer._id}/bid` },
+        };
+      } else {
+        // The leader placed the last bid.
+        const youLead = moment.leaderOfferId === offer._id;
+        payload = { type: "auction_update", ...common, currentMinor: moment.currentMinor ?? null, youLead, ...live, lastBidBy: youLead ? "you" : "another company" };
+      }
+    } else if (args.event === "negotiation_counter") {
+      const round = moment.negotiationRound ?? 1;
+      // The company's own latest offer in this negotiation (its agent meets the host from there).
+      const bids = await ctx.db
+        .query("momentBids")
+        .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
+        .order("desc")
+        .take(MAX_BIDS_SCANNED);
+      const yourLast = bids.find((b) => b.offerId === offer._id && b.kind === "buyer_offer");
+      payload = {
+        type: "negotiation_counter",
+        ...common,
+        yourLastOfferMinor: yourLast?.amountMinor ?? offer.replyAmountMinor ?? null,
+        sellerMinor: moment.sellerMinor ?? moment.priceMinor,
+        round,
+        roundsLeft: Math.max(0, NEGOTIATION_MAX_ROUNDS - round),
+        respondBy: moment.startedAt + NEGOTIATION_TIME_CAP_MS,
+        links: { reply: `/api/agent/offers/${offer._id}/reply` },
       };
     } else if (args.event === "flash_won") {
       const hold = offer.holdId ? await ctx.db.get(offer.holdId) : null;

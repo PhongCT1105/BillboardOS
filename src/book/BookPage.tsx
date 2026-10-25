@@ -9,6 +9,7 @@ import { dayLabel, errorMessage, money, shortDate, timeOfDay, timeRange } from "
 import { useHashParams, useNow } from "../lib/hooks";
 import { BidPanel } from "../auctions/BidPanel";
 import { explorerTxUrl, networkName, PaymentCard } from "./checkout";
+import { ReviewStatus, YouTubeCreativeField } from "../creatives/YouTubeCreativeField";
 
 type Quote = FunctionReturnType<typeof api.quotes.create>;
 type Hold = FunctionReturnType<typeof api.holds.create>;
@@ -17,6 +18,8 @@ type Campaign = FunctionReturnType<typeof api.campaigns.list>[number];
 type Billboard = FunctionReturnType<typeof api.billboards.list>[number];
 type Slot = FunctionReturnType<typeof api.slots.listForBillboard>[number];
 type LiveAuction = FunctionReturnType<typeof api.auctions.live>[number];
+type Outlook = FunctionReturnType<typeof api.autopilot.outlook>;
+type OutlookSlot = Outlook["slots"][number];
 type ReceiptPayment = NonNullable<FunctionReturnType<typeof api.holds.receipt>>["payments"][number];
 type PaymentException = NonNullable<ReceiptPayment["exception"]>;
 
@@ -177,6 +180,8 @@ function BookingFlow(props: {
   const now = useNow(1000);
   const from = Math.floor(minuteNow / QUARTER_HOUR) * QUARTER_HOUR;
   const slots = useQuery(api.slots.listForBillboard, { billboardId: billboard._id, from, to: from + WINDOW_MS });
+  // The autopilot's view: two hours of history, now, and the forecast for each upcoming slot.
+  const outlook = useQuery(api.autopilot.outlook, { billboardId: billboard._id, from: from - 8 * QUARTER_HOUR, to: from + WINDOW_MS, atMinute: minuteNow });
   const estimates = useQuery(api.quotes.estimates, {
     billboardId: billboard._id,
     from,
@@ -408,7 +413,7 @@ function BookingFlow(props: {
         </h1>
         <p className="max-w-[640px] text-[15px] leading-relaxed text-muted">
           {!hold
-            ? `${billboard.locationLabel}. Pick up to ${MAX_SLOTS} 15-minute slots. Prices follow live foot traffic and nearby events.`
+            ? `${billboard.locationLabel}. Company agents book ahead here on their own; you can also pick up to ${MAX_SLOTS} 15-minute slots by hand. Prices follow live foot traffic and nearby events.`
             : flagged
               ? "A payment arrived, but it couldn't book the slots automatically."
               : expired
@@ -439,6 +444,8 @@ function BookingFlow(props: {
                 onNewCampaign={props.onNewCampaign}
               />
               <SlotPicker
+                outlook={outlook}
+                now={now}
                 slots={slots === undefined ? undefined : upcoming}
                 estimates={estimateBySlot}
                 selected={selected}
@@ -624,10 +631,12 @@ function groupByDay(slots: Slot[]): { label: string; slots: Slot[] }[] {
   return groups;
 }
 
-/** "~$48": a live screen-price estimate, rounded to the dollar. */
-const estimateLabel = (minor: number) => `~$${Math.round(minor / 100)}`;
+/** "~$48" (or "~$0.30" under $10): a live screen-price estimate. */
+const estimateLabel = (minor: number) => (minor < 1000 ? `~${money(minor)}` : `~$${Math.round(minor / 100)}`);
 
 function SlotPicker(props: {
+  outlook: Outlook | undefined;
+  now: number;
   slots: Slot[] | undefined;
   estimates: Map<Id<"slots">, number>;
   selected: Id<"slots">[];
@@ -639,6 +648,8 @@ function SlotPicker(props: {
   if (slots === undefined) return <div className="h-40 animate-pulse rounded bg-panel" />;
   const anyOpen = slots.some((s) => s.state === "available");
   const anyAuction = slots.some((s) => s.state === "available" && props.auctionSlotIds.has(s._id));
+  const info = new Map((props.outlook?.slots ?? []).map((o) => [o.slotId, o]));
+  const earlier = (props.outlook?.slots ?? []).filter((o) => o.startAt <= props.now);
   const maxEstimate = Math.max(0, ...props.estimates.values());
 
   return (
@@ -653,6 +664,7 @@ function SlotPicker(props: {
           <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-[3px] w-3 rounded-full bg-accent" />Live price</li>
         </ul>
       </div>
+      {earlier.length > 0 && <EarlierAndNow slots={earlier} now={props.now} />}
       {!anyOpen && <p className="text-muted">Every slot in the next 12 hours is taken.</p>}
       {groupByDay(slots).map((group) => (
         <div key={group.label} className="flex flex-col gap-2">
@@ -663,6 +675,7 @@ function SlotPicker(props: {
                 key={s._id}
                 slot={s}
                 estimate={props.estimates.get(s._id)}
+                info={info.get(s._id)}
                 maxEstimate={maxEstimate}
                 selected={props.selected.includes(s._id) || props.auctionSlot === s._id}
                 auction={props.auctionSlotIds.has(s._id)}
@@ -684,22 +697,60 @@ function SlotPicker(props: {
   );
 }
 
+/** Past slots (greyed: played, unsold or failed; not clickable) and the slot on air now, with its progress. */
+function EarlierAndNow({ slots, now }: { slots: OutlookSlot[]; now: number }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="text-sm text-muted">Earlier and now</h3>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-2">
+        {slots.map((o) => {
+          if (o.endAt <= now) {
+            const label = o.outcome === "played" ? "Played" : o.outcome === "failed" ? "Failed" : o.outcome === "sold" ? "Sold" : "Unsold";
+            return (
+              <div key={o.slotId} aria-label={`${timeOfDay(o.startAt)}, ${label}`} className="flex min-h-16 flex-col gap-1 rounded-lg border border-line/60 bg-ink px-3 py-2.5 opacity-60">
+                <span className="tabular font-mono text-[15px] text-faint line-through">{timeOfDay(o.startAt)}</span>
+                <span className={`text-xs ${o.outcome === "failed" ? "text-danger" : "text-faint"}`}>{label}</span>
+              </div>
+            );
+          }
+          const progress = Math.min(1, Math.max(0, (now - o.startAt) / (o.endAt - o.startAt)));
+          const sold = o.state === "booked" || o.state === "scheduled" || o.state === "played";
+          return (
+            <div key={o.slotId} aria-label={`Now, ${Math.ceil((o.endAt - now) / 60_000)} minutes left`} className="relative flex min-h-16 flex-col gap-1 overflow-hidden rounded-lg border-2 border-accent bg-accent/10 px-3 py-2.5">
+              <span className="flex items-baseline justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-accent">Now</span>
+                <span className="tabular font-mono text-xs text-muted">{Math.max(0, Math.ceil((o.endAt - now) / 60_000))} min left</span>
+              </span>
+              <span className="text-xs text-fg">{sold ? "On air" : "Live auction: agents bid when people are in view"}</span>
+              <span className="absolute inset-x-0 bottom-0 h-1 bg-line" aria-hidden>
+                <span className="block h-full bg-accent" style={{ width: `${Math.round(progress * 100)}%` }} />
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** One 15-minute slot. Its live price is the orange bar along the foot, scaled to the day's highest, so the grid reads as the day's price curve. */
 function SlotCell(props: {
   slot: Slot;
   estimate: number | undefined;
   maxEstimate: number;
+  info: OutlookSlot | undefined;
   selected: boolean;
   auction: boolean;
   onToggle: () => void;
 }) {
-  const { slot } = props;
+  const { slot, info } = props;
+  const people = info?.expectedPeople != null ? `~${Math.round(info.expectedPeople)} ${Math.round(info.expectedPeople) === 1 ? "person" : "people"}` : null;
   if (slot.state !== "available") {
     const held = slot.state === "held";
     return (
       <div className="flex min-h-16 flex-col gap-1 rounded-lg border border-line px-3 py-2.5 text-faint">
         <span className={`tabular text-[15px] ${held ? "" : "line-through"}`}>{timeOfDay(slot.startAt)}</span>
-        <span className="text-xs">{held ? "On hold" : "Taken"}</span>
+        <span className="text-xs">{held ? "On hold" : info?.bookedBy ? `Booked · ${info.bookedBy}` : "Taken"}</span>
       </div>
     );
   }
@@ -727,6 +778,7 @@ function SlotCell(props: {
             ? estimateLabel(props.estimate)
             : "Open"}
       </span>
+      {people && <span className="text-[11px] text-faint">{people}{info?.offeredTo ? " · agents offered" : ""}</span>}
       {!props.auction && share > 0 && (
         <span
           aria-hidden="true"
@@ -898,7 +950,7 @@ function paymentLabel(payment: ReceiptPayment): string {
   if (payment.provider === "x402") {
     return `${(payment.amountMinor / 100).toFixed(2)} USDC${payment.network ? ` on ${networkName(payment.network)}` : ""}`;
   }
-  if (payment.provider === "manual") return "Simulated manual payment, recorded by the operator";
+  if (payment.provider === "manual") return "Legacy manual record";
   return `Bank payment of ${money(payment.amountMinor)}`;
 }
 
@@ -1091,7 +1143,12 @@ function AdProgress({ campaign, slots }: { campaign: Campaign; slots: Slot[] }) 
           </li>
         ))}
       </ol>
-      {status !== "approved" && <CreativeUploadField campaign={campaign} />}
+      {status !== "approved" && (
+        <>
+          <CreativeUploadField campaign={campaign} />
+          <YouTubeCreativeField campaignId={campaign._id} />
+        </>
+      )}
     </section>
   );
 }
@@ -1117,11 +1174,15 @@ function CreativeCard({ campaign }: { campaign: Campaign }) {
       {campaign.creativeStatus === "approved" ? (
         <p className="text-[13px] text-muted">Approved ads are locked, so this one can't be replaced.</p>
       ) : (
-        <CreativeUploadField campaign={campaign} />
+        <>
+          <CreativeUploadField campaign={campaign} />
+          <YouTubeCreativeField campaignId={campaign._id} />
+        </>
       )}
+      <ReviewStatus campaignId={campaign._id} />
       <p className="text-[13px] leading-relaxed text-muted">
-        The operator checks every ad before it can play. You can pay first. Once the ad is approved, booked slots are scheduled
-        automatically.
+        A creative review agent checks every ad against each host's policy before it can play. You can pay first. Once the ad is
+        approved, booked slots are scheduled automatically.
       </p>
     </section>
   );

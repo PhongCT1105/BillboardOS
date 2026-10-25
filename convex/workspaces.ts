@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { workspaceRole } from "./schema";
 import { recordAudit } from "./lib/audit";
 import { PAYOUT_ADDRESS_RE, getProfile, requireUser, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
@@ -22,6 +23,8 @@ export const create = mutation({
     const workspaceId = await ctx.db.insert("workspaces", { name, city, ownerUserId: user.userId });
     await ctx.db.insert("workspaceMembers", { workspaceId, userId: user.userId, email: user.email, role: "owner" });
     await ctx.db.patch(profile._id, { activeWorkspaceId: workspaceId });
+    // Apply the creative review agent's earlier verdicts to the new host, without new model calls.
+    await ctx.scheduler.runAfter(0, internal.creativeReview.reviewForNewWorkspace, { workspaceId });
     await recordAudit(ctx, {
       workspaceId,
       traceId: `workspace:${workspaceId}`,

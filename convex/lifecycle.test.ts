@@ -42,7 +42,13 @@ async function errorCode(promise: Promise<unknown>): Promise<string> {
   throw new Error("expected promise to reject");
 }
 
-async function bookWithManualPayment(
+/** A verified x402 settlement report with a fake tx hash (the facilitator already verified it). */
+function x402Payment(holdId: string, amountMinor: number, key: string) {
+  const tx = `0x${Buffer.from(key).toString("hex").padEnd(64, "0").slice(0, 64)}`;
+  return { holdId, provider: "x402" as const, externalRef: tx, amountMinor, asset: "USDC", network: "eip155:84532", idempotencyKey: `x402:${tx}` };
+}
+
+async function bookWithX402Payment(
   t: T,
   campaignId: Id<"campaigns">,
   slotIds: Id<"slots">[],
@@ -50,7 +56,7 @@ async function bookWithManualPayment(
 ) {
   const q = await t.mutation(api.quotes.create, { campaignId, slotIds });
   const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: key, actor: "buyer" });
-  const result = await t.mutation(api.payments.recordManual, { holdId: hold.holdId, note: "demo" });
+  const result = await t.mutation(internal.payments.recordVerified, x402Payment(hold.holdId, hold.amountMinor, key));
   if (result.outcome !== "booked") throw new Error(`expected booked, got ${result.outcome}`);
   return { q, hold, result };
 }
@@ -138,7 +144,7 @@ describe("creatives", () => {
 
   test("approval schedules confirmed bookings' future slots", async () => {
     const { t, seed, slots } = await setup();
-    const { result } = await bookWithManualPayment(t, seed.campaignId, [slots[0]._id, slots[1]._id], "k1");
+    const { result } = await bookWithX402Payment(t, seed.campaignId, [slots[0]._id, slots[1]._id], "k1");
     await uploadCreative(t, seed.campaignId);
 
     // slot 0 has finished by the time the operator approves; slot 1 is still ahead.
@@ -178,7 +184,7 @@ describe("creatives", () => {
     const { t, seed, slots } = await setup();
     await uploadCreative(t, seed.campaignId);
     await t.mutation(api.creatives.review, { campaignId: seed.campaignId, decision: "approved", reason: "ok" });
-    const { result } = await bookWithManualPayment(t, seed.campaignId, [slots[2]._id], "k2");
+    const { result } = await bookWithX402Payment(t, seed.campaignId, [slots[2]._id], "k2");
     const state = await t.run(async (ctx) => ({
       slot: await ctx.db.get(slots[2]._id),
       booking: await ctx.db.get(result.bookingId),
@@ -203,35 +209,33 @@ describe("creatives", () => {
   });
 });
 
-describe("manual payments", () => {
-  test("books at the held amount, labeled MANUAL, replay-safe", async () => {
+describe("x402 payments", () => {
+  test("books at the held amount, labeled x402, replay-safe", async () => {
     const { t, seed, slots } = await setup();
-    const { hold, result } = await bookWithManualPayment(t, seed.campaignId, [slots[0]._id], "m1");
+    const { hold, result } = await bookWithX402Payment(t, seed.campaignId, [slots[0]._id], "m1");
     const payment = await t.run(async (ctx) => ctx.db.get(result.paymentId));
     expect(payment).toMatchObject({
-      provider: "manual",
-      externalRef: `manual:${hold.holdId}`,
+      provider: "x402",
       amountMinor: hold.amountMinor,
-      asset: "USD",
+      asset: "USDC",
       status: "verified",
     });
     const trail = await t.query(api.audit.forTrace, { traceId: hold.traceId });
     const confirmed = trail.find((e) => e.type === "payment.confirmed")!;
-    expect(confirmed.actor).toBe("operator:ops@billboardos.test");
-    expect(confirmed.reason).toContain("MANUAL (simulated) payment");
+    expect(confirmed.actor).toBe("payment:x402");
 
-    const again = await t.mutation(api.payments.recordManual, { holdId: hold.holdId, note: "again" });
+    const again = await t.mutation(internal.payments.recordVerified, x402Payment(hold.holdId, hold.amountMinor, "m1"));
     expect(again).toEqual({ ...result, replayed: true });
     const bookings = await t.run(async (ctx) => ctx.db.query("bookings").take(10));
     expect(bookings).toHaveLength(1);
   });
 
-  test("manual payment on an expired hold opens an exception", async () => {
+  test("x402 payment on an expired hold opens an exception", async () => {
     const { t, seed, slots } = await setup();
     const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[0]._id] });
     const hold = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "m2", actor: "buyer" });
     await t.finishAllScheduledFunctions(vi.runAllTimers);
-    const r = await t.mutation(api.payments.recordManual, { holdId: hold.holdId, note: "late" });
+    const r = await t.mutation(internal.payments.recordVerified, x402Payment(hold.holdId, hold.amountMinor, "m2"));
     expect(r.outcome === "exception" && r.kind).toBe("payment_after_hold_expired");
   });
 });
@@ -239,7 +243,7 @@ describe("manual payments", () => {
 describe("player", () => {
   test("nowPlaying shows the approved creative only for scheduled slots, plus house ad", async () => {
     const { t, seed, slots } = await setup();
-    const { result } = await bookWithManualPayment(t, seed.campaignId, [slots[0]._id], "p1");
+    const { result } = await bookWithX402Payment(t, seed.campaignId, [slots[0]._id], "p1");
 
     const during = slots[0].startAt + 5 * MIN;
     let view = await t.query(api.player.nowPlaying, { billboardId: seed.billboardId, atMinute: during });
@@ -275,7 +279,7 @@ describe("player", () => {
 
   test("recordPlayback: requires scheduled, idempotent, marks slot and booking played", async () => {
     const { t, seed, slots } = await setup();
-    const { result } = await bookWithManualPayment(t, seed.campaignId, [slots[0]._id], "p2");
+    const { result } = await bookWithX402Payment(t, seed.campaignId, [slots[0]._id], "p2");
     vi.setSystemTime(slots[0].startAt + MIN);
 
     expect(
@@ -332,7 +336,7 @@ describe("player", () => {
     const { t, seed, slots } = await setup();
     await uploadCreative(t, seed.campaignId);
     await t.mutation(api.creatives.review, { campaignId: seed.campaignId, decision: "approved", reason: "ok" });
-    const { result } = await bookWithManualPayment(t, seed.campaignId, [slots[0]._id], "p3");
+    const { result } = await bookWithX402Payment(t, seed.campaignId, [slots[0]._id], "p3");
     vi.setSystemTime(slots[0].startAt + MIN);
     const r = await t.mutation(api.player.recordPlayback, {
       slotId: slots[0]._id,
@@ -378,7 +382,7 @@ describe("audience sparkline", () => {
       await t.mutation(api.audience.record, {
         billboardId: seed.billboardId,
         countEstimate: count,
-        source: "simulated",
+        source: "camera",
         confidence: 0.6,
       });
       vi.setSystemTime(Date.now() + 15 * MIN);

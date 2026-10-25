@@ -11,9 +11,11 @@ export function useNow(intervalMs = 1000): number {
 }
 
 function readHash(): { path: string; query: string } {
-  const raw = window.location.hash.replace(/^#/, "") || "/console";
+  const raw = window.location.hash.replace(/^#/, "") || "/";
   const i = raw.indexOf("?");
-  return i === -1 ? { path: raw, query: "" } : { path: raw.slice(0, i) || "/", query: raw.slice(i + 1) };
+  return i === -1
+    ? { path: raw, query: "" }
+    : { path: raw.slice(0, i) || "/", query: raw.slice(i + 1) };
 }
 
 function useHash() {
@@ -37,7 +39,10 @@ export function useHashParams(): URLSearchParams {
 }
 
 /** Build a hash link: hashHref("/book", { slots: "a,b" }) -> "#/book?slots=a,b". */
-export function hashHref(path: string, params: Record<string, string | undefined> = {}): string {
+export function hashHref(
+  path: string,
+  params: Record<string, string | undefined> = {},
+): string {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
   const s = q.toString();

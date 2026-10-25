@@ -1,11 +1,12 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, query, type MutationCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { audienceTags, eventFields, eventSource } from "./schema";
-import { scheduleDetect } from "./moments";
+import { internal } from "./_generated/api";
 import { recordAudit } from "./lib/audit";
 import { EVENT_UPLIFT_MAX } from "./lib/stages";
 import { validateTags } from "./lib/match";
+import { requireWorkspaceMember, workspaceOfBillboard } from "./lib/tenancy";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -26,7 +27,7 @@ export async function upsertEvent(
     audienceTags?: Record<string, number>;
     upliftMultiplier: number;
     confidence: number;
-    source: "seed" | "operator" | "claude";
+    source: "seed" | "operator" | "claude" | "host";
     explanation: string;
   },
   actor: string,
@@ -54,9 +55,9 @@ export async function upsertEvent(
     .withIndex("by_billboard_and_startsAt", (q) => q.eq("billboardId", input.billboardId).eq("startsAt", input.startsAt))
     .take(10);
   const same = existing.find((e) => e.name === name);
-  // A live event changes who is in front of the screen: let the moment detector re-check (ADR 0006).
+  // A live event changes who is in front of the screen: it may start a bidding round (priced with the event).
   const now = Date.now();
-  if (input.startsAt <= now && input.endsAt > now) await scheduleDetect(ctx, input.billboardId, "event");
+  if (input.startsAt <= now && input.endsAt > now) await ctx.scheduler.runAfter(0, internal.rounds.trigger, { billboardId: input.billboardId, trigger: "camera" });
   if (same) {
     await ctx.db.replace(same._id, fields);
     return { eventId: same._id, created: false };
@@ -89,6 +90,33 @@ export const record = internalMutation({
   },
   returns: v.object({ eventId: v.id("events"), created: v.boolean() }),
   handler: async (ctx, args) => upsertEvent(ctx, args, `system:${args.source}`),
+});
+
+/** Host: enter the real event happening at the venue. Workspace members only. */
+export const create = mutation({
+  args: {
+    billboardId: v.id("billboards"),
+    name: v.string(),
+    startsAt: v.number(),
+    endsAt: v.number(),
+    audienceTags: v.optional(audienceTags),
+  },
+  returns: v.object({ eventId: v.id("events") }),
+  handler: async (ctx, args) => {
+    const member = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
+    const { eventId } = await upsertEvent(
+      ctx,
+      {
+        ...args,
+        upliftMultiplier: 1,
+        confidence: 1,
+        source: "host",
+        explanation: "Entered by the host: the real event at the venue.",
+      },
+      member.actor,
+    );
+    return { eventId };
+  },
 });
 
 /** Events near a screen from 24h ago to 3 days ahead (max 20). Public. */

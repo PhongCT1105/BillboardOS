@@ -1,6 +1,9 @@
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
+import { internal } from "../_generated/api";
 import { recordAudit } from "./audit";
+import { NEXT_SPOT_LEAD_MS } from "./liveAuction";
+import { hasCreative } from "./youtube";
 
 /**
  * Small hooks the payment and player code call so the live-moment timeline
@@ -28,7 +31,8 @@ export async function creativeReady(
   campaign: Doc<"campaigns">,
   workspaceId: Id<"workspaces"> | undefined,
 ): Promise<boolean> {
-  if (!campaign.creativeStorageId) return false;
+  // An uploaded file or a YouTube link (which has no storage file).
+  if (!hasCreative(campaign)) return false;
   if (campaign.creativeStatus === "approved") return true;
   if (!workspaceId) return false;
   const approval = await ctx.db
@@ -38,9 +42,32 @@ export async function creativeReady(
   return approval !== null;
 }
 
-export function isRehearsalRef(externalRef: string) {
-  return externalRef.startsWith("rehearsal:");
+/** Screens looked at when picking the next queued one. */
+const MAX_SCREENS_SCANNED = 200;
+
+/**
+ * The host is free again (its live moment ended): the online screen that
+ * queued first sells now (detect with trigger "queue"). It keeps its
+ * `saleQueuedAt` until it actually announces (detect clears it then), so no
+ * other screen can jump the queue in between. Every path that ends a live
+ * moment calls this, so the queue never stalls.
+ */
+export async function releaseWorkspace(ctx: MutationCtx, workspaceId: Id<"workspaces">): Promise<void> {
+  const screens = await ctx.db
+    .query("billboards")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .take(MAX_SCREENS_SCANNED);
+  let next: Doc<"billboards"> | null = null;
+  for (const b of screens) {
+    if (b.deviceStatus !== "online" || b.saleQueuedAt === undefined) continue;
+    if (!next || b.saleQueuedAt < next.saleQueuedAt!) next = b;
+  }
+  if (!next) return;
+  await ctx.scheduler.runAfter(0, internal.moments.detectFor, { billboardId: next._id, trigger: "queue" });
 }
+
+/** A settlement transaction hash (0x + 32 bytes hex), as opposed to a fallback payment reference. */
+export const isTxHash = (ref: string) => /^0x[0-9a-fA-F]{64}$/.test(ref);
 
 /** Payment applied and booking confirmed for a moment's hold. */
 export async function onMomentPaid(
@@ -54,26 +81,32 @@ export async function onMomentPaid(
     .withIndex("by_hold", (q) => q.eq("holdId", holdId))
     .first();
   if (!moment) return;
-  const rehearsal = isRehearsalRef(payment.externalRef);
   const now = Date.now();
+  // Only a real settlement transaction hash is proof of payment; a fallback reference never is.
+  const tx = isTxHash(payment.externalRef) ? payment.externalRef : undefined;
   await ctx.db.patch(moment._id, {
     status: "paid",
     bookingId,
     paidMinor: payment.amountMinor,
-    paymentMode: rehearsal ? "rehearsal" : "x402",
-    paymentTx: rehearsal ? undefined : payment.externalRef,
+    paymentMode: "x402",
+    paymentTx: tx,
     paymentNetwork: payment.network,
   });
   await addMomentStep(
     ctx,
     moment,
     "settled",
-    rehearsal ? "REHEARSAL (simulated) payment recorded" : "Settled over x402",
-    rehearsal
-      ? `No money moved: rehearsal settlement for $${(payment.amountMinor / 100).toFixed(2)} (host toggle).`
-      : `$${(payment.amountMinor / 100).toFixed(2)} USDC, tx ${payment.externalRef}${payment.network ? ` on ${payment.network}` : ""}`,
+    "Settled over x402",
+    `$${(payment.amountMinor / 100).toFixed(2)} USDC, ${tx ? `tx ${tx}` : `no transaction hash reported (ref ${payment.externalRef})`}${payment.network ? ` on ${payment.network}` : ""}`,
     now,
   );
+  // No dead air: the next spot on this screen goes on sale a minute before this one ends.
+  await ctx.scheduler.runAt(Math.max(now, moment.spotEndAt - NEXT_SPOT_LEAD_MS), internal.moments.detectFor, {
+    billboardId: moment.billboardId,
+    trigger: "next_spot",
+  });
+  // The host's live moment is over: the next queued screen sells.
+  await releaseWorkspace(ctx, moment.workspaceId);
   const booking = await ctx.db.get(bookingId);
   if (booking?.status === "scheduled") {
     await addMomentStep(ctx, moment, "scheduled", "Scheduled on the screen", "The player picks it up through its live query.", now);
@@ -81,12 +114,10 @@ export async function onMomentPaid(
   await recordAudit(ctx, {
     workspaceId: moment.workspaceId,
     traceId: `moment:${moment._id}`,
-    actor: rehearsal ? "REHEARSAL (simulated) payment" : `payment:${payment.provider}`,
+    actor: `payment:${payment.provider}`,
     type: "moment.paid",
     subjectId: moment._id,
-    reason: rehearsal
-      ? `REHEARSAL (simulated) payment of $${(payment.amountMinor / 100).toFixed(2)}; no money moved`
-      : `Flash spot paid $${(payment.amountMinor / 100).toFixed(2)} over x402 (tx ${payment.externalRef})`,
+    reason: `Flash spot paid $${(payment.amountMinor / 100).toFixed(2)} over x402 (tx ${payment.externalRef})`,
   });
 }
 

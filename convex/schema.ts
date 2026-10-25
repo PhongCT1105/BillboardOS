@@ -82,6 +82,7 @@ export const bookingStatus = v.union(
 export const paymentProvider = v.union(
   v.literal("x402"),
   v.literal("nessie"),
+  /** Legacy: kept so old rows validate; no new code writes it. */
   v.literal("manual"),
 );
 
@@ -219,6 +220,7 @@ export const audienceTags = v.record(v.string(), v.number());
 
 export const audienceSource = v.union(
   v.literal("camera"),
+  /** Legacy: kept so old rows validate; no new code writes it. */
   v.literal("simulated"),
 );
 
@@ -230,6 +232,11 @@ export const auditEventType = v.union(
   v.literal("workspace.member_added"),
   v.literal("workspace.payout_changed"),
   v.literal("company.created"),
+  v.literal("company.renamed"),
+  v.literal("round.started"),
+  v.literal("round.awarded"),
+  v.literal("round.paid"),
+  v.literal("round.unsold"),
   v.literal("agent_key.created"),
   v.literal("watch_rule.changed"),
   v.literal("agent_key.revoked"),
@@ -238,6 +245,7 @@ export const auditEventType = v.union(
   v.literal("demo.reset"),
   v.literal("inventory.generated"),
   v.literal("billboard.baseline_changed"),
+  v.literal("billboard.live_pricing_changed"),
   v.literal("billboard.audience_tags_changed"),
   v.literal("event.recorded"),
   v.literal("valuation.assessed"),
@@ -341,6 +349,14 @@ export const billboardFields = {
   priceCeilingMinor: v.optional(v.number()),
   /** Who is likely in front of this screen (shares, ~sum 1). Used for matching, not price. */
   audienceTags: v.optional(audienceTags),
+  /** Host's CPM in minor units, the basis for the live value price. */
+  cpmMinor: v.optional(v.number()),
+  /** When the host queued this screen for a live sale. */
+  saleQueuedAt: v.optional(v.number()),
+  /** When this screen's pending re-offer (detectFor "reoffer") is due: one re-offer chain per screen. */
+  reofferDueAt: v.optional(v.number()),
+  /** Bidding rounds: people usually in view (the crowd signal's baseline). Missing = 3. */
+  usualInView: v.optional(v.number()),
 };
 
 export const slotFields = {
@@ -375,6 +391,8 @@ export const advertiserFields = {
   valuationRequestedAt: v.optional(v.number()),
   /** Names this advertiser appears under on bank statements (matching evidence). */
   payerAliases: v.optional(v.array(v.string())),
+  /** Named automatically at sign-up: renamed to its ad video's channel once that is known. */
+  autoNamed: v.optional(v.boolean()),
 };
 
 export const campaignFields = {
@@ -393,6 +411,8 @@ export const campaignFields = {
   creativeReviewReason: v.optional(v.string()),
   /** Who the campaign wants to reach (weights). Used for screen matching and bidding. */
   targetAudience: v.optional(audienceTags),
+  /** "video": the audience is worked out from the ad video (knowledge card) and kept up to date. Missing = chosen by the advertiser. */
+  audienceSource: v.optional(v.union(v.literal("advertiser"), v.literal("video"))),
 };
 
 export const quoteFields = {
@@ -623,7 +643,7 @@ export const collectionTaskFields = {
   resolution: v.optional(v.string()),
 };
 
-export const eventSource = v.union(v.literal("seed"), v.literal("operator"), v.literal("claude"));
+export const eventSource = v.union(v.literal("seed"), v.literal("operator"), v.literal("claude"), v.literal("host"));
 
 export const eventFields = {
   /** Owning host workspace (ADR 0004). Optional until backfilled. */
@@ -962,14 +982,25 @@ export const standingInstructions = v.object({
   maxPricePerSpotMinor: v.number(),
   minRelevantViewers: v.number(),
   dailyBudgetMinor: v.number(),
-  policy: standingPolicy,
+  /** Legacy: kept so old rows validate; no new code writes it. */
+  policy: v.optional(standingPolicy),
   /** For "counter": offer this share of the asking price (0.5..1). */
   counterRatio: v.optional(v.number()),
 });
 
-export const momentTrigger = v.union(v.literal("arrivals"), v.literal("event"), v.literal("simulated"));
+export const momentTrigger = v.union(
+  v.literal("arrivals"),
+  v.literal("event"),
+  /** Legacy: kept so old rows validate; no new code writes it. */
+  v.literal("simulated"),
+  v.literal("queue"),
+  v.literal("reoffer"),
+  v.literal("next_spot"),
+);
 export const momentStatus = v.union(
   v.literal("offering"),
+  v.literal("bidding"),
+  v.literal("negotiating"),
   v.literal("awarded"),
   v.literal("paid"),
   v.literal("playing"),
@@ -982,7 +1013,11 @@ export const momentStep = v.object({
   at: v.number(),
   detail: v.optional(v.string()),
 });
-export const paymentMode = v.union(v.literal("x402"), v.literal("rehearsal"));
+export const paymentMode = v.union(
+  v.literal("x402"),
+  /** Legacy: kept so old rows validate; no new code writes it. */
+  v.literal("rehearsal"),
+);
 
 export const momentFields = {
   workspaceId: v.id("workspaces"),
@@ -1002,9 +1037,24 @@ export const momentFields = {
   slotId: v.id("slots"),
   spotStartAt: v.number(),
   spotEndAt: v.number(),
-  /** Pro-rata screen price for the spot. */
+  /** The opening price of the live auction. */
   priceMinor: v.number(),
+  /** The published minimum price. */
   floorMinor: v.number(),
+  valueMinor: v.optional(v.number()),
+  peopleInView: v.optional(v.number()),
+  plays: v.optional(v.number()),
+  impressions: v.optional(v.number()),
+  priceWhy: v.optional(v.string()),
+  leaderOfferId: v.optional(v.id("flashOffers")),
+  currentMinor: v.optional(v.number()),
+  biddingClosesAt: v.optional(v.number()),
+  hardClosesAt: v.optional(v.number()),
+  extensions: v.optional(v.number()),
+  reofferRound: v.optional(v.number()),
+  sellerMinor: v.optional(v.number()),
+  negotiationOfferId: v.optional(v.id("flashOffers")),
+  negotiationRound: v.optional(v.number()),
   offerClosesAt: v.number(),
   winnerOfferId: v.optional(v.id("flashOffers")),
   holdId: v.optional(v.id("holds")),
@@ -1046,8 +1096,10 @@ export const flashOfferFields = {
   replyReasoning: v.optional(v.string()),
   repliedAt: v.optional(v.number()),
   holdId: v.optional(v.id("holds")),
-  /** Hosted demo agent (ours, labeled "simulated customer agent"). */
-  simulatedAgent: v.boolean(),
+  /** Legacy: kept so old rows validate; no new code writes it. */
+  simulatedAgent: v.optional(v.boolean()),
+  bidCount: v.optional(v.number()),
+  lastBidMinor: v.optional(v.number()),
   delivery: agentDeliveryState,
   sentAt: v.number(),
 };
@@ -1056,9 +1108,15 @@ export const accountType = v.union(v.literal("host"), v.literal("customer"));
 export const workspaceRole = v.union(v.literal("owner"), v.literal("operator"));
 export const companyRole = v.union(v.literal("owner"), v.literal("member"));
 
+import { knowledgeTables } from "./schemaParts/knowledge";
+import { roundTables } from "./schemaParts/rounds";
+import { autopilotTables } from "./lib/autopilotSchema";
 export default defineSchema({
   // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
   ...authTables,
+  ...knowledgeTables,
+  ...roundTables,
+  ...autopilotTables,
 
   /** One per user: which side of the marketplace they signed up for. */
   profiles: defineTable({
@@ -1081,12 +1139,17 @@ export default defineSchema({
     negotiationOfferTtlMs: v.optional(v.number()),
     /** Moment detector (ADR 0006). Missing = defaults in lib/moment.ts. */
     momentEnabled: v.optional(v.boolean()),
+    /** Legacy: kept so old rows validate; no new code writes it. */
     momentMinRelevantViewers: v.optional(v.number()),
+    /** Legacy: kept so old rows validate; no new code writes it. */
     momentCooldownMs: v.optional(v.number()),
+    momentMinPeopleInView: v.optional(v.number()),
     momentResponseWindowMs: v.optional(v.number()),
     momentMinMatch: v.optional(v.number()),
-    /** Owner-only, OFF by default: settle a blocked winner with a labeled REHEARSAL (simulated) payment. */
+    /** Legacy: kept so old rows validate; no new code writes it. Owner-only, OFF by default: settle a blocked winner with a labeled REHEARSAL (simulated) payment. */
     rehearsalSettlement: v.optional(v.boolean()),
+    /** Bidding rounds: start a round on idle online screens every couple of minutes. Off by default (it spends testnet USDC). */
+    autoSellRounds: v.optional(v.boolean()),
   }).index("by_name", ["name"]),
 
   workspaceMembers: defineTable({
@@ -1174,6 +1237,35 @@ export default defineSchema({
     .index("by_hold", ["holdId"])
     .index("by_booking", ["bookingId"]),
 
+  momentBids: defineTable({
+    momentId: v.id("moments"),
+    offerId: v.id("flashOffers"),
+    advertiserId: v.id("advertisers"),
+    kind: v.union(v.literal("bid"), v.literal("buyer_offer"), v.literal("seller_counter")),
+    amountMinor: v.number(),
+    at: v.number(),
+    reasoning: v.optional(v.string()),
+  }).index("by_moment", ["momentId", "at"]),
+
+  companyAgents: defineTable({
+    advertiserId: v.id("advertisers"),
+    campaignId: v.id("campaigns"),
+    agentKeyId: v.id("agentKeys"),
+    keyCiphertext: v.string(),
+    keyIv: v.string(),
+    walletName: v.string(),
+    walletAddress: v.optional(v.string()),
+    balanceMinor: v.optional(v.number()),
+    balanceAt: v.optional(v.number()),
+    enabled: v.boolean(),
+    topUpDay: v.optional(v.string()),
+    topUpCount: v.optional(v.number()),
+    lastAction: v.optional(v.string()),
+    lastActionAt: v.optional(v.number()),
+    /** Last USDC faucet claim made by `ensureWallet` (at most one per 24 h per company). */
+    faucetClaimedAt: v.optional(v.number()),
+  }).index("by_advertiser", ["advertiserId"]),
+
   flashOffers: defineTable(flashOfferFields)
     .index("by_moment", ["momentId"])
     .index("by_advertiser", ["advertiserId"])
@@ -1190,6 +1282,7 @@ export default defineSchema({
     .index("by_campaign", ["campaignId"]),
 
   /**
+   * Legacy: kept so old rows validate; no new code writes it.
    * Hosted demo customer agents (labeled "simulated customer agent"). The agent
    * key is stored AES-GCM encrypted (key derived from INTERNAL_API_SECRET) and
    * never returned by any query.

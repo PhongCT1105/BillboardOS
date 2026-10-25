@@ -1,5 +1,5 @@
 import { ConvexError, v, type Infer } from "convex/values";
-import { internalAction, internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
+import { internalAction, internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { issueAgentKey } from "./agentKeys";
 import { insertRule } from "./watchRules";
@@ -10,9 +10,6 @@ import { ingestBankLines } from "./bank";
 import { endHold } from "./holds";
 import { settleInvoice } from "./lib/finance";
 import { upsertEvent } from "./events";
-import { DEMO_CREATIVES } from "./lib/demoCreatives";
-import { encryptSecret } from "./lib/demoCrypto";
-import { validateStanding, type Standing } from "./lib/moment";
 import {
   FIXTURE_ADVERTISERS,
   FIXTURE_BANK_LINES,
@@ -906,101 +903,29 @@ export const demoWatchRules = internalMutation({
 });
 
 // ---------------------------------------------------------------------------
-// Live moment demo (ADR 0006)
+// Live venue (DEV ONLY): seeds demo companies in a separate workspace. It runs
+// seed:demo and seed:pricingDemo, which create seeded advertisers, an unowned
+// "Moscone Media" workspace and its screen, then adds a seeded event. Never
+// run it on production: there, hosts create their screens by hand and real
+// companies sign up (Ruling R27).
 // ---------------------------------------------------------------------------
 
-const DEMO_MOMENT_KEY_NAME = "demo-moment-agent";
 const DEMO_EVENT_NAME = "Startup Demo Day (seeded)";
 
-/** The three hosted demo customers ("simulated customer agent" everywhere). */
-const DEMO_COMPANIES: {
-  slug: string;
-  company: string;
-  brief: string;
-  targetAudience: Record<string, number>;
-  standing: Standing;
-  thinkMs: number;
-}[] = [
-  {
-    slug: "launchkit",
-    company: "LaunchKit",
-    brief: "LaunchKit: backend-in-a-box for startup founders and engineers at demo day.",
-    targetAudience: { startups: 0.6, software: 0.4 },
-    standing: { maxPricePerSpotMinor: 15_000, minRelevantViewers: 10, dailyBudgetMinor: 60_000, policy: "auto_accept" },
-    thinkMs: 700,
-  },
-  {
-    slug: "nvidia",
-    company: "Nvidia",
-    brief: "Nvidia GTC promo: reach developers and AI builders near Moscone during conference week.",
-    targetAudience: { software: 0.6, ai: 0.4 },
-    standing: { maxPricePerSpotMinor: 20_000, minRelevantViewers: 8, dailyBudgetMinor: 100_000, policy: "counter", counterRatio: 0.95 },
-    thinkMs: 1_100,
-  },
-  {
-    slug: "golden-gate-coffee",
-    company: "Golden Gate Coffee Co.",
-    brief: "Morning coffee promo for Cal Hacks attendees near Moscone West; 2-4 slots, 7-10am.",
-    targetAudience: { tourists: 0.4, software: 0.3, startups: 0.3 },
-    standing: { maxPricePerSpotMinor: 4_000, minRelevantViewers: 5, dailyBudgetMinor: 20_000, policy: "counter", counterRatio: 0.75 },
-    thinkMs: 450,
-  },
-];
-
-/** Which demo companies still need their creative uploaded to file storage. */
-export const demoMomentCreativeNeeds = internalQuery({
-  args: {},
-  returns: v.array(v.string()),
-  handler: async (ctx) => {
-    const needs: string[] = [];
-    for (const spec of DEMO_COMPANIES) {
-      const advertiser = await ctx.db
-        .query("advertisers")
-        .withIndex("by_displayName", (q) => q.eq("displayName", spec.company))
-        .first();
-      const campaign = advertiser
-        ? (
-            await ctx.db
-              .query("campaigns")
-              .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
-              .take(20)
-          ).find((c) => c.brief === spec.brief)
-        : undefined;
-      if (!campaign?.creativeStorageId) needs.push(spec.slug);
-    }
-    return needs;
-  },
-});
-
-const demoMomentResult = v.object({
+const liveVenueResult = v.object({
   workspace: v.string(),
   billboard: v.string(),
   event: v.string(),
-  companies: v.array(
-    v.object({
-      company: v.string(),
-      label: v.string(),
-      campaignId: v.id("campaigns"),
-      keyPrefix: v.string(),
-      walletName: v.string(),
-      webhookUrl: v.string(),
-      standing: v.string(),
-    }),
-  ),
-  note: v.string(),
 });
 
-export const demoMomentSetup = internalMutation({
+export const liveVenueSetup = internalMutation({
   args: {
-    creatives: v.array(v.object({ slug: v.string(), storageId: v.id("_storage") })),
     /** Optional testnet pricing for the screen (US cents), so faucet-funded wallets can pay. */
     baseRateMinor: v.optional(v.number()),
     reserveFloorMinor: v.optional(v.number()),
   },
-  returns: demoMomentResult,
+  returns: liveVenueResult,
   handler: async (ctx, args) => {
-    const secret = process.env.INTERNAL_API_SECRET;
-    if (!secret) throw new ConvexError({ code: "NOT_CONFIGURED", message: "Set INTERNAL_API_SECRET first: demo agent keys are stored encrypted with it" });
     const billboard = await ctx.db
       .query("billboards")
       .withIndex("by_name", (q) => q.eq("name", BILLBOARD_NAME))
@@ -1017,7 +942,6 @@ export const demoMomentSetup = internalMutation({
       }
       await ctx.db.patch(billboard._id, { baseRateMinor: base, reserveFloorMinor: floor });
     }
-    const site = (process.env.CONVEX_SITE_URL ?? "https://billboardos.invalid").replace(/\/$/, "");
 
     // The seeded, labeled event: started an hour ago, runs four more hours.
     const hour = 60 * 60_000;
@@ -1044,141 +968,31 @@ export const demoMomentSetup = internalMutation({
       },
       "system:seed",
     );
-
-    const out = [];
-    for (const spec of DEMO_COMPANIES) {
-      const problem = validateStanding(spec.standing);
-      if (problem) throw new Error(`${spec.company}: ${problem}`);
-      let advertiser = await ctx.db
-        .query("advertisers")
-        .withIndex("by_displayName", (q) => q.eq("displayName", spec.company))
-        .first();
-      if (!advertiser) {
-        const id = await ctx.db.insert("advertisers", { displayName: spec.company, paymentTerms: "prepay" });
-        advertiser = (await ctx.db.get(id))!;
-      }
-      let campaign = (
-        await ctx.db
-          .query("campaigns")
-          .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
-          .take(20)
-      ).find((c) => c.brief === spec.brief);
-      if (!campaign) {
-        const id = await ctx.db.insert("campaigns", {
-          advertiserId: advertiser._id,
-          brief: spec.brief,
-          targetCity: "San Francisco",
-          budgetMinor: 100_000,
-          currency: "USD",
-          status: "active",
-          creativeStatus: "none",
-          targetAudience: spec.targetAudience,
-        });
-        campaign = (await ctx.db.get(id))!;
-      }
-      const creative = args.creatives.find((c) => c.slug === spec.slug);
-      await ctx.db.patch(campaign._id, {
-        status: "active",
-        targetAudience: spec.targetAudience,
-        ...(creative
-          ? { creativeStorageId: creative.storageId, creativeContentType: "image/svg+xml", creativeSubmittedAt: now, creativeStatus: "approved" as const }
-          : {}),
-      });
-      const approval = await ctx.db
-        .query("creativeApprovals")
-        .withIndex("by_workspace_and_campaign", (q) => q.eq("workspaceId", workspaceId).eq("campaignId", campaign._id))
-        .first();
-      if (!approval) {
-        await ctx.db.insert("creativeApprovals", { campaignId: campaign._id, workspaceId, approvedBy: "system:seed", approvedAt: now });
-      }
-
-      // Fresh agent key (earlier demo-moment keys revoked), standing instructions, webhook to the hosted receiver.
-      for (const k of await ctx.db
-        .query("agentKeys")
-        .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
-        .take(100)) {
-        if (k.name === DEMO_MOMENT_KEY_NAME && k.revokedAt === undefined) await ctx.db.patch(k._id, { revokedAt: now });
-      }
-      const webhookUrl = `${site}/demo-agents/${advertiser._id}/webhook`;
-      const issued = await issueAgentKey(ctx, {
-        advertiserId: advertiser._id,
-        name: DEMO_MOMENT_KEY_NAME,
-        scopes: ["quote", "hold", "pay"],
-        campaignIds: [campaign._id],
-        budgetCapMinor: 200_000,
-        expiresInDays: 30,
-        webhookUrl,
-        createdBy: "system:seed",
-      });
-      await ctx.db.patch(issued.agentKeyId, { standing: spec.standing });
-      const sealed = await encryptSecret(secret, issued.key);
-      const walletName = `demo-${spec.slug}`;
-      const existing = await ctx.db
-        .query("demoAgents")
-        .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiser._id))
-        .first();
-      const row = {
-        advertiserId: advertiser._id,
-        slug: spec.slug,
-        campaignId: campaign._id,
-        agentKeyId: issued.agentKeyId,
-        keyCiphertext: sealed.ciphertext,
-        keyIv: sealed.iv,
-        walletName,
-        thinkMs: spec.thinkMs,
-      };
-      if (existing) await ctx.db.replace(existing._id, row);
-      else await ctx.db.insert("demoAgents", row);
-      const s = spec.standing;
-      out.push({
-        company: spec.company,
-        label: "simulated customer agent",
-        campaignId: campaign._id,
-        keyPrefix: issued.prefix,
-        walletName,
-        webhookUrl,
-        standing: `${s.policy}${s.counterRatio ? ` x${s.counterRatio}` : ""}, max $${(s.maxPricePerSpotMinor / 100).toFixed(2)}/spot, ${s.minRelevantViewers}+ relevant viewers, $${(s.dailyBudgetMinor / 100).toFixed(2)}/day`,
-      });
-    }
     await recordAudit(ctx, {
       workspaceId,
-      traceId: "seed:demoMoment",
+      traceId: "seed:liveVenue",
       actor: "system:seed",
       type: "seed.completed",
       subjectId: workspaceId,
-      reason: `Live-moment demo: ${out.length} simulated customer agents, ready creatives and "${DEMO_EVENT_NAME}"`,
+      reason: `Live venue: screen, slots and "${DEMO_EVENT_NAME}"`,
     });
-    return {
-      workspace: workspace.name,
-      billboard: billboard.name,
-      event: DEMO_EVENT_NAME,
-      companies: out,
-      note: "Agent keys are stored encrypted (never printed). Rehearsal settlement stays OFF until a workspace owner turns it on.",
-    };
+    return { workspace: workspace.name, billboard: billboard.name, event: DEMO_EVENT_NAME };
   },
 });
 
 /**
- * One command for the live-moment demo (idempotent):
- *   npx convex run seed:demoMoment
- * Runs seed:demo + seed:pricingDemo, uploads the three demo creatives once,
- * then sets up companies, campaigns, ready creatives, the seeded event,
- * agent keys with standing instructions, and the hosted agents' wallets.
+ * Dev only: seeds demo companies in a separate workspace (idempotent).
+ *   npx convex run seed:liveVenue
+ * Runs seed:demo + seed:pricingDemo (seeded advertisers and campaigns, an
+ * unowned "Moscone Media" workspace, its screen and slots), then the seeded
+ * event. Not part of the production runbook (R27).
  */
-export const demoMoment = internalAction({
+export const liveVenue = internalAction({
   args: { baseRateMinor: v.optional(v.number()), reserveFloorMinor: v.optional(v.number()) },
-  returns: demoMomentResult,
-  handler: async (ctx, args): Promise<Infer<typeof demoMomentResult>> => {
+  returns: liveVenueResult,
+  handler: async (ctx, args): Promise<Infer<typeof liveVenueResult>> => {
     await ctx.runMutation(internal.seed.demo, {});
     await ctx.runMutation(internal.seed.pricingDemo, {});
-    const needs: string[] = await ctx.runQuery(internal.seed.demoMomentCreativeNeeds, {});
-    const creatives = [];
-    for (const slug of needs) {
-      const svg = DEMO_CREATIVES[slug];
-      if (!svg) continue;
-      const storageId = await ctx.storage.store(new Blob([svg], { type: "image/svg+xml" }));
-      creatives.push({ slug, storageId });
-    }
-    return await ctx.runMutation(internal.seed.demoMomentSetup, { creatives, ...args });
+    return await ctx.runMutation(internal.seed.liveVenueSetup, args);
   },
 });

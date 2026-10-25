@@ -6,6 +6,7 @@ import { modules, signedInOperator, joinCompanies } from "./test.setup";
 import { combineStages, effectiveMultiplier, priceQuote } from "./lib/pricing";
 import { eventStage, marketStage, scarcityStage } from "./lib/stages";
 import { matchScore } from "./lib/match";
+import { recordSaleHistory } from "./lib/marketHistory";
 
 // 09:07 PDT. slots[0] = 09:15 local ... slots[4] = 10:15 local.
 const START = Date.UTC(2026, 9, 25, 16, 7);
@@ -160,11 +161,19 @@ describe("quotes use every screen stage", () => {
 
   test("market history anchors later quotes in the same hour band", async () => {
     const { t, seed, slots } = await setup();
-    // Sell three late-morning slots at a premium via the manual payment path.
+    // Sell three late-morning slots at a premium via the x402 settlement path.
     for (const [i, key] of [[4, "a"], [5, "b"], [6, "c"]] as const) {
       const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[i]._id] });
       const h = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: key, actor: "buyer" });
-      await t.mutation(api.payments.recordManual, { holdId: h.holdId, note: "history" });
+      await t.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: `0x${key.charCodeAt(0).toString(16).padStart(64, "0")}`,
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: `x402:history-${key}`,
+    });
     }
     const history = await t.run(async (ctx) => ctx.db.query("priceHistory").collect());
     expect(history).toHaveLength(3);
@@ -190,5 +199,98 @@ describe("billboards.recommend", () => {
     expect(rows[0].explanation).toContain("software 60%");
     const finance = await t.query(api.billboards.recommend, { targetAudience: { finance: 1 } });
     expect(finance[0].matchScore).toBe(0);
+  });
+  test("a 5-minute live sale is recorded as its 15-minute equivalent", async () => {
+    const { t, seed, slots } = await setup();
+    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[4]._id] });
+    const h = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "partial", actor: "buyer" });
+    await t.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: `0x${"9".repeat(64)}`,
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:partial",
+    });
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("priceHistory").collect()) await ctx.db.delete(row._id);
+      const booking = (await ctx.db.query("bookings").collect())[0];
+      await ctx.db.patch(booking._id, { amountMinor: 100 });
+      const fresh = (await ctx.db.get(booking._id))!;
+      await recordSaleHistory(ctx, fresh, "auction", START, 5 * MIN);
+    });
+    const history = await t.run(async (ctx) => ctx.db.query("priceHistory").collect());
+    expect(history).toHaveLength(1);
+    expect(history[0].unitPriceMinor).toBe(300);
+    expect(history[0].kind).toBe("auction");
+  });
+  test("paying a live-moment hold records the full-slot equivalent as an auction sale", async () => {
+    const { t, seed, slots } = await setup();
+    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[4]._id] });
+    const h = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "live", actor: "buyer" });
+    await t.run(async (ctx) => {
+      const slot = (await ctx.db.get(slots[4]._id))!;
+      const hold = (await ctx.db.get(h.holdId))!;
+      await ctx.db.insert("moments", {
+        workspaceId: slot.workspaceId!,
+        billboardId: hold.billboardId,
+        trigger: "arrivals",
+        status: "awarded",
+        startedAt: START,
+        crowd: 10,
+        segment: "commuters",
+        segmentShare: 0.5,
+        relevantViewers: 5,
+        crowdSource: "camera",
+        reasoning: "test",
+        slotId: slot._id,
+        spotStartAt: slot.startAt,
+        spotEndAt: slot.startAt + 5 * MIN,
+        priceMinor: 100,
+        floorMinor: 50,
+        offerClosesAt: START,
+        holdId: h.holdId,
+        steps: [],
+      });
+    });
+    await t.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: `0x${"8".repeat(64)}`,
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:live",
+    });
+    const history = await t.run(async (ctx) => ctx.db.query("priceHistory").collect());
+    expect(history).toHaveLength(1);
+    expect(history[0].unitPriceMinor).toBe(h.amountMinor * 3);
+    expect(history[0].kind).toBe("auction");
+  });
+
+  test("coveredMs of 0 or at least a full slot records the unscaled price", async () => {
+    const { t, seed, slots } = await setup();
+    const q = await t.mutation(api.quotes.create, { campaignId: seed.campaignId, slotIds: [slots[4]._id] });
+    const h = await t.mutation(api.holds.create, { quoteId: q.quoteId, idempotencyKey: "edge", actor: "buyer" });
+    await t.mutation(internal.payments.recordVerified, {
+      holdId: h.holdId,
+      provider: "x402",
+      externalRef: `0x${"7".repeat(64)}`,
+      amountMinor: h.amountMinor,
+      asset: "USDC",
+      network: "eip155:84532",
+      idempotencyKey: "x402:edge",
+    });
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("priceHistory").collect()) await ctx.db.delete(row._id);
+      const booking = (await ctx.db.query("bookings").collect())[0];
+      await recordSaleHistory(ctx, booking, "auction", START, 0);
+      await recordSaleHistory(ctx, booking, "auction", START, 15 * MIN);
+      await recordSaleHistory(ctx, booking, "auction", START, 20 * MIN);
+    });
+    const history = await t.run(async (ctx) => ctx.db.query("priceHistory").collect());
+    expect(history).toHaveLength(3);
+    expect(history.every((r) => r.unitPriceMinor === h.amountMinor)).toBe(true);
   });
 });

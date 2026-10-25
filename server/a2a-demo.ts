@@ -185,7 +185,7 @@ if (slotArg) {
   const screen = inv.screens.find((s) => s.slots.some((x) => x.slotId === slotArg));
   const slot = screen?.slots.find((x) => x.slotId === slotArg);
   if (!screen || !slot || !screen.workspaceId) stop(`Slot ${slotArg} is not in the next 24h of available inventory.`);
-  if (slot!.auction) stop("That slot is in a live auction; use npm run auction:demo instead.");
+  if (slot!.auction) stop("That slot is in a live auction; company agents bid there through /api/agent/offers.");
   workspaceId = screen!.workspaceId!;
   billboardId = screen!.billboardId;
   billboardName = screen!.name;

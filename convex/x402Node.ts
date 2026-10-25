@@ -11,6 +11,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { runPaidFlow, type Charge, type PlainResponse, type Settled } from "./lib/x402/flow";
 import { getEngine } from "./lib/x402/cdpEngine";
+import { holdLockKey } from "./lib/paymentLock";
 
 const plainRequest = v.object({ method: v.string(), url: v.string(), headers: v.record(v.string(), v.string()) });
 const chargeArg = v.object({ amountMinor: v.number(), payTo: v.union(v.string(), v.null()), unpaid: v.any() });
@@ -81,7 +82,7 @@ export const payHold = internalAction({
     const log = logger(args.traceId);
     const handle = await engineOrError(args.traceId);
     if (!handle) return unavailable;
-    return await withLock(ctx, `hold:${args.holdId}`, hasPayment(args.request.headers), () =>
+    return await withLock(ctx, holdLockKey(args.holdId), hasPayment(args.request.headers), () =>
       runPaidFlow(handle.engine, {
         request: args.request,
         charge: args.charge as Charge,

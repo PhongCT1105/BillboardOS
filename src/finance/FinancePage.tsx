@@ -10,6 +10,7 @@ import { ApprovalQueue } from "./ApprovalQueue";
 import { CollectionTasks } from "./CollectionTasks";
 import { CompanyValuations } from "./CompanyValuations";
 import { DataSales } from "./DataSales";
+import { ArClerkStatus, AutopilotFeed } from "./Autopilot";
 
 type RunSummary = FunctionReturnType<typeof api.finance.runReconciliation>;
 
@@ -19,6 +20,7 @@ export function FinancePage() {
   const exceptions = useQuery(api.finance.openExceptions, {});
   const approvals = useQuery(api.approvals.pending, {});
   const tasks = useQuery(api.collections.tasks, {});
+  const autopilot = useQuery(api.financeAutopilot.status, {});
   const runReconciliation = useMutation(api.finance.runReconciliation);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,21 +46,11 @@ export function FinancePage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
           <p className="mt-1 max-w-[65ch] text-sm text-muted">
-            The AR clerk applies bank payments to invoices. The collections agent plans follow-ups. Refunds, write-offs and
-            escalations wait for you.
+            The AR clerk applies bank payments to invoices as they arrive. The collections agent plans follow-ups on its
+            own. Refunds, write-offs and escalations wait for you.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-muted">{unmatched} bank line{unmatched === 1 ? "" : "s"} waiting</span>
-          <button
-            type="button"
-            onClick={run}
-            disabled={busy || unmatched === 0}
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink transition-transform active:scale-[0.98] disabled:opacity-50"
-          >
-            {busy ? "Reconciling" : "Run reconciliation"}
-          </button>
-        </div>
+        <ArClerkStatus status={autopilot} waiting={unmatched} busy={busy} onReconcileNow={run} />
       </div>
 
       {error && (
@@ -77,6 +69,7 @@ export function FinancePage() {
           <CompanyValuations />
         </div>
         <div className="flex flex-col gap-10 lg:sticky lg:top-6 lg:self-start">
+          <AutopilotFeed activity={autopilot?.activity} />
           <ApprovalQueue approvals={approvals} />
           <CollectionTasks tasks={tasks} />
         </div>

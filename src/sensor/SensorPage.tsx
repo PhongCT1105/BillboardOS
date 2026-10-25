@@ -61,15 +61,6 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
     }
   }
 
-  async function simulate() {
-    try {
-      await addArrivals({ billboardId, arrivals: 10, peakInView: 4, confidence: 1, source: "simulated" });
-      setLastSent("10 simulated arrivals");
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
   return (
     <main className="mx-auto grid max-w-[1400px] grid-cols-1 gap-10 px-4 pt-8 pb-16 md:px-6 lg:grid-cols-[minmax(0,1fr)_360px]">
       <section aria-label="Camera">
@@ -182,16 +173,6 @@ export function SensorPage({ billboardId }: { billboardId: Id<"billboards"> }) {
             </div>
           </label>
           <p className="mt-2 text-xs text-faint">Prices rise when more people pass than this, and fall when fewer do.</p>
-        </div>
-        <div className="border-t border-line pt-6">
-          <p className="text-sm text-muted">No camera at the venue? Send labeled simulated traffic instead.</p>
-          <button
-            type="button"
-            onClick={simulate}
-            className="mt-3 rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:text-fg"
-          >
-            Add 10 simulated arrivals
-          </button>
         </div>
       </aside>
     </main>

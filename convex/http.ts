@@ -48,7 +48,7 @@ function checkAuth(request: Request): Response | null {
   return null;
 }
 
-const PROVIDERS = ["x402", "nessie", "manual"] as const;
+const PROVIDERS = ["x402", "nessie"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 function isProvider(value: unknown): value is Provider {
@@ -93,7 +93,7 @@ http.route({
         outcome: "rejected",
         code: "INVALID_INPUT",
         message:
-          "Expected { holdId: string, provider: x402|nessie|manual, externalRef: string, amountMinor: integer, asset: string, network?: string, idempotencyKey: string }",
+          "Expected { holdId: string, provider: x402|nessie, externalRef: string, amountMinor: integer, asset: string, network?: string, idempotencyKey: string }",
       });
     }
 
@@ -173,6 +173,9 @@ const STATUS_FOR_CODE: Record<string, number> = {
   NEGOTIATION_CLOSED: 409,
   MAX_ROUNDS: 409,
   OFFER_CLOSED: 409,
+  NOT_BIDDING: 409,
+  BIDDING_CLOSED: 409,
+  BID_LIMIT: 409,
   ALREADY_REPLIED: 409,
   STANDING_INSTRUCTIONS: 409,
 };
@@ -305,6 +308,25 @@ const agentPost = httpAction(async (ctx, request) => {
           amountMinor: num(body.amountMinor),
           reasoning: str(body.reasoning),
         }),
+      );
+    }
+    const offerBid = /^offers\/([^/]+)\/bid$/.exec(path);
+    if (offerBid) {
+      const amountMinor = num(body.amountMinor);
+      if (amountMinor === undefined) return missing(["amountMinor (number)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.liveAuction.placeBid, { token, offerId: offerBid[1], amountMinor, reasoning: str(body.reasoning) }),
+      );
+    }
+    const roundBid = /^rounds\/([^/]+)\/bid$/.exec(path);
+    if (roundBid) {
+      // One sealed answer per round: whole cents, or null (or nothing) to pass.
+      const amountMinor = body.amountMinor === null || body.amountMinor === undefined ? null : num(body.amountMinor);
+      if (amountMinor === undefined) return missing(["amountMinor (number, or null to pass)"]);
+      return json(
+        200,
+        await ctx.runMutation(internal.rounds.submitBid, { token, roundId: roundBid[1], amountMinor, reasoning: str(body.reasoning) }),
       );
     }
     const action = /^auctions\/([^/]+)\/(join|bid|auto-bid)$/.exec(path);
@@ -667,19 +689,19 @@ const hostsPost = httpAction(async (ctx, request) => {
 http.route({ pathPrefix: "/purchases/", method: "POST", handler: legacyPurchase });
 
 /**
- * POST /demo-agents/{advertiserId}/webhook: the hosted demo customer agents'
- * webhook receiver ("simulated customer agent", ADR 0006). Verifies the
- * signature like any external receiver, then lets the agent act asynchronously.
+ * POST /company-agents/{advertiserId}/webhook: the webhook receiver of the
+ * company agents our server runs. Verifies the signature like any external
+ * receiver, then lets the agent act asynchronously.
  */
 http.route({
-  pathPrefix: "/demo-agents/",
+  pathPrefix: "/company-agents/",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const m = /^\/demo-agents\/([^/]+)\/webhook\/?$/.exec(new URL(request.url).pathname);
+    const m = /^\/company-agents\/([^/]+)\/webhook\/?$/.exec(new URL(request.url).pathname);
     if (!m) return json(404, { error: "not found" });
     const body = await request.text();
     if (body.length > 64 * 1024) return json(413, { error: "too large" });
-    const verified = await ctx.runQuery(internal.demoAgents.verifyWebhook, {
+    const verified = await ctx.runQuery(internal.companyAgents.verifyWebhook, {
       advertiserId: m[1],
       timestamp: request.headers.get("X-BillboardOS-Timestamp") ?? "",
       signature: request.headers.get("X-BillboardOS-Signature") ?? "",
@@ -692,7 +714,7 @@ http.route({
     } catch {
       return json(400, { error: "body is not JSON" });
     }
-    await ctx.runMutation(internal.demoAgents.enqueue, { advertiserId: verified.advertiserId, payload });
+    await ctx.runMutation(internal.companyAgents.enqueue, { advertiserId: verified.advertiserId, payload });
     return json(200, { ok: true });
   }),
 });
@@ -720,6 +742,39 @@ http.route({
     if (!agentKey || !holdId) return missing(["agentKey", "holdId"]);
     try {
       return json(200, await ctx.runMutation(internal.agentApi.verifyPayment, { token: agentKey, holdId }));
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }),
+});
+
+/**
+ * POST /api/autopilot/offers/{offerId}/accept (agent key, hold scope): take a
+ * host autopilot's forward offer at its price (ADR 0007). Body (optional):
+ * { campaignId }. 200 { status: "held", holdId, amountMinor, purchaseUrl, ... }
+ * or { status: "pending", decideAt } during a first look.
+ */
+http.route({
+  pathPrefix: "/api/autopilot/offers/",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const m = /^\/api\/autopilot\/offers\/([^/]+)\/accept\/?$/.exec(new URL(request.url).pathname);
+    if (!m || !ID_RE.test(m[1])) return agentError(404, "NOT_FOUND", "Offer not found");
+    const agentKey = agentKeyOf(request);
+    if (!agentKey) return agentError(401, "AGENT_KEY_REQUIRED", "Send Authorization: Bearer <agent key>");
+    let campaignId: string | undefined;
+    const text = await request.text();
+    if (text.trim()) {
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return agentError(400, "INVALID_INPUT", "Body must be a JSON object");
+      }
+      campaignId = typeof body === "object" && body !== null ? str((body as Record<string, unknown>).campaignId) : undefined;
+    }
+    try {
+      return json(200, await ctx.runMutation(internal.autopilot.acceptByKey, { token: agentKey, offerId: m[1], campaignId }));
     } catch (error) {
       return errorResponse(error);
     }

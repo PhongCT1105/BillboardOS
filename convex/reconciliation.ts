@@ -21,7 +21,8 @@ import {
 
 /** The AR clerk seat. Applies cash automatically, never approves anything. */
 export const AR_AGENT = "agent:ar";
-const MAX_LINES_PER_RUN = 50;
+/** Lines per AR run; a full batch means more may be waiting. */
+export const MAX_LINES_PER_RUN = 50;
 const PRIOR_LINE_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
 const MAX_PAYMENT_EXCEPTIONS_SWEPT = 20;
 
@@ -73,6 +74,8 @@ export async function runReconciliationBatch(
   ctx: MutationCtx,
   workspaceId: Id<"workspaces">,
   triggeredBy: string,
+  /** Why this run happened (e.g. "new bank lines arrived"); recorded in the audit trail. */
+  trigger?: string,
 ) {
   const summary = {
     processed: 0,
@@ -259,6 +262,7 @@ export async function runReconciliationBatch(
         appliedMinor,
         invoiceNumbers: decision.applications.map((a) => a.invoiceNumber),
         triggeredBy,
+        ...(trigger ? { trigger } : {}),
       },
     });
 
@@ -284,8 +288,8 @@ export async function runReconciliationBatch(
       actor: AR_AGENT,
       type: "reconciliation.handoff",
       subjectId: "collections",
-      reason: `AR reconciliation finished (${summary.matched} matched, ${summary.partiallyApplied} partially applied, ${summary.needsReview} for review); collections re-planned.`,
-      data: { processed: summary.processed, triggeredBy },
+      reason: `AR reconciliation finished (${summary.matched} matched, ${summary.partiallyApplied} partially applied, ${summary.needsReview} for review); collections re-planned.${trigger ? ` Trigger: ${trigger}.` : ""}`,
+      data: { processed: summary.processed, triggeredBy, ...(trigger ? { trigger } : {}) },
     });
   }
 

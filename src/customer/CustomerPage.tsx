@@ -6,11 +6,18 @@ import { AlertsPanel } from "./AlertsPanel";
 import { AgentKeysPanel } from "./AgentKeysPanel";
 import { BookingsPanel } from "./BookingsPanel";
 import { NegotiationsPanel } from "./NegotiationsPanel";
+import { AgentSetupPanel } from "./AgentSetupPanel";
+import { CustomerOverview } from "../demo/CustomerOverview";
+import { DisplayBrowser } from "../demo/Displays";
+import { PrimaryLink } from "../demo/ui";
 
 export const CUSTOMER_TABS = [
+  { key: "overview", label: "Overview" },
+  { key: "displays", label: "Displays" },
+  { key: "campaigns", label: "Campaigns" },
+  { key: "agent", label: "Campaign setup" },
   { key: "alerts", label: "Alerts" },
   { key: "watch", label: "Watch rules" },
-  { key: "campaigns", label: "Campaigns" },
   { key: "agents", label: "Agent keys" },
   { key: "negotiations", label: "Negotiations" },
   { key: "bookings", label: "Bookings & invoices" },
@@ -18,32 +25,67 @@ export const CUSTOMER_TABS = [
 export type CustomerTab = (typeof CUSTOMER_TABS)[number]["key"];
 
 /** Customer dashboard: #/customer/<tab>. */
-export function CustomerPage({ tab, companyName }: { tab: CustomerTab; companyName: string }) {
+export function CustomerPage({
+  tab,
+  companyName,
+}: {
+  tab: CustomerTab;
+  companyName: string;
+}) {
   const inbox = useQuery(api.alerts.inbox, { limit: 1 });
   return (
-    <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-20 md:px-6">
-      <h1 className="text-2xl font-semibold tracking-tight">{companyName}</h1>
-      <p className="mt-1 text-sm text-muted">Campaigns, deal alerts, your buying agents and what you've booked.</p>
-      <nav aria-label="Dashboard sections" className="mt-6 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-line [scrollbar-width:none]">
-        {CUSTOMER_TABS.map((t) => (
+    <main className="demo-dashboard demo-container">
+      <div className="demo-dashboard-heading">
+        <div>
+          <p className="demo-eyebrow">{companyName}</p>
+          <h1>Your brand, out in the world.</h1>
+          <p>Your displays, campaigns, and results. All in one place.</p>
+        </div>
+        <PrimaryLink href="#/customer/agent">Set up your campaign</PrimaryLink>
+      </div>
+      <nav aria-label="Dashboard sections" className="demo-tabs">
+        {CUSTOMER_TABS.filter((t) =>
+          ["overview", "displays", "campaigns"].includes(t.key),
+        ).map((t) => (
           <a
             key={t.key}
             href={`#/customer/${t.key}`}
             aria-current={tab === t.key ? "page" : undefined}
-            className={`-mb-px flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors ${
-              tab === t.key ? "border-accent text-fg" : "border-transparent text-muted hover:text-fg"
-            }`}
+            className={tab === t.key ? "is-active" : ""}
           >
             {t.label}
-            {t.key === "alerts" && inbox && inbox.unreadCount > 0 && (
-              <span className="tabular rounded-full bg-accent px-1.5 py-px font-mono text-[11px] font-semibold text-accent-ink">
+          </a>
+        ))}
+        <details key={tab}>
+          <summary>
+            {["overview", "displays", "campaigns"].includes(tab)
+              ? "More"
+              : CUSTOMER_TABS.find((t) => t.key === tab)?.label}
+            {!!inbox?.unreadCount && (
+              <span className="ml-1 text-accent">
                 {inbox.unreadCapped ? "99+" : inbox.unreadCount}
               </span>
             )}
-          </a>
-        ))}
+          </summary>
+          <div className="demo-advanced-menu">
+            {CUSTOMER_TABS.filter(
+              (t) => !["overview", "displays", "campaigns"].includes(t.key),
+            ).map((t) => (
+              <a
+                key={t.key}
+                href={`#/customer/${t.key}`}
+                aria-current={tab === t.key ? "page" : undefined}
+              >
+                {t.label}
+              </a>
+            ))}
+          </div>
+        </details>
       </nav>
       <div className="mt-8">
+        {tab === "overview" && <CustomerOverview />}
+        {tab === "displays" && <DisplayBrowser />}
+        {tab === "agent" && <AgentSetupPanel />}
         {tab === "alerts" && <AlertsPanel />}
         {tab === "watch" && <WatchRulesPanel />}
         {tab === "campaigns" && <CampaignsPanel />}

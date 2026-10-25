@@ -65,6 +65,53 @@ export const setAudienceBaseline = mutation({
   },
 });
 
+const MIN_CPM_MINOR = 50;
+const MAX_CPM_MINOR = 100_000;
+
+/**
+ * Host: set this screen's live pricing. `minimumMinor` is the published
+ * minimum a spot can sell for (stored as the reserve floor, at most the
+ * starting rate); `cpmMinor` is the starting rate per 1,000 views.
+ * Workspace members only.
+ */
+export const setLivePricing = mutation({
+  args: { billboardId: v.id("billboards"), minimumMinor: v.number(), cpmMinor: v.number() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const member = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
+    const billboard = await ctx.db.get(args.billboardId);
+    if (!billboard) throw new ConvexError({ code: "NOT_FOUND", message: "Billboard not found" });
+    if (!Number.isSafeInteger(args.minimumMinor) || args.minimumMinor < 1 || args.minimumMinor > billboard.baseRateMinor) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: `minimumMinor must be an integer from 1 to ${billboard.baseRateMinor}`,
+      });
+    }
+    if (!Number.isSafeInteger(args.cpmMinor) || args.cpmMinor < MIN_CPM_MINOR || args.cpmMinor > MAX_CPM_MINOR) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: `cpmMinor must be an integer from ${MIN_CPM_MINOR} to ${MAX_CPM_MINOR}`,
+      });
+    }
+    await ctx.db.patch(billboard._id, { reserveFloorMinor: args.minimumMinor, cpmMinor: args.cpmMinor });
+    await recordAudit(ctx, {
+      workspaceId: billboard.workspaceId,
+      traceId: `billboard:${billboard._id}`,
+      actor: member.actor,
+      type: "billboard.live_pricing_changed",
+      subjectId: billboard._id,
+      reason: `Live pricing for ${billboard.name}: minimum ${args.minimumMinor} and ${args.cpmMinor} per 1,000 views (minor units)`,
+      data: {
+        previousMinimumMinor: billboard.reserveFloorMinor,
+        minimumMinor: args.minimumMinor,
+        previousCpmMinor: billboard.cpmMinor ?? null,
+        cpmMinor: args.cpmMinor,
+      },
+    });
+    return null;
+  },
+});
+
 /**
  * Screens ranked for a campaign (or an ad-hoc target audience): audience match
  * x expected audience = relevant viewers per 15 minutes. Public, so buyer

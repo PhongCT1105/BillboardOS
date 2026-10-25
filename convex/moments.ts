@@ -6,39 +6,34 @@ import { flashOfferStatus, momentStatus, momentStep, momentTrigger, paymentMode,
 import { recordAudit } from "./lib/audit";
 import { authenticateAgent, assertWithinBudget, keyStatus } from "./lib/agentKeys";
 import { loadTrailingAudience } from "./lib/audienceWindow";
-import { computeScreenPrice } from "./lib/screenPrice";
-import { AUDIENCE_BUCKET_MS, PRICING_POLICY_VERSION } from "./lib/pricing";
-import { policyOf } from "./lib/negotiation";
+import { DEFAULT_CPM_MINOR, DEFAULT_LIVE_MINIMUM_MINOR, MAX_JITTER, livePrice, referenceCpm } from "./lib/livePrice";
+import { NEGOTIATION_TIME_CAP_MS, NEXT_SPOT_LEAD_MS, REOFFER_DELAY_MS } from "./lib/liveAuction";
 import {
   MAX_OFFERS,
   MIN_REMAINING_MS,
-  PAY_WINDOW_MS,
   audienceMix,
   campaignFit,
-  detect,
   momentSettingsOf,
-  proRata,
-  rankReplies,
   replyAllowed,
   standingCovers,
   validateMomentSettings,
   validateStanding,
+  screenModeOf,
   type Standing,
 } from "./lib/moment";
-import { addMomentStep, creativeReady } from "./lib/momentHooks";
-import { endHold, takeHold } from "./holds";
-import { applyVerifiedPayment } from "./payments";
-import { requireCustomer, requireWorkspaceMember, resolveWorkspace, workspaceOfBillboard } from "./lib/tenancy";
+import { addMomentStep, creativeReady, releaseWorkspace } from "./lib/momentHooks";
+import { closeJoinCore, endStuckMoment, isStuck, negotiationReply, paymentInFlight, stuckAt } from "./liveAuction";
+import { requireCustomer, requireWorkspaceMember, resolveWorkspace } from "./lib/tenancy";
 
 /**
- * The live moment (ADR 0006): the seller agent notices a relevant crowd,
- * offers the next spot to matching customers' agents, picks a winner within
- * a short window, holds the spot for the winner to pay over x402, and the
- * player starts the pre-approved creative. Every step is timestamped.
+ * The live moment (ADR 0006): from the camera's live count the host's
+ * pricing agent prices the next spot and announces it to every company whose
+ * profile, reach target and limits fit (one live auction per host at a time;
+ * other screens queue). The lifecycle after the announcement lives in
+ * liveAuction.ts. Every step is timestamped.
  */
 
 const DAY = 24 * 60 * 60_000;
-const FLASH_HOLD_TTL_MS = 3 * 60_000;
 const MAX_APPROVALS_SCANNED = 100;
 const NEXT_SLOT_LOOKAHEAD_MS = 2 * 60 * 60_000;
 
@@ -57,16 +52,8 @@ async function liveEvents(ctx: QueryCtx, billboardId: Id<"billboards">, now: num
   return events.filter((e) => e.endsAt > now).sort((a, b) => b._creationTime - a._creationTime);
 }
 
-async function activeEvent(ctx: QueryCtx, billboardId: Id<"billboards">, now: number) {
+export async function activeEvent(ctx: QueryCtx, billboardId: Id<"billboards">, now: number) {
   return (await liveEvents(ctx, billboardId, now))[0] ?? null;
-}
-
-async function latestMoment(ctx: QueryCtx, billboardId: Id<"billboards">) {
-  return await ctx.db
-    .query("moments")
-    .withIndex("by_billboard", (q) => q.eq("billboardId", billboardId))
-    .order("desc")
-    .first();
 }
 
 /** Money this key committed in the last 24 h (active + converted holds): the daily budget's "spent". */
@@ -79,6 +66,30 @@ export async function spentTodayMinor(ctx: QueryCtx, agentKeyId: Id<"agentKeys">
       .order("desc")
       .take(200);
     for (const h of holds) if (h._creationTime >= now - DAY) total += h.amountMinor;
+  }
+  return total;
+}
+
+/** Agent keys looked at when summing a company's spend today. */
+const MAX_COMPANY_KEYS_SCANNED = 200;
+
+/**
+ * Money a company committed in the last 24 h across all of its agent keys
+ * (active + converted holds): the daily budget's "spent". Counting per company,
+ * not per key, means a re-issued key (agent reconfigured or toggled off/on)
+ * never gets a fresh daily budget. Keys revoked or expired more than 24 h ago
+ * can't hold anything created since, so they are skipped.
+ */
+export async function spentTodayForAdvertiserMinor(ctx: QueryCtx, advertiserId: Id<"advertisers">, now: number): Promise<number> {
+  const keys = await ctx.db
+    .query("agentKeys")
+    .withIndex("by_advertiser", (q) => q.eq("advertiserId", advertiserId))
+    .order("desc")
+    .take(MAX_COMPANY_KEYS_SCANNED);
+  let total = 0;
+  for (const k of keys) {
+    if ((k.revokedAt !== undefined && k.revokedAt < now - DAY) || k.expiresAt < now - DAY) continue;
+    total += await spentTodayMinor(ctx, k._id, now);
   }
   return total;
 }
@@ -99,23 +110,114 @@ async function pickSpot(ctx: QueryCtx, billboard: Doc<"billboards">, now: number
   return null;
 }
 
+/** A camera reading counts for this long (by its 15-minute bucket start). */
+const READING_MAX_AGE_MS = 15 * 60_000;
+/** Moments looked at for the queue check and the screen's sales history. */
+const RECENT_MOMENTS = 20;
+/** A live auction or negotiation is running, or its winner is paying. */
+const BUSY_STATUSES: ReadonlySet<Doc<"moments">["status"]> = new Set(["offering", "bidding", "negotiating", "awarded"]);
+
+/** People in view must move by at least this much (or 20%) to re-price a waiting re-offer. */
+const REPRICE_MIN_PEOPLE = 2;
+const REPRICE_MIN_SHARE = 0.2;
+
+async function busyMoments(ctx: QueryCtx, workspaceId: Id<"workspaces">): Promise<Doc<"moments">[]> {
+  const recent = await ctx.db
+    .query("moments")
+    .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+    .order("desc")
+    .take(RECENT_MOMENTS);
+  return recent.filter((m) => BUSY_STATUSES.has(m.status));
+}
+
+/**
+ * One live auction (or negotiation) per host at a time: the screen running
+ * one (auction, negotiation, or a winner paying), or null when the host is
+ * free. A moment clearly past its bound (`stuckAfter`) no longer counts.
+ */
+export async function workspaceBusy(ctx: QueryCtx, workspaceId: Id<"workspaces">, now = Date.now()): Promise<Id<"billboards"> | null> {
+  for (const m of await busyMoments(ctx, workspaceId)) if (!(await isStuck(ctx, m, now))) return m.billboardId;
+  return null;
+}
+
+/** The host's live moments that are stuck past their bound (their scheduled close never ran). */
+export async function stuckMoments(ctx: QueryCtx, workspaceId: Id<"workspaces">, now: number): Promise<Doc<"moments">[]> {
+  const out = [];
+  for (const m of await busyMoments(ctx, workspaceId)) if (await isStuck(ctx, m, now)) out.push(m);
+  return out;
+}
+
+/**
+ * People in view right now: the newest camera bucket from the last 15
+ * minutes, using its peak in view. Simulated rows and older readings never count.
+ */
+export async function latestCameraReading(
+  ctx: QueryCtx,
+  billboardId: Id<"billboards">,
+  now: number,
+): Promise<{ peopleInView: number; bucketStart: number } | null> {
+  const rows = await ctx.db
+    .query("audienceAggregates")
+    .withIndex("by_billboard_and_bucketStart", (q) => q.eq("billboardId", billboardId).gte("bucketStart", now - READING_MAX_AGE_MS))
+    .order("desc")
+    .take(4);
+  const row = rows.find((r) => r.source === "camera");
+  return row ? { peopleInView: row.peakInView ?? 0, bucketStart: row.bucketStart } : null;
+}
+
+/** The screen's latest moment, how long it has gone without a paid ad, and its reference CPM. */
+async function screenHistory(ctx: QueryCtx, billboard: Doc<"billboards">, now: number) {
+  const recent = await ctx.db
+    .query("moments")
+    .withIndex("by_billboard", (q) => q.eq("billboardId", billboard._id))
+    .order("desc")
+    .take(RECENT_MOMENTS);
+  const lastPaid = recent.find((m) => m.paidMinor !== undefined);
+  const idleMs = Math.max(0, now - (lastPaid ? lastPaid.spotEndAt : billboard._creationTime));
+  const sales = recent
+    .filter((m) => m.paidMinor !== undefined && m.impressions !== undefined)
+    .reverse() // oldest first
+    .map((m) => ({ amountMinor: m.paidMinor!, impressions: m.impressions! }));
+  const cpmRefMinor = referenceCpm(sales, billboard.cpmMinor ?? DEFAULT_CPM_MINOR);
+  return { latest: recent[0] ?? null, idleMs, cpmRefMinor };
+}
+
+/** The biggest audience segment in the mix (a screen without tags is "general"). */
+function topSegment(mix: Record<string, number>): { segment: string; share: number } {
+  let best = { segment: "general", share: 1 };
+  let first = true;
+  for (const [segment, share] of Object.entries(mix)) {
+    if (first || share > best.share) best = { segment, share };
+    first = false;
+  }
+  return best;
+}
+
 type Target = {
   campaign: Doc<"campaigns">;
   key: Doc<"agentKeys">;
   matchScore: number;
   relevantViewers: number;
-  simulatedAgent: boolean;
 };
 
 /**
- * Customers to offer the spot to: active campaigns with a creative ready on
- * this host's screens, audience match >= threshold, an active agent key with
- * a webhook and the hold + pay scopes, and standing instructions that cover
- * the seller's floor. One offer per company (its best-matching campaign).
+ * Companies to announce the spot to: active campaigns with a creative ready
+ * on this host's screens, audience match >= threshold, an active agent key
+ * with a webhook and the hold + pay + bid scopes, and standing instructions
+ * that cover the published minimum and the company's reach target
+ * (relevant viewers = people in view x match). One offer per company: its
+ * best-matching campaign.
  */
 async function findTargets(
   ctx: QueryCtx,
-  input: { workspaceId: Id<"workspaces">; mix: Record<string, number>; crowd: number; floorMinor: number; minMatch: number; now: number },
+  input: {
+    workspaceId: Id<"workspaces">;
+    mix: Record<string, number>;
+    peopleInView: number;
+    minimumMinor: number;
+    minMatch: number;
+    now: number;
+  },
 ): Promise<{ targets: Target[]; skipped: string[] }> {
   const approvals = await ctx.db
     .query("creativeApprovals")
@@ -128,7 +230,7 @@ async function findTargets(
     if (!campaign || campaign.status !== "active") continue;
     const company = (await ctx.db.get(campaign.advertiserId))?.displayName ?? "company";
     if (!(await creativeReady(ctx, campaign, input.workspaceId))) continue;
-    const fit = campaignFit(input.mix, campaign.targetAudience, input.crowd);
+    const fit = campaignFit(input.mix, campaign.targetAudience, input.peopleInView);
     if (fit.matchScore < input.minMatch) {
       skipped.push(`${company}: audience match ${Math.round(fit.matchScore * 100)}% < ${Math.round(input.minMatch * 100)}%`);
       continue;
@@ -138,15 +240,15 @@ async function findTargets(
       .withIndex("by_advertiser", (q) => q.eq("advertiserId", campaign.advertiserId))
       .take(20);
     let chosen: Doc<"agentKeys"> | null = null;
-    let reason = "no agent key with a webhook and standing instructions";
+    let reason = "no agent key with a webhook, the hold, pay and bid scopes, and standing instructions";
     for (const k of keys) {
       if (keyStatus(k, input.now) !== "active" || !k.webhookUrl || !k.standing) continue;
-      if (!k.scopes.includes("hold") || !k.scopes.includes("pay")) continue;
+      if (!k.scopes.includes("hold") || !k.scopes.includes("pay") || !k.scopes.includes("bid")) continue;
       if (k.campaignIds && !k.campaignIds.includes(campaign._id)) continue;
       const why = standingCovers(k.standing, {
-        floorMinor: input.floorMinor,
+        floorMinor: input.minimumMinor,
         relevantViewers: fit.relevantViewers,
-        spentTodayMinor: await spentTodayMinor(ctx, k._id, input.now),
+        spentTodayMinor: await spentTodayForAdvertiserMinor(ctx, k.advertiserId, input.now),
       });
       if (why) {
         reason = why;
@@ -159,19 +261,9 @@ async function findTargets(
       skipped.push(`${company}: ${reason}`);
       continue;
     }
-    const demo = await ctx.db
-      .query("demoAgents")
-      .withIndex("by_advertiser", (q) => q.eq("advertiserId", campaign.advertiserId))
-      .first();
     const prev = best.get(campaign.advertiserId);
     if (!prev || fit.matchScore > prev.matchScore) {
-      best.set(campaign.advertiserId, {
-        campaign,
-        key: chosen,
-        matchScore: fit.matchScore,
-        relevantViewers: fit.relevantViewers,
-        simulatedAgent: demo?.agentKeyId === chosen._id,
-      });
+      best.set(campaign.advertiserId, { campaign, key: chosen, matchScore: fit.matchScore, relevantViewers: fit.relevantViewers });
     }
   }
   const targets = [...best.values()].sort((a, b) => b.matchScore - a.matchScore).slice(0, MAX_OFFERS);
@@ -180,7 +272,33 @@ async function findTargets(
 
 type DetectResult = { momentId: Id<"moments"> | null; reason: string };
 
-/** Detector + targeting + offers. Returns the new moment, or why nothing happened. */
+/** A pending re-offer this far past its due time never ran (it failed): schedule a fresh one. */
+const REOFFER_STALE_MS = 10_000;
+
+/**
+ * Nobody bought this moment's spot: announce it again after a pause, about
+ * 15% lower (the next re-offer round), unless it is already at its minimum,
+ * where it holds as a standing offer. One chain per screen: when a re-offer
+ * is already pending (`reofferDueAt`), it is left in charge. Returns whether
+ * a re-offer is coming.
+ */
+export async function scheduleReoffer(ctx: MutationCtx, moment: Doc<"moments">): Promise<boolean> {
+  if (moment.priceMinor <= moment.floorMinor) return false;
+  const now = Date.now();
+  const billboard = await ctx.db.get(moment.billboardId);
+  if (billboard?.reofferDueAt !== undefined && billboard.reofferDueAt + REOFFER_STALE_MS > now) return true;
+  const dueAt = now + REOFFER_DELAY_MS;
+  await ctx.db.patch(moment.billboardId, { reofferDueAt: dueAt });
+  await ctx.scheduler.runAt(dueAt, internal.moments.detectFor, { billboardId: moment.billboardId, trigger: "reoffer" });
+  return true;
+}
+
+/**
+ * Announce a spot on this screen from the camera's live count: queue behind
+ * the host's running auction, price it live, offer it to every company whose
+ * profile, reach target and limits fit, or record no takers and re-offer.
+ * Returns the new moment, or why nothing happened.
+ */
 export async function detectCore(
   ctx: MutationCtx,
   billboardId: Id<"billboards">,
@@ -189,94 +307,125 @@ export async function detectCore(
   const now = Date.now();
   const billboard = await ctx.db.get(billboardId);
   if (!billboard?.workspaceId || billboard.deviceStatus !== "online") return { momentId: null, reason: "screen offline or unassigned" };
-  const workspace = (await ctx.db.get(billboard.workspaceId))!;
+  const workspaceId = billboard.workspaceId;
+  const workspace = (await ctx.db.get(workspaceId))!;
   const settings = momentSettingsOf(workspace);
   if (!settings.enabled) return { momentId: null, reason: "moment detector is off for this host" };
 
-  const last = await latestMoment(ctx, billboard._id);
-  if (last) {
-    const busy = last.status === "offering" || last.status === "awarded" || ((last.status === "paid" || last.status === "playing") && last.spotEndAt > now);
-    if (busy) return { momentId: null, reason: "a moment is already in progress on this screen" };
-    if (trigger !== "simulated" && now - last.startedAt < settings.cooldownMs) {
-      return { momentId: null, reason: `cooling down (${Math.round(settings.cooldownMs / 60_000)} min per screen)` };
-    }
+  // A moment stuck past its bound never holds the host forever: end it, then carry on.
+  for (const stuck of await stuckMoments(ctx, workspaceId, now)) {
+    await endStuckMoment(ctx, stuck, "system", `still ${stuck.status} long past its close; the host lock was released`);
+  }
+  // One live auction or negotiation per host: other screens wait their turn (first come, first served).
+  const busyScreen = await workspaceBusy(ctx, workspaceId, now);
+  if (busyScreen === billboard._id) return { momentId: null, reason: "a moment is already in progress on this screen" };
+  if (busyScreen !== null) {
+    if (billboard.saleQueuedAt === undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: now });
+    return { momentId: null, reason: "queued" };
   }
 
-  const { sample } = await loadTrailingAudience(ctx.db, billboard._id, now);
-  // Evaluate each live event (and none); keep the one that explains the most relevant viewers.
-  const candidates = [null, ...(await liveEvents(ctx, billboard._id, now))];
-  let event: Doc<"events"> | null = null;
-  let detection: ReturnType<typeof detect> | null = null;
-  for (const e of candidates) {
-    const d = detect({
-      crowd: sample?.countEstimate ?? 0,
-      crowdSimulated: sample?.source === "simulated",
-      screenTags: billboard.audienceTags,
-      event: e ? { name: e.name, tags: e.audienceTags, uplift: e.upliftMultiplier } : null,
-      threshold: settings.minRelevantViewers,
-    });
-    if (!detection || d.relevantViewers > detection.relevantViewers) {
-      detection = d;
-      event = e;
-    }
+  const history = await screenHistory(ctx, billboard, now);
+  const last = history.latest;
+  if (last && (last.status === "paid" || last.status === "playing") && last.spotEndAt - now > NEXT_SPOT_LEAD_MS) {
+    return { momentId: null, reason: "playing" };
   }
-  if (!detection) return { momentId: null, reason: "no detection" };
-  if (!detection.fires) return { momentId: null, reason: detection.reasoning };
+
+  const reading = await latestCameraReading(ctx, billboard._id, now);
+  if (!reading) return { momentId: null, reason: "no camera reading in the last 15 minutes" };
+  const peopleInView = reading.peopleInView;
+  if (peopleInView < settings.minPeopleInView) {
+    return { momentId: null, reason: `${peopleInView} people in view, below the ${settings.minPeopleInView} needed` };
+  }
 
   const slot = await pickSpot(ctx, billboard, now);
-  if (!slot) return { momentId: null, reason: `${detection.reasoning}; but no spot is free in the next 2 hours` };
+  if (!slot) return { momentId: null, reason: `${peopleInView} people in view, but no spot is free in the next 2 hours` };
   const spotStartAt = Math.max(now, slot.startAt);
-  const covered = slot.endAt - spotStartAt;
-  const { price } = await computeScreenPrice(ctx.db, billboard, [slot], now);
-  const priceMinor = proRata(price.slotPrices[0].amountMinor, covered);
-  const floorRatio = policyOf(workspace).floorRatio;
-  const floorMinor = Math.max(1, Math.ceil(priceMinor * floorRatio), Math.ceil((billboard.reserveFloorMinor * covered) / (15 * 60_000)));
+  const spotMs = slot.endAt - spotStartAt;
+  // A spot nobody took is waiting to be re-offered. Only the scheduled re-offer steps the price down;
+  // other triggers re-price it at the same round, and only when the crowd really changed.
+  const waiting = last?.status === "no_takers" && last.slotId === slot._id ? last : null;
+  const stepDown = waiting !== null && trigger === "reoffer";
+  if (waiting && !stepDown) {
+    const before = waiting.peopleInView ?? waiting.crowd;
+    if (Math.abs(peopleInView - before) < Math.max(REPRICE_MIN_PEOPLE, REPRICE_MIN_SHARE * before)) {
+      return { momentId: null, reason: "holding" };
+    }
+  }
+  const reofferRound = waiting ? (waiting.reofferRound ?? 0) + (stepDown ? 1 : 0) : 0;
+  // A re-price leaves the waiting moment's scheduled re-offer in charge of the next step down.
+  const reofferAlreadyScheduled = waiting !== null && !stepDown && waiting.priceMinor > waiting.floorMinor;
+  const minimumMinor =
+    Number.isSafeInteger(billboard.reserveFloorMinor) && billboard.reserveFloorMinor > 0 ? billboard.reserveFloorMinor : DEFAULT_LIVE_MINIMUM_MINOR;
+
+  const event = await activeEvent(ctx, billboard._id, now);
   const mix = audienceMix(billboard.audienceTags, event?.audienceTags);
   const { targets, skipped } = await findTargets(ctx, {
-    workspaceId: billboard.workspaceId,
+    workspaceId,
     mix,
-    crowd: detection.crowd,
-    floorMinor,
+    peopleInView,
+    minimumMinor,
     minMatch: settings.minMatch,
     now,
   });
+  const bestMatch = targets.reduce((m, t) => Math.max(m, t.matchScore), 0);
+  const price = livePrice({
+    peopleInView,
+    spotMs,
+    cpmRefMinor: history.cpmRefMinor,
+    bestMatch,
+    idleMs: history.idleMs,
+    msUntilStart: Math.max(0, slot.startAt - now),
+    reofferRound,
+    minimumMinor,
+    jitter: (Math.random() * 2 - 1) * MAX_JITTER,
+  });
 
-  // Automatic triggers stay quiet when nobody can buy; the labeled simulation records why.
-  if (targets.length === 0 && trigger !== "simulated") {
-    return { momentId: null, reason: `${detection.reasoning}; no eligible customers (${skipped.join("; ") || "no ready creatives"})` };
-  }
-  const minutes = Math.round(covered / 60_000);
-  const offerClosesAt = now + settings.responseWindowMs;
+  const { segment, share } = topSegment(mix);
+  const minutes = Math.round(spotMs / 60_000);
+  const offering = targets.length > 0;
+  const offerClosesAt = offering ? now + settings.joinWindowMs : now;
+  const joinSeconds = Math.round(settings.joinWindowMs / 1000);
   const momentId = await ctx.db.insert("moments", {
-    workspaceId: billboard.workspaceId,
+    workspaceId,
     billboardId: billboard._id,
     trigger,
-    status: targets.length > 0 ? "offering" : "no_takers",
+    status: offering ? "offering" : "no_takers",
     startedAt: now,
-    crowd: detection.crowd,
-    segment: detection.segment,
-    segmentShare: detection.segmentShare,
-    relevantViewers: detection.relevantViewers,
+    crowd: peopleInView,
+    segment,
+    segmentShare: share,
+    relevantViewers: Math.round(peopleInView * share),
     eventName: event?.name,
-    crowdSource: sample?.source ?? "none",
-    reasoning: detection.reasoning,
+    crowdSource: "camera",
+    reasoning: price.why,
     slotId: slot._id,
     spotStartAt,
     spotEndAt: slot.endAt,
-    priceMinor,
-    floorMinor,
+    priceMinor: price.openingMinor,
+    floorMinor: price.minimumMinor,
+    valueMinor: price.valueMinor,
+    peopleInView,
+    plays: price.plays,
+    impressions: price.impressions,
+    priceWhy: price.why,
+    reofferRound,
     offerClosesAt,
     steps: [
-      { key: "detected", label: "Crowd detected", at: now, detail: detection.reasoning },
+      {
+        key: "detected",
+        label: `${peopleInView} ${peopleInView === 1 ? "person" : "people"} in view`,
+        at: now,
+        detail: `Camera count${event ? `; ${event.name} next door` : ""}.`,
+      },
       {
         key: "priced",
-        label: `${minutes}-minute spot priced at ${usd(priceMinor)}`,
+        label: `${minutes}-minute spot: bidding opens at ${usd(price.openingMinor)}`,
         at: now,
-        detail: `${slot.startAt <= now ? "Rest of the current slot" : "Next available slot"}, pro-rata screen price (${minutes} of 15 min).`,
+        detail: `${slot.startAt <= now ? "Rest of the current slot" : "Next available slot"}. ${price.why}`,
       },
       {
         key: "targeted",
-        label: `${targets.length} customer${targets.length === 1 ? "" : "s"} targeted`,
+        label: `${targets.length} compan${targets.length === 1 ? "y" : "ies"} targeted`,
         at: now,
         detail: [
           ...targets.map((t) => `${t.campaign.brief.slice(0, 40)}: ${Math.round(t.matchScore * 100)}% match, ~${t.relevantViewers} relevant`),
@@ -286,32 +435,56 @@ export async function detectCore(
     ],
   });
   await recordAudit(ctx, {
-    workspaceId: billboard.workspaceId,
+    workspaceId,
     traceId: `moment:${momentId}`,
     actor: `seller-agent:${workspace.name}`,
     type: "moment.detected",
     subjectId: momentId,
-    reason: `${detection.reasoning}; ${minutes}-min spot at ${usd(priceMinor)}; ${targets.length} customer(s) targeted`.slice(0, 1000),
-    data: { trigger, crowd: detection.crowd, relevantViewers: detection.relevantViewers, priceMinor, floorMinor },
+    reason: `${price.why}; ${targets.length} compan${targets.length === 1 ? "y" : "ies"} targeted`.slice(0, 1000),
+    data: {
+      trigger,
+      peopleInView,
+      valueMinor: price.valueMinor,
+      openingMinor: price.openingMinor,
+      minimumMinor: price.minimumMinor,
+      reofferRound,
+    },
   });
+  // This screen's turn has come: it leaves the queue.
+  if (billboard.saleQueuedAt !== undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: undefined });
   const moment = (await ctx.db.get(momentId))!;
-  if (targets.length === 0) {
-    await addMomentStep(ctx, moment, "no_takers", "No eligible customers", skipped.join("; ") || "No ready creatives for this host.");
+
+  if (!offering) {
+    const reoffer = price.openingMinor > price.minimumMinor;
+    await addMomentStep(
+      ctx,
+      moment,
+      "no_takers",
+      "No eligible companies",
+      `${skipped.join("; ") || "No ready creatives for this host."} ${
+        !reoffer
+          ? `Holding at the ${usd(price.minimumMinor)} minimum.`
+          : reofferAlreadyScheduled
+            ? "Re-priced for the new crowd; the re-offer already scheduled steps it down about 15%."
+            : `Re-offering in ${REOFFER_DELAY_MS / 1000} s, about 15% lower.`
+      }`,
+    );
+    if (!reofferAlreadyScheduled) await scheduleReoffer(ctx, moment);
+    await releaseWorkspace(ctx, workspaceId);
     return { momentId, reason: "no eligible customers" };
   }
 
   for (const t of targets) {
     const offerId = await ctx.db.insert("flashOffers", {
       momentId,
-      workspaceId: billboard.workspaceId,
+      workspaceId,
       advertiserId: t.campaign.advertiserId,
       campaignId: t.campaign._id,
       agentKeyId: t.key._id,
-      priceMinor,
+      priceMinor: price.openingMinor,
       relevantViewers: t.relevantViewers,
       matchScore: t.matchScore,
       status: "sent",
-      simulatedAgent: t.simulatedAgent,
       delivery: { status: "pending", attempts: 0 },
       sentAt: now,
     });
@@ -321,28 +494,55 @@ export async function detectCore(
       trigger: "flash_offer",
       flashOfferId: offerId,
       billboardId: billboard._id,
-      workspaceId: billboard.workspaceId,
+      workspaceId,
       slotIds: [slot._id],
-      slots: [{ slotId: slot._id, startAt: spotStartAt, endAt: slot.endAt, screenPriceMinor: priceMinor }],
+      slots: [{ slotId: slot._id, startAt: spotStartAt, endAt: slot.endAt, screenPriceMinor: price.openingMinor }],
       matchCount: 1,
-      priceMinor,
-      reason: `Flash offer from ${workspace.name}: ${minutes} min on ${billboard.name} for ${usd(priceMinor)}, ~${t.relevantViewers} relevant viewers. Reply within ${Math.round(settings.responseWindowMs / 1000)} s.`,
+      priceMinor: price.openingMinor,
+      reason: `Live spot from ${workspace.name}: ${minutes} min on ${billboard.name}, bidding opens at ${usd(price.openingMinor)} (minimum ${usd(price.minimumMinor)}), ~${t.relevantViewers} matching people in view. Join within ${joinSeconds} s.`,
       createdAt: now,
       inbox: { status: "delivered" },
     });
     await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId, event: "flash_offer" });
   }
-  await addMomentStep(ctx, moment, "offers_sent", `${targets.length} flash offer${targets.length === 1 ? "" : "s"} sent`, `Signed webhooks + inbox; window closes in ${Math.round(settings.responseWindowMs / 1000)} s.`);
-  await ctx.scheduler.runAt(offerClosesAt, internal.moments.close, { momentId });
+  await addMomentStep(ctx, moment, "offers_sent", `${targets.length} live offer${targets.length === 1 ? "" : "s"} sent`, `Signed webhooks + inbox; joining closes in ${joinSeconds} s.`);
+  await ctx.scheduler.runAt(offerClosesAt, internal.liveAuction.closeJoin, { momentId });
   return { momentId, reason: "offers sent" };
 }
 
-/** Event-driven entry point (sensor arrivals, event changes). */
+/** Event-driven entry point (camera arrivals, event changes, queue, re-offers, next spot). */
 export const detectFor = internalMutation({
   args: { billboardId: v.id("billboards"), trigger: momentTrigger },
   returns: v.object({ momentId: v.union(v.id("moments"), v.null()), reason: v.string() }),
-  handler: async (ctx, args) => await detectCore(ctx, args.billboardId, args.trigger),
+  handler: async (ctx, args) => {
+    if (args.trigger === "reoffer") {
+      // The pending re-offer is running now: the screen has no chain until this run schedules one.
+      const screen = await ctx.db.get(args.billboardId);
+      if (screen?.reofferDueAt !== undefined) await ctx.db.patch(args.billboardId, { reofferDueAt: undefined });
+    }
+    const result = await detectCore(ctx, args.billboardId, args.trigger);
+    if (args.trigger === "queue" && result.momentId === null && !HOST_BUSY_REASONS.has(result.reason)) {
+      // A re-offer that came due while the host was busy queued instead: restart its chain
+      // (scheduleReoffer leaves a still-pending one in charge).
+      if (result.reason === "holding") {
+        const waiting = await ctx.db
+          .query("moments")
+          .withIndex("by_billboard", (q) => q.eq("billboardId", args.billboardId))
+          .order("desc")
+          .first();
+        if (waiting) await scheduleReoffer(ctx, waiting);
+      }
+      // This screen doesn't sell after all: it leaves the queue and passes its turn on (the host is still free).
+      const billboard = await ctx.db.get(args.billboardId);
+      if (billboard?.saleQueuedAt !== undefined) await ctx.db.patch(billboard._id, { saleQueuedAt: undefined });
+      if (billboard?.workspaceId) await releaseWorkspace(ctx, billboard.workspaceId);
+    }
+    return result;
+  },
 });
+
+/** detectCore reasons that mean the host is running a moment (so the queue must wait). */
+const HOST_BUSY_REASONS = new Set(["queued", "a moment is already in progress on this screen"]);
 
 /** Called by the audience and event code: cheap pre-check, then detect in its own transaction. */
 export async function scheduleDetect(ctx: MutationCtx, billboardId: Id<"billboards">, trigger: "arrivals" | "event"): Promise<void> {
@@ -353,43 +553,13 @@ export async function scheduleDetect(ctx: MutationCtx, billboardId: Id<"billboar
   await ctx.scheduler.runAfter(0, internal.moments.detectFor, { billboardId, trigger });
 }
 
-/**
- * Host-only, clearly labeled: write a SIMULATED audience bucket of N people
- * for the current 15 minutes, then run the detector (cooldown bypassed, but
- * never while a moment is in progress).
- */
-export const simulateCrowd = mutation({
-  args: { billboardId: v.id("billboards"), people: v.optional(v.number()) },
-  returns: v.object({ momentId: v.union(v.id("moments"), v.null()), reason: v.string() }),
-  handler: async (ctx, args) => {
-    const member = await requireWorkspaceMember(ctx, await workspaceOfBillboard(ctx, args.billboardId));
-    const people = args.people ?? 30;
-    if (!Number.isSafeInteger(people) || people < 1 || people > 1000) fail("INVALID_INPUT", "people must be 1..1000");
-    const now = Date.now();
-    const bucketStart = now - (now % AUDIENCE_BUCKET_MS);
-    const billboard = (await ctx.db.get(args.billboardId))!;
-    const existing = await ctx.db
-      .query("audienceAggregates")
-      .withIndex("by_billboard_and_bucketStart", (q) => q.eq("billboardId", args.billboardId).eq("bucketStart", bucketStart))
-      .first();
-    const fields = { countEstimate: people, source: "simulated" as const, confidence: 1, peakInView: Math.max(1, Math.round(people / 4)) };
-    if (existing) await ctx.db.patch(existing._id, fields);
-    else await ctx.db.insert("audienceAggregates", { workspaceId: billboard.workspaceId, billboardId: args.billboardId, bucketStart, ...fields });
-    await recordAudit(ctx, {
-      workspaceId: billboard.workspaceId,
-      traceId: `billboard:${args.billboardId}`,
-      actor: member.actor,
-      type: "moment.detected",
-      subjectId: args.billboardId,
-      reason: `SIMULATED crowd: ${people} people written to the current 15-minute bucket by ${member.email}`,
-    });
-    return await detectCore(ctx, args.billboardId, "simulated");
-  },
-});
-
 // ---------------------------------------------------------------- replies (agent API)
 
-/** POST /api/agent/offers/{id}/reply: accept | counter | pass, within the window. */
+/**
+ * POST /api/agent/offers/{id}/reply: accept | counter | pass. While the join
+ * window is open it joins (or passes on) the live auction; during a
+ * negotiation it answers the host's counter-offer.
+ */
 export const reply = internalMutation({
   args: {
     token: v.string(),
@@ -406,6 +576,45 @@ export const reply = internalMutation({
     if (!offer || offer.agentKeyId !== agent.key._id) fail("NOT_FOUND", "Offer not found");
     const moment = (await ctx.db.get(offer.momentId))!;
     const now = Date.now();
+    const reasoning = (args.reasoning ?? "").trim().slice(0, 300) || undefined;
+    const company = agent.advertiser.displayName;
+
+    /** Whole cents, within the key's standing instructions and budget cap. */
+    async function checkAmount(amount: number): Promise<void> {
+      if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 10_000_000) fail("INVALID_INPUT", "amountMinor must be whole cents for a counter");
+      const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayForAdvertiserMinor(ctx, agent.key.advertiserId, now));
+      if (why) fail("STANDING_INSTRUCTIONS", `Refused: ${why}`);
+      await assertWithinBudget(ctx, agent.key, amount);
+    }
+
+    if (moment.status === "negotiating") {
+      const respondBy = moment.startedAt + NEGOTIATION_TIME_CAP_MS;
+      if (moment.negotiationOfferId !== offer._id || now >= respondBy) fail("OFFER_CLOSED", "The negotiation is not open to you");
+      const sellerMinor = moment.sellerMinor ?? moment.priceMinor;
+      let decision = args.decision;
+      let amount: number | null = null;
+      if (decision !== "pass") {
+        amount = decision === "accept" ? sellerMinor : (args.amountMinor ?? NaN);
+        if (Number.isSafeInteger(amount) && amount >= sellerMinor) {
+          // Countering at or above the host's price is an accept at the host's price.
+          decision = "accept";
+          amount = sellerMinor;
+        }
+        await checkAmount(amount);
+      }
+      await negotiationReply(ctx, moment, offer, decision, amount ?? undefined, reasoning);
+      await recordAudit(ctx, {
+        workspaceId: moment.workspaceId,
+        traceId: `moment:${moment._id}`,
+        actor: agent.actor,
+        type: "moment.reply",
+        subjectId: offer._id,
+        reason: `negotiation ${decision}${amount !== null ? ` ${usd(amount)}` : ""}${reasoning ? `: ${reasoning}` : ""}`.slice(0, 1000),
+      });
+      const after = (await ctx.db.get(offer._id))!;
+      return { offerId: offer._id, status: after.status, amountMinor: amount, windowClosesAt: respondBy };
+    }
+
     if (moment.status !== "offering" || now >= moment.offerClosesAt) fail("OFFER_CLOSED", "The response window has closed");
     if (offer.status !== "sent") fail("ALREADY_REPLIED", `Already replied: ${offer.status}`);
     let status: "accepted" | "countered" | "passed";
@@ -415,21 +624,16 @@ export const reply = internalMutation({
     } else {
       amount = args.decision === "accept" ? offer.priceMinor : args.amountMinor ?? NaN;
       if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 10_000_000) fail("INVALID_INPUT", "amountMinor must be whole cents for a counter");
-      if (amount >= offer.priceMinor) amount = offer.priceMinor; // countering at/above the ask is an accept
+      if (amount >= offer.priceMinor) amount = offer.priceMinor; // countering at/above the opening price is an accept
       status = amount === offer.priceMinor ? "accepted" : "countered";
-      // Standing instructions are enforced server-side too, and the key's budget cap applies.
-      const why = replyAllowed(agent.key.standing as Standing | undefined, amount, await spentTodayMinor(ctx, agent.key._id, now));
-      if (why) fail("STANDING_INSTRUCTIONS", `Refused: ${why}`);
-      await assertWithinBudget(ctx, agent.key, amount);
+      await checkAmount(amount);
     }
-    const reasoning = (args.reasoning ?? "").trim().slice(0, 300) || undefined;
     await ctx.db.patch(offer._id, { status, replyAmountMinor: amount ?? undefined, replyReasoning: reasoning, repliedAt: now });
-    const company = agent.advertiser.displayName;
     await addMomentStep(
       ctx,
       moment,
       `reply:${offer._id}`,
-      `${company}${offer.simulatedAgent ? " (simulated customer agent)" : ""}: ${status === "passed" ? "pass" : status === "accepted" ? `accept ${usd(amount!)}` : `counter ${usd(amount!)}`}`,
+      `${company}: ${status === "passed" ? "pass" : status === "accepted" ? `accept ${usd(amount!)}` : `counter ${usd(amount!)}`}`,
       reasoning,
       now,
     );
@@ -441,179 +645,13 @@ export const reply = internalMutation({
       subjectId: offer._id,
       reason: `${status}${amount !== null ? ` ${usd(amount)}` : ""}${reasoning ? `: ${reasoning}` : ""}`.slice(0, 1000),
     });
-    // Close early once everyone answered.
+    // Close the join window early once everyone answered.
     const offers = await ctx.db
       .query("flashOffers")
       .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
       .take(MAX_OFFERS + 1);
-    if (offers.every((o) => o.status !== "sent")) await closeCore(ctx, moment._id, "everyone replied");
+    if (offers.every((o) => o.status !== "sent")) await closeJoinCore(ctx, moment._id, "everyone replied");
     return { offerId: offer._id, status, amountMinor: amount, windowClosesAt: moment.offerClosesAt };
-  },
-});
-
-// ---------------------------------------------------------------- close, award, default
-
-async function award(ctx: MutationCtx, moment: Doc<"moments">, excludeOfferIds: Set<string>): Promise<boolean> {
-  const offers = await ctx.db
-    .query("flashOffers")
-    .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
-    .take(MAX_OFFERS + 1);
-  const ranked = rankReplies(
-    offers
-      .filter((o) => !excludeOfferIds.has(o._id))
-      .map((o) => ({ offerId: o._id, status: o.status, amountMinor: o.replyAmountMinor ?? null, repliedAt: o.repliedAt ?? null })),
-    moment.floorMinor,
-  );
-  const workspace = (await ctx.db.get(moment.workspaceId))!;
-  for (const r of ranked) {
-    const offer = offers.find((o) => o._id === r.offerId)!;
-    const key = await ctx.db.get(offer.agentKeyId);
-    const amount = r.amountMinor!;
-    if (!key || keyStatus(key, Date.now()) !== "active") continue;
-    try {
-      await assertWithinBudget(ctx, key, amount);
-    } catch {
-      await addMomentStep(ctx, moment, `skip:${offer._id}`, "Skipped a reply over its budget cap");
-      continue;
-    }
-    const now = Date.now();
-    const company = (await ctx.db.get(offer.advertiserId))?.displayName ?? "company";
-    const actor = `agent:${company}/${key.name}`;
-    const traceId = `moment:${moment._id}`;
-    const quoteId = await ctx.db.insert("quotes", {
-      workspaceId: moment.workspaceId,
-      campaignId: offer.campaignId,
-      billboardId: moment.billboardId,
-      slotIds: [moment.slotId],
-      amountMinor: amount,
-      currency: "USD",
-      expiresAt: now + 10 * 60_000,
-      pricingBasis: [
-        `Flash spot from ${workspace.name}'s seller agent: ${Math.round((moment.spotEndAt - moment.spotStartAt) / 60_000)} min, ask ${usd(moment.priceMinor)}, won at ${usd(amount)}`,
-        moment.reasoning,
-      ],
-      confidence: "medium",
-      policyVersion: PRICING_POLICY_VERSION,
-      status: "open",
-      traceId,
-      agentKeyId: key._id,
-      screenAmountMinor: moment.priceMinor,
-    });
-    let hold: Doc<"holds">;
-    try {
-      hold = await takeHold(ctx, (await ctx.db.get(quoteId))!, `moment:${moment._id}:${offer._id}`, actor, {
-        agentKeyId: key._id,
-        inProgressMinRemainingMs: 60_000,
-        ttlMs: FLASH_HOLD_TTL_MS,
-      });
-    } catch (error) {
-      await ctx.db.patch(quoteId, { status: "expired" });
-      const message = error instanceof ConvexError ? String((error.data as { message?: string }).message) : "hold failed";
-      await addMomentStep(ctx, moment, "failed", "Could not hold the spot", message);
-      await ctx.db.patch(moment._id, { status: "failed" });
-      return true; // nothing else can win this slot either
-    }
-    await ctx.db.patch(offer._id, { status: "won", holdId: hold._id });
-    await ctx.db.patch(moment._id, { status: "awarded", winnerOfferId: offer._id, holdId: hold._id });
-    await addMomentStep(ctx, moment, "winner", `${company} wins at ${usd(amount)}${offer.simulatedAgent ? " (simulated customer agent)" : ""}`, `Highest acceptable reply at or above the seller's floor; ties go to the earliest.`, now);
-    await addMomentStep(ctx, moment, "hold", "Spot held for the winner", `Hold ${hold._id}; pay over x402 within ${PAY_WINDOW_MS / 1000} s.`, now);
-    await recordAudit(ctx, {
-      workspaceId: moment.workspaceId,
-      traceId,
-      actor: `seller-agent:${workspace.name}`,
-      type: "moment.awarded",
-      subjectId: moment._id,
-      reason: `Flash spot awarded to ${company} at ${usd(amount)} (ask ${usd(moment.priceMinor)}, floor policy applied); hold ${hold._id}`,
-    });
-    await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId: offer._id, event: "flash_won" });
-    for (const o of offers) {
-      if (o._id === offer._id || o.status === "lost" || o.status === "defaulted") continue;
-      if (o.status === "accepted" || o.status === "countered") {
-        await ctx.db.patch(o._id, { status: "lost" });
-        await ctx.scheduler.runAfter(0, internal.momentDelivery.deliver, { offerId: o._id, event: "flash_lost" });
-      }
-    }
-    await ctx.scheduler.runAfter(PAY_WINDOW_MS, internal.moments.payDeadline, { momentId: moment._id, offerId: offer._id });
-    return true;
-  }
-  return false;
-}
-
-async function closeCore(ctx: MutationCtx, momentId: Id<"moments">, why: string): Promise<void> {
-  const moment = await ctx.db.get(momentId);
-  if (!moment || moment.status !== "offering") return;
-  const offers = await ctx.db
-    .query("flashOffers")
-    .withIndex("by_moment", (q) => q.eq("momentId", momentId))
-    .take(MAX_OFFERS + 1);
-  for (const o of offers) if (o.status === "sent") await ctx.db.patch(o._id, { status: "expired" });
-  await addMomentStep(ctx, moment, "window_closed", `Window closed: ${why}`);
-  const awarded = await award(ctx, moment, new Set());
-  if (!awarded) {
-    await ctx.db.patch(momentId, { status: "no_takers" });
-    await addMomentStep(ctx, moment, "no_takers", "No acceptable replies", `Nothing at or above the seller's floor of ${usd(moment.floorMinor)}.`);
-    await recordAudit(ctx, {
-      workspaceId: moment.workspaceId,
-      traceId: `moment:${momentId}`,
-      actor: "system",
-      type: "moment.closed",
-      subjectId: momentId,
-      reason: `No acceptable replies (floor ${usd(moment.floorMinor)})`,
-    });
-  }
-}
-
-/** Scheduled at the end of the response window (no-op if already closed early). */
-export const close = internalMutation({
-  args: { momentId: v.id("moments") },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    await closeCore(ctx, args.momentId, "time is up");
-    return null;
-  },
-});
-
-/** The winner has 60 s to pay; otherwise release, open a winner_default exception, award the next best. */
-export const payDeadline = internalMutation({
-  args: { momentId: v.id("moments"), offerId: v.id("flashOffers") },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const moment = await ctx.db.get(args.momentId);
-    const offer = await ctx.db.get(args.offerId);
-    if (!moment || !offer || moment.winnerOfferId !== offer._id || moment.status !== "awarded" || !offer.holdId) return null;
-    const hold = await ctx.db.get(offer.holdId);
-    if (!hold || hold.status === "converted") return null; // paid: nothing to do
-    if (hold.status === "active") await endHold(ctx, hold, "released", "system", "Flash spot winner did not pay within 60 s");
-    await ctx.db.patch(offer._id, { status: "defaulted" });
-    await ctx.db.insert("financeExceptions", {
-      workspaceId: moment.workspaceId,
-      kind: "winner_default",
-      status: "open",
-      holdId: hold._id,
-      billboardId: moment.billboardId,
-      advertiserId: offer.advertiserId,
-      expectedMinor: hold.amountMinor,
-      observedMinor: 0,
-      evidence: `Flash spot winner did not pay ${usd(hold.amountMinor)} within ${PAY_WINDOW_MS / 1000} s (moment ${moment._id}).`,
-      nextAction: "Review the buyer agent's standing instructions or wallet; the spot went to the next best offer if any.",
-    });
-    await addMomentStep(ctx, moment, "defaulted", "Winner did not pay in time", "Hold released; winner_default exception opened; offering the next best reply.");
-    await ctx.db.patch(moment._id, { status: "offering", winnerOfferId: undefined, holdId: undefined });
-    const excluded = new Set<string>([offer._id]);
-    const offers = await ctx.db
-      .query("flashOffers")
-      .withIndex("by_moment", (q) => q.eq("momentId", moment._id))
-      .take(MAX_OFFERS + 1);
-    for (const o of offers) if (o.status === "defaulted") excluded.add(o._id);
-    const fresh = (await ctx.db.get(moment._id))!;
-    // Restore "lost" replies so they can be ranked again.
-    for (const o of offers) if (o.status === "lost") await ctx.db.patch(o._id, { status: o.replyAmountMinor === o.priceMinor ? "accepted" : "countered" });
-    const awarded = await award(ctx, fresh, excluded);
-    if (!awarded) {
-      await ctx.db.patch(moment._id, { status: "failed" });
-      await addMomentStep(ctx, moment, "failed", "No one left to award", "The spot went back on sale.");
-    }
-    return null;
   },
 });
 
@@ -626,7 +664,9 @@ export const markPaymentStarted = internalMutation({
       .query("moments")
       .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
       .first();
-    if (!moment || moment.steps.some((s) => s.key === "payment_started")) return null;
+    const hold = await ctx.db.get(args.holdId);
+    // Once per hold (a runner-up's payment gets its own step).
+    if (!moment || !hold || moment.steps.some((s) => s.key === "payment_started" && s.at >= hold._creationTime)) return null;
     await addMomentStep(ctx, moment, "payment_started", "Payment signed: verifying and settling", "x402 facilitator verify -> re-check hold -> settle on Base Sepolia.");
     return null;
   },
@@ -634,38 +674,44 @@ export const markPaymentStarted = internalMutation({
 
 /**
  * The winner's agent could not pay (no x402 config or no wallet). Recorded as
- * blocked; never faked. If the host turned on rehearsal settlement, settle the
- * hold with a labeled REHEARSAL (simulated) payment so the flow can be rehearsed.
+ * blocked; never faked. Nothing is shown as paid without a settlement transaction.
  */
 export const paymentBlocked = internalMutation({
   args: { holdId: v.id("holds"), reason: v.string() },
-  returns: v.object({ rehearsal: v.boolean() }),
+  returns: v.null(),
   handler: async (ctx, args) => {
     const moment = await ctx.db
       .query("moments")
       .withIndex("by_hold", (q) => q.eq("holdId", args.holdId))
       .first();
-    if (!moment) return { rehearsal: false };
+    if (!moment) return null;
+    // Only while the winner can still pay: a late or repeated report never touches a paid (or moved-on) moment.
+    const blockedHold = await ctx.db.get(args.holdId);
+    if (moment.status !== "awarded" || !blockedHold || blockedHold.status !== "active") return null;
+    // Another attempt is still settling: it isn't blocked (yet).
+    if (await paymentInFlight(ctx, moment, blockedHold, Date.now())) return null;
     const reason = args.reason.slice(0, 200);
     await ctx.db.patch(moment._id, { paymentBlocked: reason });
     await addMomentStep(ctx, moment, "payment_blocked", `Payment blocked: ${reason}`, "No money moved. Nothing is shown as paid without a settlement transaction.");
-    const workspace = (await ctx.db.get(moment.workspaceId))!;
-    if (!momentSettingsOf(workspace).rehearsalSettlement) return { rehearsal: false };
-    const hold = await ctx.db.get(args.holdId);
-    if (!hold || hold.status !== "active") return { rehearsal: false };
-    await applyVerifiedPayment(
-      ctx,
-      {
-        holdId: hold._id,
-        provider: "manual",
-        externalRef: `rehearsal:${hold._id}`,
-        amountMinor: hold.amountMinor,
-        asset: "USD",
-        idempotencyKey: `rehearsal:${hold._id}`,
-      },
-      { actor: "REHEARSAL (simulated) payment", reasonPrefix: "REHEARSAL (simulated) payment, no money moved: " },
-    );
-    return { rehearsal: true };
+    return null;
+  },
+});
+
+/**
+ * Host: end a live moment that is stuck past its bound (its scheduled close
+ * never ran), so the host's queue moves again. Workspace members only; a
+ * moment still within its bound, or settling a payment, is left alone.
+ */
+export const endStuck = mutation({
+  args: { momentId: v.id("moments") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const moment = await ctx.db.get(args.momentId);
+    if (!moment) fail("NOT_FOUND", "Moment not found");
+    const member = await requireWorkspaceMember(ctx, moment.workspaceId);
+    if (!(await isStuck(ctx, moment, Date.now()))) fail("NOT_STUCK", "This moment is still running (or settling a payment); it ends on its own");
+    await endStuckMoment(ctx, moment, member.actor, `ended by the host (${member.actor})`);
+    return null;
   },
 });
 
@@ -673,11 +719,9 @@ export const paymentBlocked = internalMutation({
 
 export const settingsView = v.object({
   enabled: v.boolean(),
-  minRelevantViewers: v.number(),
-  cooldownMinutes: v.number(),
-  responseWindowSeconds: v.number(),
+  minPeopleInView: v.number(),
+  joinWindowSeconds: v.number(),
   minMatch: v.number(),
-  rehearsalSettlement: v.boolean(),
 });
 
 export const settings = query({
@@ -688,11 +732,9 @@ export const settings = query({
     const s = momentSettingsOf((await ctx.db.get(me.workspaceId))!);
     return {
       enabled: s.enabled,
-      minRelevantViewers: s.minRelevantViewers,
-      cooldownMinutes: Math.round(s.cooldownMs / 60_000),
-      responseWindowSeconds: Math.round(s.responseWindowMs / 1000),
+      minPeopleInView: s.minPeopleInView,
+      joinWindowSeconds: Math.round(s.joinWindowMs / 1000),
       minMatch: s.minMatch,
-      rehearsalSettlement: s.rehearsalSettlement,
     };
   },
 });
@@ -701,27 +743,24 @@ export const updateSettings = mutation({
   args: {
     workspaceId: v.id("workspaces"),
     enabled: v.boolean(),
-    minRelevantViewers: v.number(),
-    cooldownMinutes: v.number(),
-    responseWindowSeconds: v.number(),
+    minPeopleInView: v.number(),
+    joinWindowSeconds: v.number(),
     minMatch: v.number(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     const owner = await requireWorkspaceMember(ctx, args.workspaceId, "owner");
     const s = {
-      minRelevantViewers: args.minRelevantViewers,
-      cooldownMs: Math.round(args.cooldownMinutes * 60_000),
-      responseWindowMs: Math.round(args.responseWindowSeconds * 1000),
+      minPeopleInView: args.minPeopleInView,
+      joinWindowMs: Math.round(args.joinWindowSeconds * 1000),
       minMatch: args.minMatch,
     };
     const problem = validateMomentSettings(s);
     if (problem) fail("INVALID_INPUT", problem);
     await ctx.db.patch(args.workspaceId, {
       momentEnabled: args.enabled,
-      momentMinRelevantViewers: s.minRelevantViewers,
-      momentCooldownMs: s.cooldownMs,
-      momentResponseWindowMs: s.responseWindowMs,
+      momentMinPeopleInView: s.minPeopleInView,
+      momentResponseWindowMs: s.joinWindowMs,
       momentMinMatch: s.minMatch,
     });
     await recordAudit(ctx, {
@@ -730,26 +769,7 @@ export const updateSettings = mutation({
       actor: owner.actor,
       type: "workspace.policy_changed",
       subjectId: args.workspaceId,
-      reason: `Moment detector ${args.enabled ? "on" : "off"}: ${s.minRelevantViewers}+ relevant viewers, ${args.cooldownMinutes} min cooldown, ${args.responseWindowSeconds}s window, ${Math.round(s.minMatch * 100)}% match`,
-    });
-    return null;
-  },
-});
-
-/** Owner-only, OFF by default. When payments are unavailable, settle winners with a labeled REHEARSAL (simulated) payment. */
-export const setRehearsalSettlement = mutation({
-  args: { workspaceId: v.id("workspaces"), enabled: v.boolean() },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const owner = await requireWorkspaceMember(ctx, args.workspaceId, "owner");
-    await ctx.db.patch(args.workspaceId, { rehearsalSettlement: args.enabled });
-    await recordAudit(ctx, {
-      workspaceId: args.workspaceId,
-      traceId: `workspace:${args.workspaceId}`,
-      actor: owner.actor,
-      type: "workspace.policy_changed",
-      subjectId: args.workspaceId,
-      reason: `REHEARSAL (simulated) settlement ${args.enabled ? "ON: blocked flash-spot payments are settled as simulated, no money moves" : "OFF"}`,
+      reason: `Moment detector ${args.enabled ? "on" : "off"}: ${s.minPeopleInView}+ people in view, ${args.joinWindowSeconds}s join window, ${Math.round(s.minMatch * 100)}% match`,
     });
     return null;
   },
@@ -757,11 +777,19 @@ export const setRehearsalSettlement = mutation({
 
 // ---------------------------------------------------------------- views
 
+const screenMode = v.union(
+  v.literal("announce"),
+  v.literal("auction"),
+  v.literal("negotiation"),
+  v.literal("settling"),
+  v.literal("playing"),
+  v.literal("your_ad_here"),
+);
+
 const offerView = v.object({
   offerId: v.id("flashOffers"),
   company: v.string(),
   campaignBrief: v.string(),
-  simulatedAgent: v.boolean(),
   priceMinor: v.number(),
   relevantViewers: v.number(),
   matchScore: v.number(),
@@ -771,6 +799,18 @@ const offerView = v.object({
   repliedAt: v.union(v.number(), v.null()),
   deliveryStatus: v.string(),
 });
+
+const bidView = v.object({
+  offerId: v.id("flashOffers"),
+  company: v.string(),
+  kind: v.union(v.literal("bid"), v.literal("buyer_offer"), v.literal("seller_counter")),
+  amountMinor: v.number(),
+  at: v.number(),
+  reasoning: v.union(v.string(), v.null()),
+});
+
+/** Bids shown on the presenter timeline. */
+const MAX_BIDS_SHOWN = 100;
 
 export const momentView = v.object({
   momentId: v.id("moments"),
@@ -792,7 +832,7 @@ export const momentView = v.object({
   priceMinor: v.number(),
   floorMinor: v.number(),
   offerClosesAt: v.number(),
-  winner: v.union(v.object({ company: v.string(), amountMinor: v.number(), simulatedAgent: v.boolean() }), v.null()),
+  winner: v.union(v.object({ company: v.string(), amountMinor: v.number() }), v.null()),
   paidMinor: v.union(v.number(), v.null()),
   paymentMode: v.union(paymentMode, v.null()),
   paymentTx: v.union(v.string(), v.null()),
@@ -802,6 +842,15 @@ export const momentView = v.object({
   durationMs: v.union(v.number(), v.null()),
   steps: v.array(momentStep),
   offers: v.array(offerView),
+  /** What the pricing agent thought the spot is worth, and why (null on moments before live pricing). */
+  valueMinor: v.union(v.number(), v.null()),
+  priceWhy: v.union(v.string(), v.null()),
+  biddingClosesAt: v.union(v.number(), v.null()),
+  extensions: v.number(),
+  /** When this moment counts as stuck (the presenter may then end it); null when it never blocks the host. */
+  stuckAfter: v.union(v.number(), v.null()),
+  /** Every bid, counter and buyer offer, oldest first. */
+  bids: v.array(bidView),
 });
 
 async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof momentView>> {
@@ -812,14 +861,15 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
     .take(MAX_OFFERS + 1);
   const views = [];
   let winner: Infer<typeof momentView>["winner"] = null;
+  const names = new Map<Id<"advertisers">, string>();
   for (const o of offers) {
     const company = (await ctx.db.get(o.advertiserId))?.displayName ?? "Company";
+    names.set(o.advertiserId, company);
     const brief = (await ctx.db.get(o.campaignId))?.brief ?? "";
     views.push({
       offerId: o._id,
       company,
       campaignBrief: brief,
-      simulatedAgent: o.simulatedAgent,
       priceMinor: o.priceMinor,
       relevantViewers: o.relevantViewers,
       matchScore: o.matchScore,
@@ -829,7 +879,23 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
       repliedAt: o.repliedAt ?? null,
       deliveryStatus: o.delivery.status,
     });
-    if (m.winnerOfferId === o._id) winner = { company, amountMinor: o.replyAmountMinor ?? o.priceMinor, simulatedAgent: o.simulatedAgent };
+    if (m.winnerOfferId === o._id) winner = { company, amountMinor: o.replyAmountMinor ?? o.priceMinor };
+  }
+  const bidRows = await ctx.db
+    .query("momentBids")
+    .withIndex("by_moment", (q) => q.eq("momentId", m._id))
+    .take(MAX_BIDS_SHOWN);
+  const bids = [];
+  for (const b of bidRows) {
+    if (!names.has(b.advertiserId)) names.set(b.advertiserId, (await ctx.db.get(b.advertiserId))?.displayName ?? "Company");
+    bids.push({
+      offerId: b.offerId,
+      company: names.get(b.advertiserId)!,
+      kind: b.kind,
+      amountMinor: b.amountMinor,
+      at: b.at,
+      reasoning: b.reasoning ?? null,
+    });
   }
   return {
     momentId: m._id,
@@ -861,8 +927,16 @@ async function viewOf(ctx: QueryCtx, m: Doc<"moments">): Promise<Infer<typeof mo
     durationMs: m.durationMs ?? null,
     steps: m.steps,
     offers: views,
+    valueMinor: m.valueMinor ?? null,
+    priceWhy: m.priceWhy ?? null,
+    biddingClosesAt: m.biddingClosesAt ?? null,
+    extensions: m.extensions ?? 0,
+    stuckAfter: await stuckAt(ctx, m),
+    bids,
   };
 }
+
+const MAX_DEVICES = 50;
 
 /** Host "Live moment" view: the screen, its live crowd and event, the latest moment, recent history. */
 export const live = query({
@@ -877,6 +951,18 @@ export const live = query({
       liveCrowdSource: v.union(v.string(), v.null()),
       event: v.union(v.object({ name: v.string(), uplift: v.number(), source: v.string() }), v.null()),
     }),
+    devices: v.array(
+      v.object({
+        billboardId: v.id("billboards"),
+        name: v.string(),
+        online: v.boolean(),
+        peopleInView: v.union(v.number(), v.null()),
+        mode: screenMode,
+        /** End of the screen's latest spot; the client expires "playing" with its own clock. */
+        spotEndAt: v.union(v.number(), v.null()),
+      }),
+    ),
+    queue: v.array(v.object({ billboardId: v.id("billboards"), name: v.string(), queuedAt: v.number() })),
     latest: v.union(momentView, v.null()),
     history: v.array(
       v.object({
@@ -917,7 +1003,34 @@ export const live = query({
         durationMs: m.durationMs ?? null,
       });
     }
+    const workspaceId = billboard.workspaceId!;
+    const screens = await ctx.db
+      .query("billboards")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+      .take(MAX_DEVICES);
+    const devices = [];
+    for (const s of screens) {
+      const last = await ctx.db
+        .query("moments")
+        .withIndex("by_billboard", (q) => q.eq("billboardId", s._id))
+        .order("desc")
+        .first();
+      devices.push({
+        billboardId: s._id,
+        name: s.name,
+        online: s.deviceStatus === "online",
+        peopleInView: (await latestCameraReading(ctx, s._id, args.atMinute))?.peopleInView ?? null,
+        mode: screenModeOf(last?.status ?? null),
+        spotEndAt: last?.spotEndAt ?? null,
+      });
+    }
+    const queue = screens
+      .filter((s) => s.saleQueuedAt !== undefined)
+      .sort((a, b) => a.saleQueuedAt! - b.saleQueuedAt!)
+      .map((s) => ({ billboardId: s._id, name: s.name, queuedAt: s.saleQueuedAt! }));
     return {
+      devices,
+      queue,
       screen: {
         name: billboard.name,
         locationLabel: billboard.locationLabel,
@@ -970,7 +1083,7 @@ export const myBuys = query({
         minutes: Math.round((m.spotEndAt - m.spotStartAt) / 60_000),
         amountMinor: o.replyAmountMinor ?? null,
         relevantViewers: o.relevantViewers,
-        simulatedAgent: o.simulatedAgent,
+        simulatedAgent: o.simulatedAgent ?? false,
         paymentMode: mine ? (m.paymentMode ?? null) : null,
         paymentTx: mine ? (m.paymentTx ?? null) : null,
         paymentNetwork: mine ? (m.paymentNetwork ?? null) : null,
