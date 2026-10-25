@@ -237,6 +237,13 @@ export const auditEventType = v.union(
   v.literal("round.awarded"),
   v.literal("round.paid"),
   v.literal("round.unsold"),
+  v.literal("invite.cooled"),
+  v.literal("invite.prefs_updated"),
+  v.literal("harness.price_ran"),
+  v.literal("harness.invite_ran"),
+  v.literal("lead.drafted"),
+  v.literal("lead.copied"),
+  v.literal("lead.dismissed"),
   v.literal("agent_key.created"),
   v.literal("watch_rule.changed"),
   v.literal("agent_key.revoked"),
@@ -419,6 +426,11 @@ export const campaignFields = {
   creativeStatus: v.optional(creativeStatus),
   /** Storage id of the creative; URLs are resolved on read, never stored. */
   creativeStorageId: v.optional(v.id("_storage")),
+  /**
+   * External or data-URL creative (brand posters when no YouTube / upload).
+   * Prefer storageId for customer uploads; this is for seeded public brand art.
+   */
+  creativeExternalUrl: v.optional(v.string()),
   creativeContentType: v.optional(v.string()),
   creativeSubmittedAt: v.optional(v.number()),
   creativeReviewReason: v.optional(v.string()),
@@ -1446,4 +1458,36 @@ export default defineSchema({
     .index("by_trace", ["traceId"])
     .index("by_subject", ["subjectId"])
     .index("by_workspace", ["workspaceId"]),
+
+  /** CREAO Sales → Revenue rehearsal stored for the operator console. Never a booking. */
+  creaoHandoffs: defineTable({
+    workspaceId: v.id("workspaces"),
+    traceId: v.string(),
+    snapshotId: v.string(),
+    /** Always the fictional snapshot. Live pipeline roles do not write this table. */
+    mode: v.literal("simulated_rehearsal"),
+    selectedCampaigns: v.array(v.string()),
+    pricingPlans: v.number(),
+    preparedOffers: v.number(),
+    deliveredOffers: v.literal(0),
+    summary: v.string(),
+  }).index("by_workspace", ["workspaceId"]),
+
+  /**
+   * Open-web / agency lead pipeline: draft outreach only. Nothing is emailed
+   * from BillboardOS; operators copy the draft into their own mail client.
+   */
+  agencyLeads: defineTable({
+    workspaceId: v.id("workspaces"),
+    companyName: v.string(),
+    website: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    subject: v.string(),
+    body: v.string(),
+    status: v.union(v.literal("draft"), v.literal("copied"), v.literal("dismissed")),
+    createdAt: v.number(),
+    createdBy: v.string(),
+  })
+    .index("by_workspace_and_createdAt", ["workspaceId", "createdAt"])
+    .index("by_workspace_and_status", ["workspaceId", "status"]),
 });

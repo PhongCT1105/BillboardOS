@@ -2,6 +2,8 @@ import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { money } from "../lib/format";
 import { ConnectedDisplays } from "../console/ConnectedDisplays";
+import { InviteRosterPanel } from "../console/InviteRosterPanel";
+import { LeadOutreachPanel } from "../console/LeadOutreachPanel";
 import { LiveSales } from "./LiveSales";
 import { DashboardSkeleton } from "./ui";
 import { ArrowRight, CheckCircle, Warning } from "@phosphor-icons/react";
@@ -12,6 +14,7 @@ export function HostOverview({ focusDisplays = false }: { focusDisplays?: boolea
   const summary = useQuery(api.dashboard.summary, {});
   const live = useQuery(api.rounds.live, {});
   const ready = Boolean(screens && summary);
+  const focusScreen = screens?.find((s) => s.deviceStatus === "online") ?? screens?.[0];
   useEffect(() => {
     if (focusDisplays && ready) document.getElementById("connected-displays")?.scrollIntoView({ block: "start" });
   }, [focusDisplays, ready]);
@@ -37,7 +40,12 @@ export function HostOverview({ focusDisplays = false }: { focusDisplays?: boolea
           floorMinor: s.reserveFloorMinor,
         }))}
       />
-      <aside className="host-side-rail"><LiveSales /><PlaybackSummary completed={summary.billboards.reduce((sum, b) => sum + b.slotCounts.played, 0)} /></aside>
+      <aside className="host-side-rail">
+        <LiveSales />
+        {focusScreen && <InviteRosterPanel billboardId={focusScreen._id} />}
+        <LeadOutreachPanel />
+        <PlaybackSummary completed={summary.billboards.reduce((sum, b) => sum + b.slotCounts.played, 0)} />
+      </aside>
       </div>
       {summary.billboards.some((b) => b.openExceptions > 0) && (
         <a href="#/console?tools=1" className="demo-text-link text-danger">

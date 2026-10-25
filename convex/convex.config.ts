@@ -1,6 +1,8 @@
 import { defineApp } from "convex/server";
 import { v } from "convex/values";
 import staticHosting from "@convex-dev/static-hosting/convex.config";
+import workpool from "@convex-dev/workpool/convex.config.js";
+import rateLimiter from "@convex-dev/rate-limiter/convex.config.js";
 
 const app = defineApp({
   env: {
@@ -23,6 +25,10 @@ const app = defineApp({
     CREAO_SCREEN_AUDIENCE_API_KEY: v.optional(v.string()),
     CREAO_CREATIVE_SAFETY_AGENT_ID: v.optional(v.string()),
     CREAO_CREATIVE_SAFETY_API_KEY: v.optional(v.string()),
+    CREAO_PRICE_REFINE_AGENT_ID: v.optional(v.string()),
+    CREAO_PRICE_REFINE_API_KEY: v.optional(v.string()),
+    CREAO_INVITE_ROTATE_AGENT_ID: v.optional(v.string()),
+    CREAO_INVITE_ROTATE_API_KEY: v.optional(v.string()),
     CREAO_OPPORTUNITY_STRATEGY_AGENT_ID: v.optional(v.string()),
     CREAO_OPPORTUNITY_STRATEGY_API_KEY: v.optional(v.string()),
     /** Server-only Model Studio credentials for the fast buyer negotiation turns. */
@@ -35,5 +41,11 @@ const app = defineApp({
 // build; http.ts registers its catch-all after the app's own routes so
 // /api/agent, /a2a, /purchases, /internal and the auth routes keep their URLs.
 app.use(staticHosting);
+
+// Background CREAO / research fan-out: bound parallelism so harness jobs don't stampede.
+app.use(workpool, { name: "creaoWorkpool" });
+
+// Application-layer limits for CREAO starts (credits).
+app.use(rateLimiter);
 
 export default app;

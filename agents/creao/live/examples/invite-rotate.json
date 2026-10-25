@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "traceId": "example-invite-1",
+  "billboard": "Moscone North Screen A",
+  "audienceTags": { "software": 0.5, "startups": 0.3, "students": 0.2 },
+  "cooled": [
+    {
+      "advertiserId": "example-advertiser-cooled",
+      "name": "Example Alpha Soft",
+      "rejectStreak": 3
+    }
+  ],
+  "ranked": [
+    {
+      "advertiserId": "example-advertiser-2",
+      "name": "Example Beta Soft",
+      "match": 0.82
+    },
+    {
+      "advertiserId": "example-advertiser-3",
+      "name": "Example Gamma Soft",
+      "match": 0.71
+    },
+    {
+      "advertiserId": "example-advertiser-4",
+      "name": "Example Delta Soft",
+      "match": 0.55
+    }
+  ]
+}

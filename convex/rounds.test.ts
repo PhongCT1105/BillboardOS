@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { modules, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
+import { modules, registerBackendComponents, signedInCustomer, signedInOperator, type TestClient } from "./test.setup";
 import { closeRoundCore, startRoundCore } from "./rounds";
 import { ruleBasedStrategy } from "./lib/rounds";
 
@@ -73,6 +73,7 @@ async function flush(t: TestClient, rounds = 10) {
  */
 async function world(opts: { companies?: string[]; factors?: number[]; screenTags?: Record<string, number> | null } = {}) {
   const t = convexTest(schema, modules);
+  registerBackendComponents(t);
   current = t;
   const host = await signedInOperator(t, "host@venue.test");
   const workspaceId = await t.run(async (ctx) => (await ctx.db.query("workspaces").withIndex("by_name", (q) => q.eq("name", "Moscone Media")).first())!._id);

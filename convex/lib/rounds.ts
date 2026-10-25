@@ -13,8 +13,9 @@
 
 /** One sale = one 30-second window on screen; its bidding runs during the window before. */
 export const WINDOW_MS = 30_000;
-export const MAX_INVITES = 20;
-/** A company is offered the window when its buyers make up at least this share of the crowd. */
+/** Active invite set per billboard (top vibe matches from the full network). */
+export const MAX_INVITES = 10;
+/** Soft floor for "not matching" messaging; thin pools may still invite below this. */
 export const MIN_MATCH = 0.2;
 /** A people count older than this isn't "in view now". */
 export const PEOPLE_FRESH_MS = 60_000;

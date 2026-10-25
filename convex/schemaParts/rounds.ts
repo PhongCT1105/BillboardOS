@@ -108,6 +108,36 @@ export const negotiationStepFields = {
   at: v.number(),
 };
 
+/** Per billboard × advertiser: price-reject streaks and cool-downs for invite rotation. */
+export const inviteStatFields = {
+  billboardId: v.id("billboards"),
+  advertiserId: v.id("advertisers"),
+  rejectStreak: v.number(),
+  cooledUntilAt: v.optional(v.number()),
+  lastOutcome: v.union(v.literal("agreed"), v.literal("reject")),
+  updatedAt: v.number(),
+};
+
+/** Optional Invite CREAO preference weights (secondary sort after vibe match). */
+export const billboardInvitePrefFields = {
+  billboardId: v.id("billboards"),
+  advertiserId: v.id("advertisers"),
+  weight: v.number(),
+  reason: v.string(),
+  updatedAt: v.number(),
+};
+
+/** Last background harness runs (Price / Invite CREAO), one row per kind × billboard-or-global. */
+export const harnessRunFields = {
+  kind: v.union(v.literal("price"), v.literal("invite")),
+  /** Null = workspace-wide / global price sweep. */
+  billboardId: v.optional(v.id("billboards")),
+  workspaceId: v.optional(v.id("workspaces")),
+  status: v.union(v.literal("ok"), v.literal("skipped"), v.literal("failed")),
+  summary: v.string(),
+  at: v.number(),
+};
+
 export const roundTables = {
   negotiationSteps: defineTable(negotiationStepFields).index("by_round", ["roundId"]),
   rounds: defineTable(roundFields)
@@ -118,4 +148,13 @@ export const roundTables = {
     .index("by_round", ["roundId"])
     .index("by_advertiser_and_round", ["advertiserId", "roundId"])
     .index("by_advertiser", ["advertiserId"]),
+  inviteStats: defineTable(inviteStatFields)
+    .index("by_billboard_and_advertiser", ["billboardId", "advertiserId"])
+    .index("by_billboard", ["billboardId"]),
+  billboardInvitePrefs: defineTable(billboardInvitePrefFields)
+    .index("by_billboard_and_advertiser", ["billboardId", "advertiserId"])
+    .index("by_billboard", ["billboardId"]),
+  harnessRuns: defineTable(harnessRunFields)
+    .index("by_kind_and_at", ["kind", "at"])
+    .index("by_billboard_and_kind", ["billboardId", "kind"]),
 };

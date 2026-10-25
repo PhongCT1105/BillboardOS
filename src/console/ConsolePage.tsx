@@ -10,6 +10,7 @@ import { ActivityFeed } from "./ActivityFeed";
 import { PairScreenForm } from "../screens/PairScreenForm";
 import { HostOverview } from "../demo/HostOverview";
 import { CreaoRehearsalPanel } from "./CreaoRehearsalPanel";
+import { InviteRosterPanel } from "./InviteRosterPanel";
 import { useHashParams, useHashRoute } from "../lib/hooks";
 
 export function ConsolePage() {
@@ -45,10 +46,7 @@ export function ConsolePage() {
           </p>
         </div>
         <PairScreenForm />
-        <details className="demo-tools">
-          <summary>Operational tools</summary>
-          <div><CreaoRehearsalPanel /></div>
-        </details>
+        <CreaoRehearsalPanel />
       </main>
     );
   }
@@ -61,6 +59,7 @@ export function ConsolePage() {
         </div>
       )}
       <HostOverview focusDisplays={route === "/displays"} />
+      <CreaoRehearsalPanel />
       <details
         className="demo-tools"
         open={showTools}
@@ -70,7 +69,6 @@ export function ConsolePage() {
           Operational tools
         </summary>
         <div>
-          <CreaoRehearsalPanel />
           {showTools && (
             <>
             {billboards.length > 1 && (
@@ -134,6 +132,7 @@ function ConsoleBody({ billboardId }: { billboardId: Id<"billboards"> }) {
   return (
     <div className="flex flex-col gap-10">
       <KpiStrip summary={row} audience={audience} />
+      <InviteRosterPanel billboardId={billboardId} />
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex flex-col gap-10">
           <ExceptionList exceptions={exceptions} />

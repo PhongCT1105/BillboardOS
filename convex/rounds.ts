@@ -8,6 +8,7 @@ import { assertWithinBudget, authenticateAgent, keyStatus } from "./lib/agentKey
 import { holdLockKey, lockHeld } from "./lib/paymentLock";
 import { endHold, takeHold } from "./holds";
 import { MAX_INVITES, MIN_MATCH, WINDOW_MS, bestAgreed, brandScore, hostReply, windowPrice } from "./lib/rounds";
+import { applyOutcome, isCooled, outcomeFromBidStatus, rankTopInvites } from "./lib/inviteRoster";
 import { matchScore } from "./lib/match";
 import { researchOf } from "./research";
 import { peopleNow, predictFor, recordWindow, weightsOf } from "./pricing";
@@ -87,19 +88,37 @@ function canBid(k: Doc<"agentKeys">, campaignId: Id<"campaigns">, now: number): 
 }
 
 /**
- * Who gets an offer: a company with an ad ready on this host, an agent key
- * that can bid and pay, budget left, and buyers in this crowd (its research
- * audience matches the screen's audience read by at least MIN_MATCH; when
- * either isn't known yet, it's offered). One key and one campaign per
- * company: the built-in agent's first, else the newest that qualify.
+ * Who gets an offer from the full sponsor network: ready ad + agent that can
+ * bid/pay + budget left, not cooled-down on this billboard. Rank by vibe
+ * match (screen audience × company tags) and optional Invite CREAO prefs;
+ * invite only the top MAX_INVITES. CREAO is never called here.
  */
 async function invitees(ctx: QueryCtx, billboard: Doc<"billboards">, workspaceId: Id<"workspaces">, now: number): Promise<{ invites: Invite[]; notMatching: string[] }> {
   const ready = new Map<Id<"advertisers">, Doc<"campaigns">[]>();
   for (const c of await campaignsReadyFor(ctx, workspaceId)) ready.set(c.advertiserId, [...(ready.get(c.advertiserId) ?? []), c]);
-  const out: Invite[] = [];
+
+  const prefs = await ctx.db
+    .query("billboardInvitePrefs")
+    .withIndex("by_billboard", (q) => q.eq("billboardId", billboard._id))
+    .take(200);
+  const prefByAdv = new Map(prefs.map((p) => [p.advertiserId, p.weight]));
+
+  const stats = await ctx.db
+    .query("inviteStats")
+    .withIndex("by_billboard", (q) => q.eq("billboardId", billboard._id))
+    .take(200);
+  const statByAdv = new Map(stats.map((s) => [s.advertiserId, s]));
+
+  const eligible: Array<Invite & { prefWeight: number }> = [];
   const notMatching: string[] = [];
+  const cooled: string[] = [];
+
   for (const [advertiserId, campaigns] of ready) {
-    if (out.length >= MAX_INVITES) break;
+    const stat = statByAdv.get(advertiserId);
+    if (isCooled(stat, now)) {
+      cooled.push(await companyName(ctx, advertiserId));
+      continue;
+    }
     campaigns.sort((a, b) => b._creationTime - a._creationTime);
     const agent = await ctx.db
       .query("companyAgents")
@@ -130,13 +149,77 @@ async function invitees(ctx: QueryCtx, billboard: Doc<"billboards">, workspaceId
     if (standing && standing.dailyBudgetMinor - (await spentTodayForAdvertiserMinor(ctx, advertiserId, now)) <= 0) continue;
     const research = await researchOf(ctx, advertiserId);
     const match = matchScore(billboard.audienceTags, research?.audienceTags ?? pick.campaign.targetAudience);
+    // Known mismatch stays out of the active set (null match still invited — audience unread).
     if (match !== null && match < MIN_MATCH) {
       notMatching.push(`${await companyName(ctx, advertiserId)} (${Math.round(match * 100)}% match)`);
       continue;
     }
-    out.push({ ...pick, match, brand: brandScore(research?.priceFactor ?? 1) });
+    eligible.push({
+      ...pick,
+      match,
+      brand: brandScore(research?.priceFactor ?? 1),
+      prefWeight: prefByAdv.get(advertiserId) ?? 0,
+    });
   }
-  return { invites: out, notMatching };
+
+  const ranked = rankTopInvites(eligible, MAX_INVITES);
+  const invites: Invite[] = ranked.map(({ prefWeight: _p, ...rest }) => rest);
+  if (cooled.length) {
+    notMatching.push(`cooled down: ${cooled.join(", ")}`);
+  }
+  return { invites, notMatching };
+}
+
+/** After a round closes: update reject streaks / cool-downs; schedule Invite CREAO when someone cools. */
+async function recordInviteOutcomes(
+  ctx: MutationCtx,
+  billboardId: Id<"billboards">,
+  workspaceId: Id<"workspaces">,
+  bids: Doc<"roundBids">[],
+  winnerBidId: Id<"roundBids"> | undefined,
+  now: number,
+): Promise<void> {
+  let cooledSomeone = false;
+  for (const b of bids) {
+    // Losers who had agreed a price are patched to "lost" but still count as success for streaks.
+    const agreed =
+      b._id === winnerBidId ||
+      b.status === "bid" ||
+      b.status === "won" ||
+      b.agreedAt !== undefined;
+    const outcome = outcomeFromBidStatus(b.status, agreed);
+    const existing = await ctx.db
+      .query("inviteStats")
+      .withIndex("by_billboard_and_advertiser", (q) => q.eq("billboardId", billboardId).eq("advertiserId", b.advertiserId))
+      .first();
+    const next = applyOutcome(existing ?? undefined, outcome, now);
+    const justCooled = typeof next.cooledUntilAt === "number" && next.cooledUntilAt > now && existing?.cooledUntilAt !== next.cooledUntilAt;
+    if (justCooled) cooledSomeone = true;
+    if (existing) {
+      await ctx.db.patch(existing._id, { ...next, lastOutcome: outcome, updatedAt: now });
+    } else {
+      await ctx.db.insert("inviteStats", {
+        billboardId,
+        advertiserId: b.advertiserId,
+        rejectStreak: next.rejectStreak,
+        cooledUntilAt: next.cooledUntilAt,
+        lastOutcome: outcome,
+        updatedAt: now,
+      });
+    }
+    if (justCooled) {
+      await recordAudit(ctx, {
+        traceId: `round:${b.roundId}`,
+        actor: "invite-roster",
+        type: "invite.cooled",
+        subjectId: billboardId,
+        reason: `${await companyName(ctx, b.advertiserId)} cooled down after ${next.rejectStreak} price rejects on this screen`,
+      });
+    }
+  }
+  if (cooledSomeone || bids.length < MAX_INVITES) {
+    await ctx.scheduler.runAfter(0, internal.inviteHarness.onRosterHole, { billboardId, workspaceId });
+  }
 }
 
 /**
@@ -266,10 +349,12 @@ export async function closeRoundCore(ctx: MutationCtx, roundId: Id<"rounds">): P
     .filter((b) => b.status === "bid" && b.amountMinor !== null)
     .map((b) => ({ id: b._id as string, amountMinor: b.amountMinor!, agreedAt: b.agreedAt ?? round.closesAt }));
   const billboard = await ctx.db.get(round.billboardId);
-  await ctx.db.patch(roundId, { closedAt: Date.now() });
+  const now = Date.now();
+  await ctx.db.patch(roundId, { closedAt: now });
   const names = new Map<string, string>();
   for (const b of bids) names.set(b._id, await companyName(ctx, b.advertiserId));
   let winnerMinor: number | null = null;
+  let winnerBidId: Id<"roundBids"> | undefined;
   const remaining = [...agreed];
   for (;;) {
     const best = bestAgreed(remaining);
@@ -279,9 +364,13 @@ export async function closeRoundCore(ctx: MutationCtx, roundId: Id<"rounds">): P
     const result = await awardCore(ctx, (await ctx.db.get(roundId))!, best.id as Id<"roundBids">, best.amountMinor, outcome);
     if (result === "awarded") {
       winnerMinor = best.amountMinor;
+      winnerBidId = best.id as Id<"roundBids">;
       break;
     }
-    if (result === "ended") return;
+    if (result === "ended") {
+      await recordInviteOutcomes(ctx, round.billboardId, round.workspaceId, await bidsOf(ctx, roundId), undefined, Date.now());
+      return;
+    }
     remaining.splice(remaining.indexOf(best), 1);
   }
   if (winnerMinor === null) {
@@ -293,6 +382,8 @@ export async function closeRoundCore(ctx: MutationCtx, roundId: Id<"rounds">): P
   if (billboard) {
     await recordWindow(ctx, { billboardId: billboard._id, at: round.spotStartAt, utcOffsetMinutes: billboard.utcOffsetMinutes, people: round.crowd, winnerMinor });
   }
+  const finalBids = await bidsOf(ctx, roundId);
+  await recordInviteOutcomes(ctx, round.billboardId, round.workspaceId, finalBids, winnerBidId, Date.now());
 }
 
 /**

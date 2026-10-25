@@ -4,6 +4,8 @@ import { internal } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
 import { COMPANY_KNOWLEDGE } from "./fixtures/companyKnowledge";
+import { SPONSORS } from "./fixtures/sponsors";
+import { registerBackendComponents } from "./test.setup";
 
 beforeEach(() => {
   process.env.INTERNAL_API_SECRET = "test-internal-secret-0123456789";
@@ -15,23 +17,24 @@ afterEach(() => {
 });
 
 describe("company knowledge pipeline", () => {
-  test("curates ten source-backed profiles and seeds them idempotently", async () => {
-    expect(COMPANY_KNOWLEDGE).toHaveLength(10);
-    expect(new Set(COMPANY_KNOWLEDGE.map((p) => p.name)).size).toBe(10);
+  test("curates source-backed profiles for the full sponsor network and seeds them idempotently", async () => {
+    expect(COMPANY_KNOWLEDGE).toHaveLength(SPONSORS.length);
+    expect(new Set(COMPANY_KNOWLEDGE.map((p) => p.name)).size).toBe(SPONSORS.length);
     expect(COMPANY_KNOWLEDGE.every((p) => p.passages.length >= 2 && p.passages.every((s) => s.url.startsWith("https://")))).toBe(true);
     const t = convexTest(schema, modules);
+    registerBackendComponents(t);
     await t.mutation(internal.sponsors.seed, {});
     const first = await t.mutation(internal.companyKnowledge.seedSponsors, {});
     const second = await t.mutation(internal.companyKnowledge.seedSponsors, {});
-    expect(first.profiles).toBe(10);
-    expect(first.passages).toBe(30);
+    expect(first.profiles).toBe(SPONSORS.length);
+    expect(first.passages).toBe(SPONSORS.length * 3);
     expect(second.changed).toBe(0);
     const counts = await t.run(async (ctx) => ({
-      cards: await ctx.db.query("knowledgeCards").take(30),
-      passages: await ctx.db.query("companyKnowledgePassages").take(30),
+      cards: await ctx.db.query("knowledgeCards").take(SPONSORS.length + 5),
+      passages: await ctx.db.query("companyKnowledgePassages").take(SPONSORS.length * 3 + 5),
     }));
-    expect(counts.cards).toHaveLength(10);
-    expect(counts.passages).toHaveLength(30);
+    expect(counts.cards).toHaveLength(SPONSORS.length);
+    expect(counts.passages).toHaveLength(SPONSORS.length * 3);
   });
 
   test("rejects an embedding result for a superseded passage", async () => {

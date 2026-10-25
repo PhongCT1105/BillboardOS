@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation } from "./_generated/server";
-import { SPONSORS } from "./fixtures/sponsors";
+import { SPONSORS, isPosterSponsor, sponsorCreativeAuthor, sponsorCreativeTitle } from "./fixtures/sponsors";
 import { configureAgent } from "./companyAgents";
 import { budgetProblem, limitsFromBudget } from "./lib/companyAgent";
 import { YOUTUBE_CONTENT_TYPE, defaultThumbnailUrl, parseYouTubeUrl } from "./lib/youtube";
@@ -8,11 +8,12 @@ import { recordAudit } from "./lib/audit";
 import { requestResearch } from "./research";
 
 /**
- * Seed the 10 simulated sponsor advertisers (fixtures/sponsors.ts): each gets a
- * campaign with its official YouTube ad (approved for every host), a built-in
- * agent that is always on (its own key, limits from its daily budget, a Base
- * Sepolia wallet with a faucet claim), and a research run. Idempotent: an
- * existing sponsor is left as it is.
+ * Seed the Cal Hacks company-sponsor **network** (fixtures/sponsors.ts): each
+ * gets a campaign with its official YouTube ad or brand poster (approved for
+ * every host), a built-in agent that is always on (its own key, limits from its
+ * daily budget, a Base Sepolia wallet with a faucet claim), and a research run.
+ * Idempotent: an existing sponsor is left as it is. Rounds invite only the top
+ * 10 vibe matches per billboard from this pool.
  *   npx convex run sponsors:seed
  */
 export const seed = internalMutation({
@@ -30,16 +31,59 @@ export const seed = internalMutation({
         existing.push(s.name);
         continue;
       }
-      const parsed = parseYouTubeUrl(s.youtubeUrl);
-      if (!parsed.ok) throw new ConvexError({ code: "INVALID_INPUT", message: `${s.name}: ${parsed.error}` });
       const budget = budgetProblem(s.dailyBudgetMinor);
       if (budget) throw new ConvexError({ code: "INVALID_INPUT", message: `${s.name}: ${budget}` });
 
       const now = Date.now();
+      const title = sponsorCreativeTitle(s);
+      const author = sponsorCreativeAuthor(s);
       const advertiserId = await ctx.db.insert("advertisers", { displayName: s.name, paymentTerms: "prepay" });
+
+      if (isPosterSponsor(s)) {
+        if (!s.posterSvg) throw new ConvexError({ code: "INVALID_INPUT", message: `${s.name}: missing posterSvg` });
+        // Data URL so seed works without storage.store (convex-test) and without hotlinking.
+        const posterUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(s.posterSvg)}`;
+        const campaignId = await ctx.db.insert("campaigns", {
+          advertiserId,
+          brief: `Brand poster "${title}" by ${author}. ${s.summary}`.slice(0, 500),
+          budgetMinor: s.dailyBudgetMinor * 30,
+          currency: "USD",
+          status: "active",
+          creativeStatus: "approved",
+          creativeExternalUrl: posterUrl,
+          creativeContentType: "image/svg+xml",
+          creativeSubmittedAt: now,
+          creativeReviewReason: "Simulated sponsor: brand poster from public site identity (no verified YouTube ad)",
+          targetAudience: s.targetAudience,
+          audienceSource: "video",
+        });
+        const { maxPerSpotMinor, minRelevantViewers } = limitsFromBudget(s.dailyBudgetMinor);
+        const { agentId } = await configureAgent(ctx, {
+          campaign: (await ctx.db.get(campaignId))!,
+          actor: "seed:sponsors",
+          targetAudience: s.targetAudience,
+          standing: { maxPricePerSpotMinor: maxPerSpotMinor, minRelevantViewers, dailyBudgetMinor: s.dailyBudgetMinor },
+        });
+        await ctx.db.patch(agentId, { autoTopUp: true });
+        await requestResearch(ctx, advertiserId);
+        await recordAudit(ctx, {
+          traceId: `company:${advertiserId}`,
+          actor: "seed:sponsors",
+          type: "company.created",
+          subjectId: advertiserId,
+          reason: `Simulated sponsor ${s.name}: poster "${title}", agent on, ${`$${(s.dailyBudgetMinor / 100).toFixed(2)}`}/day`,
+        });
+        created.push(s.name);
+        continue;
+      }
+
+      if (!s.youtubeUrl) throw new ConvexError({ code: "INVALID_INPUT", message: `${s.name}: missing youtubeUrl` });
+      const parsed = parseYouTubeUrl(s.youtubeUrl);
+      if (!parsed.ok) throw new ConvexError({ code: "INVALID_INPUT", message: `${s.name}: ${parsed.error}` });
+
       const campaignId = await ctx.db.insert("campaigns", {
         advertiserId,
-        brief: `YouTube ad "${s.youtubeTitle}" by ${s.youtubeAuthor}. ${s.summary}`.slice(0, 500),
+        brief: `YouTube ad "${title}" by ${author}. ${s.summary}`.slice(0, 500),
         budgetMinor: s.dailyBudgetMinor * 30,
         currency: "USD",
         status: "active",
@@ -55,8 +99,8 @@ export const seed = internalMutation({
         advertiserId,
         videoId: parsed.videoId,
         url: parsed.url,
-        title: s.youtubeTitle,
-        author: s.youtubeAuthor,
+        title,
+        author,
         description: s.summary,
         thumbnailUrl: defaultThumbnailUrl(parsed.videoId),
         oembedStatus: "ok",
@@ -77,7 +121,7 @@ export const seed = internalMutation({
         actor: "seed:sponsors",
         type: "company.created",
         subjectId: advertiserId,
-        reason: `Simulated sponsor ${s.name}: ad "${s.youtubeTitle}", agent on, ${`$${(s.dailyBudgetMinor / 100).toFixed(2)}`}/day`,
+        reason: `Simulated sponsor ${s.name}: ad "${title}", agent on, ${`$${(s.dailyBudgetMinor / 100).toFixed(2)}`}/day`,
       });
       created.push(s.name);
     }

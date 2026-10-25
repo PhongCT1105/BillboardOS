@@ -4,6 +4,8 @@
 delete process.env.ANTHROPIC_API_KEY;
 import type { TestConvexForDataModel } from "convex-test";
 import type { DataModel, Id } from "./_generated/dataModel";
+import rateLimiterTest from "@convex-dev/rate-limiter/test";
+import workpoolTest from "@convex-dev/workpool/test";
 
 // Module map for convex-test (everything Convex would deploy, plus codegen).
 export const modules = import.meta.glob([
@@ -16,6 +18,13 @@ export const modules = import.meta.glob([
 
 /** A convex-test client, with or without an identity. */
 export type TestClient = TestConvexForDataModel<DataModel>;
+
+/** Register workpool + rate-limiter components used by CREAO harnesses. */
+export function registerBackendComponents(t: TestClient): void {
+  // Component test helpers are typed against a looser schema than our DataModel.
+  rateLimiterTest.register(t as never, "rateLimiter");
+  workpoolTest.register(t as never, "creaoWorkpool");
+}
 
 const userOf = new WeakMap<object, Id<"users">>();
 
