@@ -52,7 +52,7 @@ async function liveEvents(ctx: QueryCtx, billboardId: Id<"billboards">, now: num
   return events.filter((e) => e.endsAt > now).sort((a, b) => b._creationTime - a._creationTime);
 }
 
-async function activeEvent(ctx: QueryCtx, billboardId: Id<"billboards">, now: number) {
+export async function activeEvent(ctx: QueryCtx, billboardId: Id<"billboards">, now: number) {
   return (await liveEvents(ctx, billboardId, now))[0] ?? null;
 }
 

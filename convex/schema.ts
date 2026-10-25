@@ -233,6 +233,10 @@ export const auditEventType = v.union(
   v.literal("workspace.payout_changed"),
   v.literal("company.created"),
   v.literal("company.renamed"),
+  v.literal("round.started"),
+  v.literal("round.awarded"),
+  v.literal("round.paid"),
+  v.literal("round.unsold"),
   v.literal("agent_key.created"),
   v.literal("watch_rule.changed"),
   v.literal("agent_key.revoked"),
@@ -351,6 +355,8 @@ export const billboardFields = {
   saleQueuedAt: v.optional(v.number()),
   /** When this screen's pending re-offer (detectFor "reoffer") is due: one re-offer chain per screen. */
   reofferDueAt: v.optional(v.number()),
+  /** Bidding rounds: people usually in view (the crowd signal's baseline). Missing = 3. */
+  usualInView: v.optional(v.number()),
 };
 
 export const slotFields = {
@@ -1103,11 +1109,13 @@ export const workspaceRole = v.union(v.literal("owner"), v.literal("operator"));
 export const companyRole = v.union(v.literal("owner"), v.literal("member"));
 
 import { knowledgeTables } from "./schemaParts/knowledge";
+import { roundTables } from "./schemaParts/rounds";
 import { autopilotTables } from "./lib/autopilotSchema";
 export default defineSchema({
   // Convex Auth: users, sessions, accounts, ... (users.email is indexed as "email").
   ...authTables,
   ...knowledgeTables,
+  ...roundTables,
   ...autopilotTables,
 
   /** One per user: which side of the marketplace they signed up for. */
@@ -1140,6 +1148,8 @@ export default defineSchema({
     momentMinMatch: v.optional(v.number()),
     /** Legacy: kept so old rows validate; no new code writes it. Owner-only, OFF by default: settle a blocked winner with a labeled REHEARSAL (simulated) payment. */
     rehearsalSettlement: v.optional(v.boolean()),
+    /** Bidding rounds: start a round on idle online screens every couple of minutes. Off by default (it spends testnet USDC). */
+    autoSellRounds: v.optional(v.boolean()),
   }).index("by_name", ["name"]),
 
   workspaceMembers: defineTable({
