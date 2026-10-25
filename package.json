@@ -18,6 +18,8 @@
     "postinstall": "node -e \"require('fs').cpSync('node_modules/@mediapipe/tasks-vision/wasm','public/mediapipe',{recursive:true})\"",
     "webhook:listen": "tsx server/webhook-receiver.ts",
     "a2a:demo": "tsx server/a2a-demo.ts",
+    "creao:run": "node --env-file-if-exists=.env server/creao-first-run.mjs",
+    "creao:rehearsal": "node server/creao-rehearsal.mjs",
     "deploy:web": "npx @convex-dev/static-hosting upload --build",
     "deploy:prod": "npx @convex-dev/static-hosting deploy"
   },

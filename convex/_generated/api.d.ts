@@ -29,6 +29,7 @@ import type * as collections from "../collections.js";
 import type * as companyAgents from "../companyAgents.js";
 import type * as companyAgentsAct from "../companyAgentsAct.js";
 import type * as companyAgentsNode from "../companyAgentsNode.js";
+import type * as creao from "../creao.js";
 import type * as creativeReview from "../creativeReview.js";
 import type * as creativeReviewNode from "../creativeReviewNode.js";
 import type * as creatives from "../creatives.js";
@@ -137,6 +138,7 @@ declare const fullApi: ApiFromModules<{
   companyAgents: typeof companyAgents;
   companyAgentsAct: typeof companyAgentsAct;
   companyAgentsNode: typeof companyAgentsNode;
+  creao: typeof creao;
   creativeReview: typeof creativeReview;
   creativeReviewNode: typeof creativeReviewNode;
   creatives: typeof creatives;

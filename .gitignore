@@ -11,6 +11,7 @@ __pycache__/
 site/
 .DS_Store
 *.log
+.creao-runs/
 
 # Local agent state
 .claude/settings.local.json

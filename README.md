@@ -19,6 +19,7 @@ BillboardOS is a Cal Hacks 13.0 hackathon project: a network of AI-assisted digi
 | Product requirements | [Vision](docs/product/vision.md) · [MVP acceptance tests](docs/product/requirements.md) |
 | Engineering | [Overview](docs/architecture/overview.md) · [Agents](docs/architecture/agents.md) · [Payments & risk](docs/architecture/payments-and-risk.md) · [Data model](docs/architecture/data-model.md) |
 | Team execution | [Setup](docs/development/getting-started.md) · [Roadmap](docs/development/roadmap.md) · [Demo](docs/demo/judging.md) |
+| CREAO agents and API rehearsal | [Saved Sales + Revenue agents, IDs, setup and integration status](agents/creao/README.md) |
 
 ## How it works
 
@@ -107,7 +108,8 @@ Docs site (optional): `pip install -r requirements-docs.txt && mkdocs serve`.
 | Bank feed | **Simulated** fixture today; Capital One Nessie sandbox next |
 | Audience counts | **Real** on-device person detection (MediaPipe) on the display with `?camera=1`, sending aggregate counts only. There is no simulated crowd |
 | Operator sign-in and approvals by identity | **Real** (Convex Auth, email + password) |
-| CRS risk screening, CREAO agents, Claude explanations | **Not built yet** |
+| CREAO Sales + Revenue agents | **Saved on CREAO**; operator console has a simulated Sales → Revenue → Sales rehearsal through server-side Convex actions. Shared Convex CREAO credentials still need deployment configuration; [setup and status](agents/creao/README.md) |
+| CRS risk screening, Claude explanations | **Not built yet** |
 
 ## Key sponsor ambitions
 

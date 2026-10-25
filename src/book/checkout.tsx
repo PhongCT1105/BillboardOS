@@ -40,11 +40,11 @@ export function PaymentCard(props: {
   const left = Math.max(0, hold.expiresAt - now);
 
   return (
-    <section aria-label="Payment" className="flex flex-col gap-[18px] rounded-xl border border-accent/70 bg-panel p-[22px]">
+    <section aria-label="Payment" className="flex flex-col gap-[18px] rounded-2xl bg-panel p-[22px]">
       <div className="flex flex-col gap-2.5">
         <div className="flex items-baseline justify-between gap-3">
           <span className="text-[13px] text-muted">Hold expires in</span>
-          <span className="tabular font-mono text-[28px] font-medium">{countdown(hold.expiresAt, now)}</span>
+          <span className="tabular text-[28px] font-medium">{countdown(hold.expiresAt, now)}</span>
         </div>
         <div
           role="progressbar"
@@ -60,7 +60,7 @@ export function PaymentCard(props: {
 
       <div className="flex flex-col gap-1.5 border-t border-line pt-[18px]">
         <span className="text-[13px] text-muted">You pay</span>
-        <span className="tabular font-mono text-[34px] font-medium tracking-tight">
+        <span className="tabular text-[34px] font-medium tracking-tight">
           {(hold.amountMinor / 100).toFixed(2)} <span className="text-lg text-muted">USDC</span>
         </span>
         <span className="text-[13px] leading-relaxed text-muted">Exactly {money(hold.amountMinor)}. 1 USDC is 1 US dollar, and nothing is rounded.</span>
@@ -74,17 +74,21 @@ export function PaymentCard(props: {
       </dl>
 
       <p role="status" className="flex items-center gap-2 text-sm">
-        <span aria-hidden="true" className="size-2 flex-none animate-pulse rounded-full bg-accent" />
+        <span aria-hidden="true" className="size-2 flex-none rounded-full bg-fg" />
         Waiting for payment. This page updates by itself when it arrives.
       </p>
 
       <div className="flex flex-col gap-2.5 border-t border-line pt-[18px]">
         <h3 className="text-sm font-semibold">Pay with x402</h3>
         <p className="text-[13px] leading-relaxed text-muted">
-          Send this request from an x402 wallet or buying agent. It answers with a 402 naming the price, network and receiving address; sign
-          and send it again to pay. Money moves only after Coinbase verifies the payment and the hold is checked once more.
+          Your buying agent pays this hold with its agent key (Dashboard, Agent keys, with the pay scope). The request answers with a 402
+          naming the price, network and receiving address; the agent signs and sends it again. Money moves only after Coinbase verifies the
+          payment and the hold is checked once more.
         </p>
-        <CopyField value={`POST ${SITE_URL}/purchases/${hold.holdId}`} label="Copy payment request" />
+        <CopyField
+          value={`curl -X POST ${SITE_URL}/purchases/${hold.holdId} -H "Authorization: Bearer $BILLBOARDOS_AGENT_KEY"`}
+          label="Copy payment request"
+        />
       </div>
 
       {props.onTerms && (
@@ -93,7 +97,7 @@ export function PaymentCard(props: {
             type="button"
             onClick={props.onBookOnTerms}
             disabled={props.busy}
-            className="min-h-11 rounded-lg border border-line px-4 text-[15px] font-medium hover:border-muted disabled:opacity-50"
+            className="min-h-11 rounded-full border border-line px-4 text-[15px] font-medium hover:border-muted disabled:opacity-50"
           >
             Book now, pay by invoice
           </button>

@@ -67,7 +67,7 @@ function Shell({ route }: { route: string }) {
             signedIn.workspaces.length > 0 && <HostNav route={route} />}
           {signedIn?.accountType === "customer" &&
             signedIn.companies.length > 0 && (
-              <nav className="flex items-center gap-1 text-sm">
+              <nav className="flex min-w-0 items-center gap-1 overflow-x-auto text-sm">
                 <NavLink
                   href="#/customer"
                   active={
@@ -179,7 +179,7 @@ function HostNav({ route }: { route: string }) {
   return (
     <nav
       aria-label="Host navigation"
-      className="flex items-center gap-1 text-sm"
+      className="flex min-w-0 items-center gap-1 overflow-x-auto text-sm"
     >
       <NavLink
         href="#/console"
@@ -250,7 +250,7 @@ function AccountMenu({ me }: { me: Me }) {
       <button
         type="button"
         onClick={() => void signOut()}
-        className="rounded-md border border-line px-3 py-1.5 text-muted transition-colors hover:text-fg"
+        className="shrink-0 rounded-md border border-line px-3 py-1.5 whitespace-nowrap text-muted transition-colors hover:text-fg"
       >
         Sign out
       </button>
@@ -266,7 +266,7 @@ function NavLink(props: {
   return (
     <a
       href={props.href}
-      className={`rounded-md px-3 py-1.5 transition-colors ${props.active ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
+      className={`rounded-md px-3 py-1.5 whitespace-nowrap transition-colors ${props.active ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
     >
       {props.children}
     </a>

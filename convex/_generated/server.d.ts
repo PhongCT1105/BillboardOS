@@ -30,6 +30,11 @@ import type { DataModel } from "./dataModel.js";
 type Env = {
   readonly CONVEX_CLOUD_URL: string;
   readonly CONVEX_SITE_URL: string;
+  readonly CREAO_API_BASE_URL: string | undefined;
+  readonly CREAO_REVENUE_AGENT_ID: string | undefined;
+  readonly CREAO_REVENUE_API_KEY: string | undefined;
+  readonly CREAO_SALES_AGENT_ID: string | undefined;
+  readonly CREAO_SALES_API_KEY: string | undefined;
   readonly INTERNAL_API_SECRET: string | undefined;
 };
 

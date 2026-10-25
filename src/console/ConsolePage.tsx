@@ -13,6 +13,7 @@ import { LiveAuctions } from "../auctions/LiveAuctions";
 import { NegotiationTimeline } from "../a2a/NegotiationTimeline";
 import { AutopilotPanel } from "../autopilot/AutopilotPanel";
 import { HostOverview } from "../demo/HostOverview";
+import { CreaoRehearsalPanel } from "./CreaoRehearsalPanel";
 
 const QUARTER_HOUR = 15 * 60 * 1000;
 
@@ -35,6 +36,7 @@ export function ConsolePage() {
           </p>
         </div>
         <AddScreenForm />
+        <CreaoRehearsalPanel />
       </main>
     );
   }
@@ -62,6 +64,9 @@ export function ConsolePage() {
         </div>
       )}
       <HostOverview />
+      <div className="mt-10">
+        <CreaoRehearsalPanel />
+      </div>
       <details
         className="demo-tools"
         onToggle={(e) => setShowTools(e.currentTarget.open)}

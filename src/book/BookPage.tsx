@@ -5,7 +5,7 @@ import { CheckIcon, WarningIcon } from "@phosphor-icons/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { HOLD_TTL_MS } from "../../convex/lib/constants";
-import { countdown, dayLabel, errorMessage, money, shortDate, timeOfDay, timeRange } from "../lib/format";
+import { dayLabel, errorMessage, money, shortDate, timeOfDay, timeRange } from "../lib/format";
 import { useHashParams, useNow } from "../lib/hooks";
 import { BidPanel } from "../auctions/BidPanel";
 import { explorerTxUrl, networkName, PaymentCard } from "./checkout";
@@ -61,7 +61,7 @@ export function BookPage() {
   if (!activeCampaign || creating) {
     return (
       <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-16 md:px-6">
-        <h1 className="text-[30px] font-semibold tracking-tight">{activeCampaign ? "New campaign" : "Start your first campaign"}</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{activeCampaign ? "New campaign" : "Start your first campaign"}</h1>
         <p className="mt-2 text-[15px] text-muted">Quotes, holds and bookings belong to a campaign. Only your company sees it.</p>
         <NewCampaignForm
           onCreated={(id) => {
@@ -76,7 +76,7 @@ export function BookPage() {
   const terms = advertisers?.find((a) => a._id === activeCampaign.advertiserId)?.paymentTerms;
 
   return (
-    <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-16 md:px-6">
+    <main className="mx-auto max-w-[1200px] px-4 pt-8 pb-32 md:px-6 lg:pb-16">
       <BookingFlow
         key={`${activeCampaign._id}:${billboard._id}`}
         billboard={billboard}
@@ -136,7 +136,7 @@ function NewCampaignForm(props: { onCreated: (id: Id<"campaigns">) => void; onCa
             inputMode="decimal"
             value={budget}
             onChange={(e) => setBudget(e.target.value)}
-            className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 font-mono text-fg"
+            className="min-h-11 rounded-md border border-line bg-panel px-3 py-2 tabular text-fg"
           />
         </label>
         <label className="flex flex-col gap-2 text-sm">
@@ -149,7 +149,7 @@ function NewCampaignForm(props: { onCreated: (id: Id<"campaigns">) => void; onCa
         <button
           type="submit"
           disabled={busy || !brief.trim()}
-          className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-accent-ink active:scale-[0.98] disabled:opacity-50"
+          className="min-h-11 rounded-full bg-fg px-5 text-sm font-semibold text-ink hover:bg-white active:scale-[0.98] disabled:opacity-50"
         >
           Create campaign
         </button>
@@ -229,7 +229,7 @@ function BookingFlow(props: {
   // A payment that arrived but couldn't book (late, wrong amount or asset) waits for the operator.
   const flagged = booked ? null : (receipt?.payments.find((p) => p.exception !== null) ?? null);
   const expired = hold !== null && !booked && now >= hold.expiresAt;
-  const step = booked ? 4 : hold ? 3 : quote ? 2 : 1;
+  const step = booked ? 4 : hold ? 3 : 1;
 
   // Slots preselected from an alert: drop any that sold meanwhile; auctioned ones go to the bid panel.
   const reconciled = useRef(props.initialSlots.length === 0);
@@ -253,7 +253,7 @@ function BookingFlow(props: {
           ? `${gone} slot${gone === 1 ? " from your alert has" : "s from your alert have"} sold since; the rest are selected.`
           : hot
             ? "This slot is in a live auction: bid below."
-            : "Slots from your alert are selected. Get a quote to lock today's price.",
+            : "Slots from your alert are selected. Hold them to lock today's price.",
     );
   }, [slots, auctions, available, auctionSlotIds, props.initialSlots]);
 
@@ -318,23 +318,14 @@ function BookingFlow(props: {
     setNotice(explain ? { slotId, moved: false } : null);
   }
 
-  const getQuote = () =>
+  // Holding is free and short, so one click quotes and holds: the exact price arrives with the hold.
+  const holdSelected = () =>
     run(async () => {
       try {
-        setQuote(await createQuote({ campaignId: campaign._id, slotIds: selected, actor: "buyer:web" }));
-      } catch (err) {
-        const slotId = auctionSlotFrom(err, auctions);
-        if (!slotId) throw err;
-        bidOn(slotId, true);
-      }
-    });
-
-  const placeHold = () =>
-    run(async () => {
-      if (!quote) return;
-      const key = crypto.randomUUID();
-      try {
-        setHold(await createHold({ quoteId: quote.quoteId, idempotencyKey: key, actor: "buyer:web" }));
+        const fresh = await createQuote({ campaignId: campaign._id, slotIds: selected, actor: "buyer:web" });
+        setQuote(fresh);
+        const key = crypto.randomUUID();
+        setHold(await createHold({ quoteId: fresh.quoteId, idempotencyKey: key, actor: "buyer:web" }));
         setHoldKey(key);
       } catch (err) {
         const slotId = auctionSlotFrom(err, auctions);
@@ -342,6 +333,13 @@ function BookingFlow(props: {
         bidOn(slotId, true);
       }
     });
+
+  function clearSelection() {
+    setSelected([]);
+    setQuote(null);
+    setNotice(null);
+    setPreselectNote(null);
+  }
 
   const cancelHold = () =>
     run(async () => {
@@ -355,6 +353,17 @@ function BookingFlow(props: {
       if (!hold || !holdKey) return;
       setInvoice(await confirmOnTerms({ holdId: hold.holdId, idempotencyKey: holdKey }));
     });
+
+  const selectedSlots = upcoming.filter((s) => selected.includes(s._id));
+  const selectionEstimate = selectedSlots.every((s) => estimateBySlot.has(s._id))
+    ? selectedSlots.reduce((sum, s) => sum + Math.round((estimateBySlot.get(s._id) ?? 0) / 100) * 100, 0)
+    : null;
+
+  // The screen's finding: where today's price peaks and bottoms out, from the live estimates.
+  const priced = available.filter((s) => estimateBySlot.has(s._id));
+  const priceOf = (s: Slot) => estimateBySlot.get(s._id) ?? 0;
+  const peak = priced.reduce<Slot | null>((best, s) => (!best || priceOf(s) > priceOf(best) ? s : best), null);
+  const low = priced.reduce<Slot | null>((best, s) => (!best || priceOf(s) < priceOf(best) ? s : best), null);
 
   const noticeSlot = notice ? (slots ?? []).find((s) => s._id === notice.slotId) : undefined;
   const noticeTime = noticeSlot ? timeOfDay(noticeSlot.startAt) : "That slot";
@@ -379,8 +388,27 @@ function BookingFlow(props: {
   return (
     <div className="flex flex-col gap-7">
       <Stepper current={step} />
+      {/* On a phone the selection card sits below the whole grid, so its action rides along at the bottom. */}
+      {!hold && !auctionSlot && selectedSlots.length > 0 && (
+        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-panel px-4 py-3 lg:hidden">
+          <div className="mx-auto flex max-w-[1200px] flex-col gap-2">
+            {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm">
+                <span className="font-medium">
+                  {selectedSlots.length} {selectedSlots.length === 1 ? "slot" : "slots"}
+                </span>
+                {selectionEstimate !== null && <span className="tabular text-muted">, about ${selectionEstimate / 100}</span>}
+              </p>
+              <button type="button" onClick={holdSelected} disabled={busy} className={PRIMARY_BUTTON}>
+                {holdLabel(selectedSlots.length, busy)}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="flex flex-col gap-2">
-        <h1 className="text-[30px] font-semibold tracking-tight">
+        <h1 className="text-2xl font-semibold tracking-tight">
           {!hold ? `Book ${billboard.name}` : flagged ? "Payment under review" : expired ? "Hold expired" : "Slots held for you"}
         </h1>
         <p className="max-w-[640px] text-[15px] leading-relaxed text-muted">
@@ -392,12 +420,18 @@ function BookingFlow(props: {
                 ? "The slots went back on sale."
                 : "Nobody else can buy them until the hold runs out. Pay before then to book."}
         </p>
+        {!hold && peak && low && peak._id !== low._id && (
+          <p className="text-[15px]">
+            Busiest at <span className="tabular">{timeOfDay(peak.startAt)} ({estimateLabel(estimateBySlot.get(peak._id) ?? 0)})</span>
+            {"; "}cheapest at <span className="tabular">{timeOfDay(low.startAt)} ({estimateLabel(estimateBySlot.get(low._id) ?? 0)})</span>
+          </p>
+        )}
       </header>
 
       <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_400px]">
         <section className="flex min-w-0 flex-col gap-5" aria-label={hold ? "Held slots" : "Available slots"}>
           {hold ? (
-            <HeldSlots hold={hold} slots={heldSlots} />
+            <HeldSlots hold={hold} quote={quote} slots={heldSlots} />
           ) : (
             <>
               <Pickers
@@ -425,7 +459,7 @@ function BookingFlow(props: {
 
         <aside className="flex flex-col gap-6 lg:sticky lg:top-6 lg:self-start">
           {!hold && notice && (
-            <div role="status" className="flex flex-col gap-3 rounded-xl border border-accent/60 bg-panel p-4 text-sm">
+            <div role="status" className="flex flex-col gap-3 rounded-2xl bg-raised p-4 text-sm">
               <p>
                 {noticeTime} just went to auction
                 {notice.moved ? ", so we took it out of your selection." : ". Bid on it below, or pick other slots."}
@@ -434,7 +468,7 @@ function BookingFlow(props: {
                 <button
                   type="button"
                   onClick={() => bidOn(notice.slotId, false)}
-                  className="min-h-11 self-start rounded-lg bg-accent px-4 text-sm font-semibold text-accent-ink active:scale-[0.98]"
+                  className="min-h-11 self-start rounded-full border border-line px-4 text-sm font-medium hover:border-muted active:scale-[0.98]"
                 >
                   Bid on it
                 </button>
@@ -461,14 +495,12 @@ function BookingFlow(props: {
           ) : auctionSlot ? (
             <BidPanel slotId={auctionSlot} campaignId={campaign._id} onTerms={props.onTerms} />
           ) : (
-            <QuoteCard
-              selectedSlots={upcoming.filter((s) => selected.includes(s._id))}
+            <SelectionCard
+              selectedSlots={selectedSlots}
               estimates={estimateBySlot}
-              quote={quote}
-              now={now}
               busy={busy}
-              onQuote={getQuote}
-              onHold={placeHold}
+              onHold={holdSelected}
+              onClear={clearSelection}
             />
           )}
           <CreativeCard campaign={campaign} />
@@ -500,15 +532,9 @@ function Stepper({ current }: { current: number }) {
           <li
             key={label}
             aria-current={isCurrent ? "step" : undefined}
-            className={`flex items-center gap-2 ${isCurrent ? "font-medium text-fg" : done ? "text-muted" : "text-faint"}`}
+            className={`flex items-center gap-1.5 ${isCurrent ? "font-medium text-fg" : done ? "text-muted" : "text-faint"}`}
           >
-            {done ? (
-              <Mark mark="done" />
-            ) : isCurrent ? (
-              <span className="flex size-[22px] items-center justify-center rounded-full bg-accent text-xs font-semibold text-accent-ink">{n}</span>
-            ) : (
-              <span className="flex size-[22px] items-center justify-center rounded-full border border-line text-xs">{n}</span>
-            )}
+            {done && <CheckIcon size={12} weight="bold" aria-hidden="true" />}
             {label}
           </li>
         );
@@ -529,8 +555,8 @@ function Mark({ mark }: { mark: MarkKind }) {
   }
   if (mark === "active") {
     return (
-      <span role="img" aria-label="In progress" className="flex size-[22px] flex-none items-center justify-center rounded-full border-2 border-accent">
-        <span className="size-1.5 rounded-full bg-accent" />
+      <span role="img" aria-label="In progress" className="flex size-[22px] flex-none items-center justify-center rounded-full border-2 border-fg">
+        <span className="size-1.5 rounded-full bg-fg" />
       </span>
     );
   }
@@ -586,7 +612,7 @@ function Pickers(props: {
       <button
         type="button"
         onClick={props.onNewCampaign}
-        className="min-h-11 rounded-md border border-line px-3 text-sm text-muted hover:border-muted hover:text-fg"
+        className="min-h-11 rounded-full border border-line px-4 text-sm text-muted hover:border-muted hover:text-fg"
       >
         New campaign
       </button>
@@ -624,6 +650,7 @@ function SlotPicker(props: {
   const anyAuction = slots.some((s) => s.state === "available" && props.auctionSlotIds.has(s._id));
   const info = new Map((props.outlook?.slots ?? []).map((o) => [o.slotId, o]));
   const earlier = (props.outlook?.slots ?? []).filter((o) => o.startAt <= props.now);
+  const maxEstimate = Math.max(0, ...props.estimates.values());
 
   return (
     <div className="flex flex-col gap-5 border-t border-line pt-5">
@@ -631,9 +658,10 @@ function SlotPicker(props: {
         <h2 className="text-[17px] font-semibold">Next 12 hours</h2>
         <ul aria-label="Legend" className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted">
           <li className="flex items-center gap-1.5"><span aria-hidden="true" className="size-2.5 rounded-[3px] border border-line bg-panel" />Open</li>
-          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="size-2.5 rounded-[3px] border border-accent bg-accent/15" />Selected</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="size-2.5 rounded-[3px] bg-raised ring-1 ring-fg" />Selected</li>
           <li className="flex items-center gap-1.5"><span aria-hidden="true" className="size-2.5 rounded-[3px] border border-line bg-ink" />Taken</li>
-          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="size-2.5 rounded-[3px] border border-dashed border-accent/70 bg-panel" />Auction</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="size-2.5 rounded-[3px] border border-dashed border-muted bg-panel" />Auction</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden="true" className="h-[3px] w-3 rounded-full bg-accent" />Live price</li>
         </ul>
       </div>
       {earlier.length > 0 && <EarlierAndNow slots={earlier} now={props.now} />}
@@ -648,6 +676,7 @@ function SlotPicker(props: {
                 slot={s}
                 estimate={props.estimates.get(s._id)}
                 info={info.get(s._id)}
+                maxEstimate={maxEstimate}
                 selected={props.selected.includes(s._id) || props.auctionSlot === s._id}
                 auction={props.auctionSlotIds.has(s._id)}
                 onToggle={() => props.onToggle(s._id)}
@@ -657,7 +686,7 @@ function SlotPicker(props: {
         </div>
       ))}
       <p className="text-[13px] leading-relaxed text-muted">
-        {props.selected.length} of {MAX_SLOTS} selected. Prices marked ~ are live estimates; your quote has the exact price.
+        {props.selected.length} of {MAX_SLOTS} selected. Prices marked ~ are live estimates; holding shows your exact price.
       </p>
       {anyAuction && (
         <p className="text-[13px] leading-relaxed text-muted">
@@ -704,166 +733,162 @@ function EarlierAndNow({ slots, now }: { slots: OutlookSlot[]; now: number }) {
   );
 }
 
-function SlotCell(props: { slot: Slot; estimate: number | undefined; info: OutlookSlot | undefined; selected: boolean; auction: boolean; onToggle: () => void }) {
+/** One 15-minute slot. Its live price is the orange bar along the foot, scaled to the day's highest, so the grid reads as the day's price curve. */
+function SlotCell(props: {
+  slot: Slot;
+  estimate: number | undefined;
+  maxEstimate: number;
+  info: OutlookSlot | undefined;
+  selected: boolean;
+  auction: boolean;
+  onToggle: () => void;
+}) {
   const { slot, info } = props;
   const people = info?.expectedPeople != null ? `~${Math.round(info.expectedPeople)} ${Math.round(info.expectedPeople) === 1 ? "person" : "people"}` : null;
   if (slot.state !== "available") {
     const held = slot.state === "held";
     return (
-      <div className="flex min-h-16 flex-col gap-1 rounded-lg border border-line bg-ink px-3 py-2.5 text-faint">
-        <span className={`tabular font-mono text-[15px] ${held ? "" : "line-through"}`}>{timeOfDay(slot.startAt)}</span>
+      <div className="flex min-h-16 flex-col gap-1 rounded-lg border border-line px-3 py-2.5 text-faint">
+        <span className={`tabular text-[15px] ${held ? "" : "line-through"}`}>{timeOfDay(slot.startAt)}</span>
         <span className="text-xs">{held ? "On hold" : info?.bookedBy ? `Booked · ${info.bookedBy}` : "Taken"}</span>
       </div>
     );
   }
+  const share = props.estimate !== undefined && props.maxEstimate > 0 ? props.estimate / props.maxEstimate : 0;
   return (
     <button
       type="button"
       onClick={props.onToggle}
       aria-pressed={props.selected}
-      className={`flex min-h-16 flex-col gap-1 rounded-lg border px-3 py-2.5 text-left transition-transform active:scale-[0.97] ${
+      className={`relative flex min-h-16 flex-col gap-1 rounded-lg px-3 pt-2.5 pb-4 text-left transition-[transform,background-color] active:scale-[0.97] ${
         props.selected
-          ? "border-accent bg-accent/15"
+          ? "bg-raised ring-1 ring-fg"
           : props.auction
-            ? "border-dashed border-accent/70 bg-panel hover:border-accent"
-            : "border-line bg-panel hover:border-muted"
+            ? "bg-panel outline-1 -outline-offset-1 outline-muted outline-dashed hover:bg-raised"
+            : "bg-panel hover:bg-raised"
       }`}
     >
-      <span className="tabular font-mono text-[15px]">{timeOfDay(slot.startAt)}</span>
-      <span className={`text-xs ${props.auction ? "font-medium text-accent" : props.selected ? "text-fg" : "text-muted"}`}>
+      <span className="tabular text-[15px] font-medium">{timeOfDay(slot.startAt)}</span>
+      <span className={`tabular text-xs ${props.auction || props.selected ? "text-fg" : "text-muted"}`}>
         {props.auction
           ? props.selected
             ? "Bidding"
             : "Auction · bid"
-          : props.selected
-            ? "Selected"
-            : props.estimate !== undefined
-              ? estimateLabel(props.estimate)
-              : "Open"}
+          : props.estimate !== undefined
+            ? estimateLabel(props.estimate)
+            : "Open"}
       </span>
       {people && <span className="text-[11px] text-faint">{people}{info?.offeredTo ? " · agents offered" : ""}</span>}
+      {!props.auction && share > 0 && (
+        <span
+          aria-hidden="true"
+          className="absolute bottom-2 left-3 h-[3px] rounded-full bg-accent"
+          style={{ width: `calc((100% - 24px) * ${share.toFixed(3)})` }}
+        />
+      )}
     </button>
   );
 }
 
-function QuoteCard(props: {
+/** The screen's one primary button: inverted, so it is the only white fill on the page. */
+const PRIMARY_BUTTON =
+  "flex min-h-11 items-center justify-center rounded-full bg-fg px-5 text-[15px] font-semibold text-ink transition-[transform,background-color] hover:bg-white active:scale-[0.98] disabled:opacity-50";
+
+const holdLabel = (count: number, busy: boolean) => (busy ? "Holding" : count === 1 ? "Hold this slot" : `Hold these ${count} slots`);
+
+/** Before holding: the picked slots with their live estimates. One click then holds them and fixes the exact price. */
+function SelectionCard(props: {
   selectedSlots: Slot[];
   estimates: Map<Id<"slots">, number>;
-  quote: Quote | null;
-  now: number;
   busy: boolean;
-  onQuote: () => void;
   onHold: () => void;
+  onClear: () => void;
 }) {
-  const { quote, now } = props;
-  const quoteExpired = quote !== null && now >= quote.expiresAt;
-  const accountLine = quote?.pricingBasis.find((l) => l.startsWith("Price for your account"));
-  const estimated = props.selectedSlots.map((s) => props.estimates.get(s._id));
-  const estimatedTotal = estimated.every((e) => e !== undefined) ? estimated.reduce<number>((sum, e) => sum + (e ?? 0), 0) : null;
-  const primary =
-    "flex min-h-12 items-center justify-center rounded-lg bg-accent px-4 text-[15px] font-semibold text-accent-ink transition-transform active:scale-[0.98] disabled:opacity-50";
+  const { selectedSlots } = props;
+  const estimated = selectedSlots.map((s) => props.estimates.get(s._id));
+  // Summed from the whole-dollar estimates as shown, so the total matches the rows above it.
+  const estimatedTotal = estimated.every((e) => e !== undefined)
+    ? estimated.reduce<number>((sum, e) => sum + Math.round((e ?? 0) / 100) * 100, 0)
+    : null;
+  const count = selectedSlots.length;
 
   return (
-    <section className="flex flex-col gap-4 rounded-xl border border-line bg-panel p-5">
+    <section aria-label="Your selection" className="flex flex-col gap-4 rounded-2xl bg-panel p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-[17px] font-semibold">Your quote</h2>
-        {quote && (
-          <span className="rounded-full border border-line px-2.5 py-1 text-xs text-muted">
-            {quoteExpired ? (
-              "Expired"
-            ) : (
-              <>
-                Valid for <span className="tabular font-mono text-fg">{countdown(quote.expiresAt, now)}</span>
-              </>
-            )}
-          </span>
+        <h2 className="text-[17px] font-semibold">Your selection</h2>
+        {count > 0 && (
+          <button type="button" onClick={props.onClear} className="min-h-8 text-sm text-muted underline-offset-[3px] hover:text-fg hover:underline">
+            Clear
+          </button>
         )}
       </div>
-
-      {quote ? (
-        <>
-          <ul className="flex flex-col gap-2 text-sm">
-            {quote.priceBreakdown.map((p) => (
-              <li key={p.slotId} className="flex justify-between gap-3">
-                <span className="text-muted">{timeOfDay(p.slotStartAt)}</span>
-                <span className="tabular font-mono">{money(p.screenMinor)}</span>
-              </li>
-            ))}
-          </ul>
-          {accountLine && <p className="text-[13px] text-muted">{accountLine}</p>}
-          <div className="flex flex-wrap items-baseline justify-between gap-3 border-t border-line pt-3.5">
-            <span className="text-sm text-muted">
-              Total · {quote.slotIds.length} {quote.slotIds.length === 1 ? "slot" : "slots"}
-            </span>
-            <span className="tabular font-mono text-[28px] font-medium tracking-tight">{money(quote.amountMinor)}</span>
-          </div>
-          {quoteExpired ? (
-            <button type="button" onClick={props.onQuote} disabled={props.busy} className={primary}>
-              Get a fresh price
-            </button>
-          ) : (
-            <button type="button" onClick={props.onHold} disabled={props.busy} className={primary}>
-              Hold these slots for {HOLD_TTL_MS / 60_000} minutes
-            </button>
-          )}
-          <p className="text-[13px] leading-relaxed text-faint">Holding keeps the slots for you only. Nothing is charged until you pay.</p>
-          <details className="border-t border-line pt-3.5">
-            <summary className="cursor-pointer text-sm font-medium">Why this price</summary>
-            <PriceBreakdown quote={quote} />
-          </details>
-        </>
-      ) : props.selectedSlots.length === 0 ? (
-        <p className="text-sm leading-relaxed text-muted">Pick a slot to see its exact price.</p>
+      {count === 0 ? (
+        <p className="text-sm leading-relaxed text-muted">Pick up to {MAX_SLOTS} slots in the grid. Each one shows its live price.</p>
       ) : (
         <>
           <ul className="flex flex-col gap-2 text-sm">
-            {props.selectedSlots.map((s, i) => (
+            {selectedSlots.map((s, i) => (
               <li key={s._id} className="flex justify-between gap-3">
-                <span className="tabular font-mono text-muted">{timeRange(s.startAt, s.endAt)}</span>
-                {estimated[i] !== undefined && <span className="tabular font-mono text-muted">~{money(estimated[i])}</span>}
+                <span className="tabular">{timeRange(s.startAt, s.endAt)}</span>
+                {estimated[i] !== undefined && <span className="tabular text-muted">{estimateLabel(estimated[i])}</span>}
               </li>
             ))}
           </ul>
           {estimatedTotal !== null && (
             <div className="flex flex-wrap items-baseline justify-between gap-3 border-t border-line pt-3.5">
               <span className="text-sm text-muted">Estimated total</span>
-              <span className="tabular font-mono text-xl">~{money(estimatedTotal)}</span>
+              <span className="tabular text-[28px] font-medium tracking-tight">{estimateLabel(estimatedTotal)}</span>
             </div>
           )}
-          <button type="button" onClick={props.onQuote} disabled={props.busy} className={primary}>
-            Get exact price
+          <button type="button" onClick={props.onHold} disabled={props.busy} className={PRIMARY_BUTTON}>
+            {holdLabel(count, props.busy)}
           </button>
+          <p className="text-[13px] leading-relaxed text-faint">
+            Holding is free for {HOLD_TTL_MS / 60_000} minutes and keeps the slots for you only. You see the exact price next; nothing is
+            charged until you pay.
+          </p>
         </>
       )}
     </section>
   );
 }
 
-function HeldSlots({ hold, slots }: { hold: Hold; slots: Slot[] }) {
+function HeldSlots({ hold, quote, slots }: { hold: Hold; quote: Quote | null; slots: Slot[] }) {
   const ordered = [...slots].sort((a, b) => a.startAt - b.startAt);
+  const priceOf = new Map(quote?.priceBreakdown.map((p) => [p.slotId, p.screenMinor]) ?? []);
+  const accountLine = quote?.pricingBasis.find((l) => l.startsWith("Price for your account"));
   return (
-    <section className="flex flex-col gap-3.5 rounded-xl border border-line bg-panel p-5">
+    <section className="flex flex-col gap-3.5 rounded-2xl bg-panel p-5">
       <h2 className="text-[17px] font-semibold">Held slots</h2>
       <ul className="flex flex-col text-sm">
         {ordered.map((s) => (
-          <li key={s._id} className="flex flex-wrap justify-between gap-3 border-t border-line py-2.5">
-            <span>{dayLabel(s.startAt)}</span>
-            <span className="tabular font-mono">{timeRange(s.startAt, s.endAt)}</span>
+          <li key={s._id} className="flex flex-wrap items-baseline justify-between gap-3 border-t border-line py-2.5">
+            <span>
+              {dayLabel(s.startAt)}, <span className="tabular">{timeRange(s.startAt, s.endAt)}</span>
+            </span>
+            {priceOf.has(s._id) && <span className="tabular">{money(priceOf.get(s._id) ?? 0)}</span>}
           </li>
         ))}
         <li className="flex items-baseline justify-between gap-3 border-t border-line pt-3">
           <span className="text-muted">Total</span>
-          <span className="tabular font-mono text-[17px] font-medium">{money(hold.amountMinor)}</span>
+          <span className="tabular text-[17px] font-medium">{money(hold.amountMinor)}</span>
         </li>
       </ul>
-      <p className="text-[13px] text-faint">This price is locked while the hold lasts.</p>
+      {accountLine && <p className="text-[13px] text-muted">{accountLine}</p>}
+      <p className="text-[13px] text-faint">This is your exact price, locked while the hold lasts.</p>
+      {quote && (
+        <details className="border-t border-line pt-3.5">
+          <summary className="cursor-pointer text-sm font-medium">Why this price</summary>
+          <PriceBreakdown quote={quote} />
+        </details>
+      )}
     </section>
   );
 }
 
 function ExpiredCard({ onStartOver }: { onStartOver: () => void }) {
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-line bg-panel p-5">
+    <section className="flex flex-col gap-3 rounded-2xl bg-panel p-5">
       <p className="text-sm leading-relaxed text-muted">Pick slots again to get a fresh quote.</p>
       <p className="text-[13px] leading-relaxed text-faint">
         Already paid? A payment that lands after the hold ends is never booked automatically. The operator reviews it, then holds equivalent
@@ -872,7 +897,7 @@ function ExpiredCard({ onStartOver }: { onStartOver: () => void }) {
       <button
         type="button"
         onClick={onStartOver}
-        className="min-h-11 self-start rounded-lg border border-line px-4 text-sm font-medium hover:border-muted"
+        className="min-h-11 self-start rounded-full border border-line px-4 text-sm font-medium hover:border-muted"
       >
         Start over
       </button>
@@ -947,7 +972,7 @@ function FlaggedCard(props: { payment: ReceiptPayment; exception: PaymentExcepti
   const { payment, exception } = props;
   const copy = flagCopy(exception.kind);
   return (
-    <section className="flex flex-col gap-5 rounded-xl border border-danger/40 bg-panel p-[22px]">
+    <section className="flex flex-col gap-5 rounded-2xl bg-panel p-[22px]">
       <div className="flex items-start gap-3">
         <Mark mark="problem" />
         <div className="flex min-w-0 flex-col gap-1.5">
@@ -957,7 +982,7 @@ function FlaggedCard(props: { payment: ReceiptPayment; exception: PaymentExcepti
       </div>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-2.5 border-t border-line pt-4 text-[13px]">
         <dt className="text-muted">Received</dt>
-        <dd className="tabular font-mono">{money(payment.amountMinor)}</dd>
+        <dd className="tabular">{money(payment.amountMinor)}</dd>
         <dt className="text-muted">Payment</dt>
         <dd>{payment.provider === "x402" ? <TransactionLink payment={payment} /> : paymentLabel(payment)}</dd>
         <dt className="text-muted">Status</dt>
@@ -977,7 +1002,7 @@ function FlaggedCard(props: { payment: ReceiptPayment; exception: PaymentExcepti
       <button
         type="button"
         onClick={props.onStartOver}
-        className="min-h-11 self-start rounded-lg border border-line px-4 text-sm font-medium hover:border-muted"
+        className="min-h-11 self-start rounded-full border border-line px-4 text-sm font-medium hover:border-muted"
       >
         Back to slots
       </button>
@@ -1010,7 +1035,7 @@ function BookedView(props: {
           <CheckIcon size={22} weight="bold" className="text-ok" />
         </span>
         <div className="flex min-w-0 flex-col gap-1.5">
-          <h1 className="text-[30px] font-semibold tracking-tight">You're booked on {billboard.name}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">You're booked on {billboard.name}</h1>
           {first && last && (
             <p className="text-[15px] text-muted">
               {dayLabel(first.startAt)} · {timeRange(first.startAt, last.endAt)} · {slots.length} {slots.length === 1 ? "slot" : "slots"}
@@ -1020,15 +1045,15 @@ function BookedView(props: {
       </header>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_400px]">
-        <section aria-label="Receipt" className="flex min-w-0 flex-col gap-4 rounded-xl border border-line bg-panel p-[22px]">
+        <section aria-label="Receipt" className="flex min-w-0 flex-col gap-4 rounded-2xl bg-panel p-[22px]">
           <h2 className="text-[17px] font-semibold">Receipt</h2>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-5 gap-y-3 text-sm">
             <dt className="text-muted">Booking</dt>
             <dd className="font-mono break-all">{bookingIds.join(", ") || "Recording"}</dd>
             <dt className="text-muted">Slots</dt>
-            <dd className="tabular font-mono">{slots.map((s) => timeOfDay(s.startAt)).join(", ")}</dd>
+            <dd className="tabular">{slots.map((s) => timeOfDay(s.startAt)).join(", ")}</dd>
             <dt className="text-muted">Amount</dt>
-            <dd className="tabular font-mono">{money(hold.amountMinor)}</dd>
+            <dd className="tabular">{money(hold.amountMinor)}</dd>
             <dt className="text-muted">Payment</dt>
             <dd>
               {invoice
@@ -1065,11 +1090,11 @@ function BookedView(props: {
           href={`#/player/${billboard._id}`}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex min-h-11 items-center rounded-lg bg-accent px-5 text-[15px] font-semibold text-accent-ink"
+          className="inline-flex min-h-11 items-center rounded-full bg-fg px-5 text-[15px] font-semibold text-ink hover:bg-white"
         >
           Watch the screen
         </a>
-        <button type="button" onClick={props.onBookMore} className="min-h-11 rounded-lg border border-line px-5 text-[15px] font-medium hover:border-muted">
+        <button type="button" onClick={props.onBookMore} className="min-h-11 rounded-full border border-line px-5 text-[15px] font-medium hover:border-muted">
           Book more time
         </button>
       </div>
@@ -1105,7 +1130,7 @@ function AdProgress({ campaign, slots }: { campaign: Campaign; slots: Slot[] }) 
   ];
 
   return (
-    <section aria-label="Your ad" className="flex min-w-0 flex-col gap-4 rounded-xl border border-line bg-panel p-[22px]">
+    <section aria-label="Your ad" className="flex min-w-0 flex-col gap-4 rounded-2xl bg-panel p-[22px]">
       <h2 className="text-[17px] font-semibold">Your ad</h2>
       <ol className="flex flex-col">
         {steps.map((s) => (
@@ -1138,7 +1163,7 @@ const CREATIVE_CHIP: Record<Campaign["creativeStatus"], { label: string; classNa
 function CreativeCard({ campaign }: { campaign: Campaign }) {
   const chip = CREATIVE_CHIP[campaign.creativeStatus];
   return (
-    <section aria-label="Your ad" className="flex flex-col gap-4 rounded-xl border border-line bg-panel p-5">
+    <section aria-label="Your ad" className="flex flex-col gap-4 rounded-2xl bg-panel p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-[17px] font-semibold">Your ad</h2>
         <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${chip.className}`}>{chip.label}</span>
@@ -1218,13 +1243,13 @@ function PriceBreakdown({ quote }: { quote: Quote }) {
         <div key={slot.slotId}>
           <div className="flex items-baseline justify-between text-sm">
             <span className="font-medium">Slot at {timeOfDay(slot.slotStartAt)}</span>
-            <span className="tabular font-mono">{money(slot.screenMinor)}</span>
+            <span className="tabular">{money(slot.screenMinor)}</span>
           </div>
           <ul className="mt-2 flex flex-col gap-1.5 text-[13px]">
             {slot.stages.map((st) => (
               <li key={st.key} className="grid grid-cols-[96px_56px_minmax(0,1fr)] gap-2">
                 <span className="text-muted">{STAGE_LABEL[st.key]}</span>
-                <span className={`tabular font-mono ${st.effective === 1 ? "text-faint" : "text-fg"}`}>x{st.effective.toFixed(2)}</span>
+                <span className={`tabular ${st.effective === 1 ? "text-faint" : "text-fg"}`}>x{st.effective.toFixed(2)}</span>
                 <span className={st.effective === 1 ? "text-faint" : "text-muted"}>{st.explanation}</span>
               </li>
             ))}
